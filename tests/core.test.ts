@@ -30,8 +30,8 @@ const baseReading = {
 };
 
 const catalog = new ExactAliasCatalogResolver([
-  { code: "100", name: "Hemograma completo", aliases: ["Hemograma"], priceBs: 50, active: true },
-  { code: "200", name: "TSH", aliases: [], priceBs: 70, active: true }
+  { id: "uuid-100", code: "100", name: "Hemograma completo", normalizedName: "hemograma completo", normalizedAliases: ["hemograma"], priceBs: 50, active: true },
+  { id: "uuid-200", code: "200", name: "TSH", normalizedName: "tsh", normalizedAliases: [], priceBs: 70, active: true }
 ]);
 
 describe("PlusMedikCore", () => {

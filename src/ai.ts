@@ -2,6 +2,7 @@ import { ApiError, GoogleGenAI } from "@google/genai";
 import OpenAI from "openai";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
+import { cachedAiCall, recordAiUsage, usageFromChatCompletions, usageFromGemini, usageFromResponses } from "./cache.js";
 import type { JudgeDecision, VisionReading } from "./types.js";
 
 const observationSchema = z.object({
@@ -122,7 +123,7 @@ Usa "notes" para cualquier observación relevante (imagen cortada, ilegible, etc
 `;
 
 const UNAVAILABLE_RETRY_DELAYS_MS = [3000, 6000, 12000];
-const INVALID_RESPONSE_RETRIES = 2;
+const INVALID_RESPONSE_RETRIES = 1;
 
 function isUnavailable(error: unknown): boolean {
   return (error instanceof ApiError || error instanceof OpenAI.APIError) && error.status === 503;
@@ -148,12 +149,17 @@ async function readImageWithGeminiViaOpenRouter(
   apiKey: string
 ): Promise<SimpleReading> {
   const model = process.env.OPENROUTER_GEMINI_MODEL ?? "google/gemini-3.8-flash";
+  const reasoningEffort = process.env.OPENROUTER_GEMINI_REASONING ?? "medium";
+  if (!["low", "medium", "high"].includes(reasoningEffort)) {
+    throw new Error(`OPENROUTER_GEMINI_REASONING inválido: "${reasoningEffort}" (usa low, medium o high)`);
+  }
   const client = new OpenAI({ apiKey, baseURL: "https://openrouter.ai/api/v1" });
   const { $schema: _ignored, ...schema } = z.toJSONSchema(simpleReadingSchema);
   const request = {
     model,
     // OpenRouter reserva crédito por el máximo de salida; sin tope pide 65536 y falla con saldo bajo.
-    max_tokens: 8192,
+    max_tokens: 6144,
+    reasoning: { effort: reasoningEffort },
     messages: [{
       role: "user" as const,
       content: [
@@ -167,23 +173,36 @@ async function readImageWithGeminiViaOpenRouter(
     }
   };
 
-  // Contenido que no se puede parsear/validar: se reintenta la misma petición (misma imagen, prompt y modelo).
-  for (let attempt = 0; ; attempt++) {
-    const response = await withUnavailableRetry(() => client.chat.completions.create(request));
-    const choice = response.choices[0];
-    try {
-      return simpleReadingSchema.parse(JSON.parse(choice?.message.content ?? "{}"));
-    } catch (error) {
-      if (attempt >= INVALID_RESPONSE_RETRIES) {
-        throw new Error(
-          `Respuesta inválida de OpenRouter tras ${attempt + 1} intentos (finish_reason=${choice?.finish_reason}, ` +
-            `completion_tokens=${response.usage?.completion_tokens}): ${(error as Error).message}\n` +
-            `Final del contenido: ${JSON.stringify((choice?.message.content ?? "").slice(-200))}`
-        );
+  const { messages: _image, ...params } = request;
+  return cachedAiCall({
+    label: "gemini-openrouter",
+    provider: "openrouter",
+    model,
+    imageBase64,
+    config: { prompt: simpleReaderInstructions, mimeType, params },
+    parse: (raw) => simpleReadingSchema.parse(raw),
+    // Contenido que no se puede parsear/validar: se reintenta la misma petición (misma imagen, prompt y modelo).
+    call: async () => {
+      for (let attempt = 0; ; attempt++) {
+        const response = await withUnavailableRetry(() => client.chat.completions.create(request));
+        const choice = response.choices[0];
+        const usage = usageFromChatCompletions(response.usage);
+        try {
+          return { value: simpleReadingSchema.parse(JSON.parse(choice?.message.content ?? "{}")), usage };
+        } catch (error) {
+          await recordAiUsage({ label: "gemini-openrouter", provider: "openrouter", model, usage, invalid: true });
+          if (attempt >= INVALID_RESPONSE_RETRIES) {
+            throw new Error(
+              `Respuesta inválida de OpenRouter tras ${attempt + 1} intentos (finish_reason=${choice?.finish_reason}, ` +
+                `completion_tokens=${response.usage?.completion_tokens}): ${(error as Error).message}\n` +
+                `Final del contenido: ${JSON.stringify((choice?.message.content ?? "").slice(-200))}`
+            );
+          }
+          console.error(`Respuesta inválida de OpenRouter (${(error as Error).message.split("\n")[0]}), reintento ${attempt + 1}/${INVALID_RESPONSE_RETRIES}...`);
+        }
       }
-      console.error(`Respuesta inválida de OpenRouter (${(error as Error).message.split("\n")[0]}), reintento ${attempt + 1}/${INVALID_RESPONSE_RETRIES}...`);
     }
-  }
+  });
 }
 
 // Primera conexión real: imagen completa -> Gemini -> JSON simple. Sin OCR, crops ni catálogo.
@@ -213,8 +232,21 @@ export async function readImageWithGemini(
     }
   };
 
-  const response = await withUnavailableRetry(() => ai.models.generateContent(request));
-  return simpleReadingSchema.parse(JSON.parse(response.text ?? "{}"));
+  return cachedAiCall({
+    label: "gemini-aistudio",
+    provider: "google-ai-studio",
+    model,
+    imageBase64,
+    config: { prompt: simpleReaderInstructions, mimeType, requestConfig: request.config },
+    parse: (raw) => simpleReadingSchema.parse(raw),
+    call: async () => {
+      const response = await withUnavailableRetry(() => ai.models.generateContent(request));
+      return {
+        value: simpleReadingSchema.parse(JSON.parse(response.text ?? "{}")),
+        usage: usageFromGemini(response.usageMetadata)
+      };
+    }
+  });
 }
 
 // Segundo lector independiente: mismo prompt, schema e imagen completa; nunca ve la respuesta de Gemini.
@@ -227,26 +259,42 @@ export async function readImageWithOpenAI(
   if (!apiKey) throw new Error("OPENAI_API_KEY is required (define it in .env)");
   const client = new OpenAI({ apiKey });
   const { $schema: _ignored, ...schema } = z.toJSONSchema(simpleReadingSchema);
-  const response = await client.responses.create({
+  const params = {
     model,
     reasoning: { effort: (process.env.OPENAI_READER_REASONING ?? "high") as "low" | "medium" | "high" | "xhigh" | "max" },
-    input: [{
-      role: "user",
-      content: [
-        { type: "input_text", text: simpleReaderInstructions },
-        { type: "input_image", image_url: `data:${mimeType};base64,${imageBase64}`, detail: "original" }
-      ]
-    }],
     text: {
       format: {
-        type: "json_schema",
+        type: "json_schema" as const,
         name: "prescription_simple_reading",
         strict: true,
         schema
       }
     }
+  };
+  return cachedAiCall({
+    label: "openai-reader",
+    provider: "openai",
+    model,
+    imageBase64,
+    config: { prompt: simpleReaderInstructions, mimeType, imageDetail: "original", params },
+    parse: (raw) => simpleReadingSchema.parse(raw),
+    call: async () => {
+      const response = await client.responses.create({
+        ...params,
+        input: [{
+          role: "user",
+          content: [
+            { type: "input_text", text: simpleReaderInstructions },
+            { type: "input_image", image_url: `data:${mimeType};base64,${imageBase64}`, detail: "original" }
+          ]
+        }]
+      });
+      return {
+        value: simpleReadingSchema.parse(JSON.parse(response.output_text)),
+        usage: usageFromResponses(response.usage)
+      };
+    }
   });
-  return simpleReadingSchema.parse(JSON.parse(response.output_text));
 }
 
 export class OpenAIReader implements VisionReader {

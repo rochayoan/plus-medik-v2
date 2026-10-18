@@ -17,3 +17,6 @@ benchmark-private/
 # Resultados locales
 benchmark-results/
 *.local.json
+
+# Cache local de respuestas de IA y registro de usage
+.cache/

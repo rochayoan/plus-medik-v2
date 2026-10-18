@@ -1,4 +1,4 @@
-import type { CatalogResolver } from "./catalog.js";
+import { uniqueMatchedStudies, type CatalogResolver } from "./catalog.js";
 import type { DisputeJudge, VisionReader } from "./ai.js";
 import { fuseIndependentReadings, normalizeStudyKey } from "./consensus.js";
 import { evaluateSafety } from "./safety.js";
@@ -55,14 +55,12 @@ export class PlusMedikCore {
       visualUncertaintyCount: fused.uncertain.length
     });
 
-    const matched = catalog.filter((r) => r.status === "MATCHED");
+    // Deduplicado por lab_tests.id: dos observaciones al mismo UUID son una sola línea y un solo cobro.
+    const matched = uniqueMatchedStudies(catalog);
     const quote = safety.decision === "AUTO_SAFE"
       ? {
-          lines: matched.map((r) => {
-            if (r.status !== "MATCHED") throw new Error("unreachable");
-            return { code: r.study.code, name: r.study.name, priceBs: r.study.priceBs };
-          }),
-          totalBs: matched.reduce((sum, r) => sum + (r.status === "MATCHED" ? r.study.priceBs : 0), 0),
+          lines: matched.map((study) => ({ id: study.id, code: study.code, name: study.name, priceBs: study.priceBs })),
+          totalBs: matched.reduce((sum, study) => sum + study.priceBs, 0),
           tariff: "PACIENTE" as const
         }
       : undefined;

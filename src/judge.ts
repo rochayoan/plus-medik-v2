@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { z } from "zod";
 import type { SimpleReading } from "./ai.js";
+import { cachedAiCall, usageFromResponses } from "./cache.js";
 import type { SimpleDispute, SimpleStudy } from "./consensus.js";
 
 const decisionSchema = z.object({
@@ -66,31 +67,46 @@ export async function judgeDisputesWithOpenAI(args: {
 
   const client = new OpenAI({ apiKey });
   const { $schema: _ignored, ...schema } = z.toJSONSchema(decisionsSchema);
-  const response = await client.responses.create({
+  const promptText = `${judgeInstructions}\nLectura readerA (Gemini):\n${JSON.stringify(gemini)}\n\n` +
+    `Lectura readerB (OpenAI):\n${JSON.stringify(openai)}\n\nDisputas a resolver:\n${JSON.stringify(disputes)}`;
+  const params = {
     model,
     reasoning: { effort: (process.env.OPENAI_JUDGE_REASONING ?? "high") as "low" | "medium" | "high" | "xhigh" | "max" },
-    input: [{
-      role: "user",
-      content: [
-        {
-          type: "input_text",
-          text: `${judgeInstructions}\nLectura readerA (Gemini):\n${JSON.stringify(gemini)}\n\n` +
-            `Lectura readerB (OpenAI):\n${JSON.stringify(openai)}\n\nDisputas a resolver:\n${JSON.stringify(disputes)}`
-        },
-        { type: "input_image", image_url: `data:${mimeType};base64,${imageBase64}`, detail: "original" }
-      ]
-    }],
     text: {
       format: {
-        type: "json_schema",
+        type: "json_schema" as const,
         name: "prescription_simple_judgement",
         strict: true,
         schema
       }
     }
-  });
+  };
 
-  const { decisions } = rawDecisionsSchema.parse(JSON.parse(response.output_text));
+  // Se cachea la respuesta cruda del modelo; applyJudgeDecisions se aplica siempre sobre ella.
+  const { decisions } = await cachedAiCall({
+    label: "openai-judge",
+    provider: "openai",
+    model,
+    imageBase64,
+    config: { prompt: promptText, mimeType, imageDetail: "original", params },
+    parse: (raw) => rawDecisionsSchema.parse(raw),
+    call: async () => {
+      const response = await client.responses.create({
+        ...params,
+        input: [{
+          role: "user",
+          content: [
+            { type: "input_text", text: promptText },
+            { type: "input_image", image_url: `data:${mimeType};base64,${imageBase64}`, detail: "original" }
+          ]
+        }]
+      });
+      return {
+        value: rawDecisionsSchema.parse(JSON.parse(response.output_text)),
+        usage: usageFromResponses(response.usage)
+      };
+    }
+  });
   return applyJudgeDecisions(disputes, decisions);
 }
 

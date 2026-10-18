@@ -65,9 +65,15 @@ export interface JudgeDecision {
 }
 
 export interface CatalogStudy {
-  code: string;
+  // lab_tests.id (UUID): única identidad estable del estudio.
+  id: string;
+  // Informativo; puede ser null. Nunca se usa para identidad ni matching.
+  code: string | null;
   name: string;
-  aliases: string[];
+  // lab_tests.normalized_name y lab_test_aliases.normalized_alias (matching exacto).
+  normalizedName: string;
+  normalizedAliases: string[];
+  // lab_tests.price_bs (tarifa Paciente).
   priceBs: number;
   active: boolean;
 }
@@ -94,7 +100,7 @@ export interface PipelineResult {
   catalog: CatalogResolution[];
   safety: SafetyDecision;
   quote?: {
-    lines: Array<{ code: string; name: string; priceBs: number }>;
+    lines: Array<{ id: string; code: string | null; name: string; priceBs: number }>;
     totalBs: number;
     tariff: "PACIENTE";
   };
