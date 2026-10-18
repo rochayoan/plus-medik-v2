@@ -9,6 +9,7 @@ coverage/
 # Datos privados / PHI / benchmarks reales
 private-data/*
 !private-data/.gitkeep
+!private-data/manifest.example.json
 benchmark-private/
 *.patient.*
 *.phi.*

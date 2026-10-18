@@ -1,0 +1,8 @@
+[
+  {
+    "id": "example-001",
+    "image": "./private-data/example-001.jpg",
+    "category": "TEXT_EXPLICIT_REQUEST",
+    "groundTruth": ["Hemograma completo", "TSH"]
+  }
+]
