@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { ApiError, GoogleGenAI } from "@google/genai";
 import OpenAI from "openai";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
@@ -86,6 +86,167 @@ export class GeminiReader implements VisionReader {
     const parsed = readingSchema.parse(JSON.parse(response.text ?? "{}"));
     return { ...parsed, reader: this.name };
   }
+}
+
+const simpleReadingSchema = z.object({
+  requestedStudies: z.array(z.object({
+    literalText: z.string(),
+    normalizedName: z.string(),
+    evidence: z.enum(["x", "check", "circle", "underline", "strike", "scribble", "explicit_text"]),
+    confidence: z.enum(["high", "medium", "low"])
+  })),
+  uncertainStudies: z.array(z.string()),
+  notes: z.string()
+});
+
+export type SimpleReading = z.infer<typeof simpleReadingSchema>;
+
+const simpleReaderInstructions = `
+Analiza la imagen completa de esta solicitud de laboratorio.
+Devuelve SOLO los estudios que fueron realmente solicitados. Una solicitud puede
+estar expresada por texto explícito, X, check, círculo, subrayado, tachado, rayón
+u otra marca. No listes todas las opciones impresas en el formato.
+Para cada estudio devuelve:
+- literalText: el texto tal como es realmente visible en la imagen, sin corregir ni completar.
+- normalizedName: el nombre limpio del mismo estudio, sin agregar información que no se vea.
+
+Reglas estrictas:
+- No completes pares ni grupos clínicos. No infieras IgG porque aparezca IgM, ni al revés;
+  cada variante cuenta solo si está marcada o escrita por sí misma.
+- No uses el diagnóstico, la indicación clínica ni el contexto médico para agregar estudios.
+- Solo lo visible cuenta: no agregues un estudio porque "normalmente se pide junto con" otro.
+- Si una variante, letra o número del estudio no está clara (por ejemplo T3 vs T4,
+  IgG vs IgM, B12 vs B1), no la adivines: ponla en uncertainStudies con lo que sí se ve.
+- Si no estás seguro de si un estudio fue solicitado, ponlo en uncertainStudies.
+Usa "notes" para cualquier observación relevante (imagen cortada, ilegible, etc.).
+`;
+
+const UNAVAILABLE_RETRY_DELAYS_MS = [3000, 6000, 12000];
+const INVALID_RESPONSE_RETRIES = 2;
+
+function isUnavailable(error: unknown): boolean {
+  return (error instanceof ApiError || error instanceof OpenAI.APIError) && error.status === 503;
+}
+
+async function withUnavailableRetry<T>(call: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await call();
+    } catch (error) {
+      const delay = UNAVAILABLE_RETRY_DELAYS_MS[attempt];
+      if (!isUnavailable(error) || delay === undefined) throw error;
+      console.error(`Gemini 503 UNAVAILABLE, reintento ${attempt + 1}/${UNAVAILABLE_RETRY_DELAYS_MS.length} en ${delay / 1000}s...`);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
+// Mismo prompt, schema e imagen completa, pero Gemini vía OpenRouter (API compatible con OpenAI).
+async function readImageWithGeminiViaOpenRouter(
+  imageBase64: string,
+  mimeType: string,
+  apiKey: string
+): Promise<SimpleReading> {
+  const model = process.env.OPENROUTER_GEMINI_MODEL ?? "google/gemini-3.8-flash";
+  const client = new OpenAI({ apiKey, baseURL: "https://openrouter.ai/api/v1" });
+  const { $schema: _ignored, ...schema } = z.toJSONSchema(simpleReadingSchema);
+  const request = {
+    model,
+    // OpenRouter reserva crédito por el máximo de salida; sin tope pide 65536 y falla con saldo bajo.
+    max_tokens: 8192,
+    messages: [{
+      role: "user" as const,
+      content: [
+        { type: "text" as const, text: simpleReaderInstructions },
+        { type: "image_url" as const, image_url: { url: `data:${mimeType};base64,${imageBase64}` } }
+      ]
+    }],
+    response_format: {
+      type: "json_schema" as const,
+      json_schema: { name: "prescription_simple_reading", strict: true, schema }
+    }
+  };
+
+  // Contenido que no se puede parsear/validar: se reintenta la misma petición (misma imagen, prompt y modelo).
+  for (let attempt = 0; ; attempt++) {
+    const response = await withUnavailableRetry(() => client.chat.completions.create(request));
+    const choice = response.choices[0];
+    try {
+      return simpleReadingSchema.parse(JSON.parse(choice?.message.content ?? "{}"));
+    } catch (error) {
+      if (attempt >= INVALID_RESPONSE_RETRIES) {
+        throw new Error(
+          `Respuesta inválida de OpenRouter tras ${attempt + 1} intentos (finish_reason=${choice?.finish_reason}, ` +
+            `completion_tokens=${response.usage?.completion_tokens}): ${(error as Error).message}\n` +
+            `Final del contenido: ${JSON.stringify((choice?.message.content ?? "").slice(-200))}`
+        );
+      }
+      console.error(`Respuesta inválida de OpenRouter (${(error as Error).message.split("\n")[0]}), reintento ${attempt + 1}/${INVALID_RESPONSE_RETRIES}...`);
+    }
+  }
+}
+
+// Primera conexión real: imagen completa -> Gemini -> JSON simple. Sin OCR, crops ni catálogo.
+// Si OPENROUTER_API_KEY está definida, Gemini se llama vía OpenRouter en vez de Google AI Studio.
+export async function readImageWithGemini(
+  imageBase64: string,
+  mimeType: string,
+  model = process.env.GEMINI_READER_MODEL ?? "gemini-4-argon",
+  apiKey = process.env.GEMINI_API_KEY
+): Promise<SimpleReading> {
+  const openRouterKey = process.env.OPENROUTER_API_KEY;
+  if (openRouterKey) return readImageWithGeminiViaOpenRouter(imageBase64, mimeType, openRouterKey);
+  if (!apiKey) throw new Error("GEMINI_API_KEY is required (define it in .env)");
+  const ai = new GoogleGenAI({ apiKey });
+  const request = {
+    model,
+    contents: [{
+      role: "user",
+      parts: [
+        { text: simpleReaderInstructions },
+        { inlineData: { mimeType, data: imageBase64 } }
+      ]
+    }],
+    config: {
+      responseMimeType: "application/json",
+      responseJsonSchema: z.toJSONSchema(simpleReadingSchema)
+    }
+  };
+
+  const response = await withUnavailableRetry(() => ai.models.generateContent(request));
+  return simpleReadingSchema.parse(JSON.parse(response.text ?? "{}"));
+}
+
+// Segundo lector independiente: mismo prompt, schema e imagen completa; nunca ve la respuesta de Gemini.
+export async function readImageWithOpenAI(
+  imageBase64: string,
+  mimeType: string,
+  model = process.env.OPENAI_READER_MODEL ?? "gpt-6.1-sol",
+  apiKey = process.env.OPENAI_API_KEY
+): Promise<SimpleReading> {
+  if (!apiKey) throw new Error("OPENAI_API_KEY is required (define it in .env)");
+  const client = new OpenAI({ apiKey });
+  const { $schema: _ignored, ...schema } = z.toJSONSchema(simpleReadingSchema);
+  const response = await client.responses.create({
+    model,
+    reasoning: { effort: (process.env.OPENAI_READER_REASONING ?? "high") as "low" | "medium" | "high" | "xhigh" | "max" },
+    input: [{
+      role: "user",
+      content: [
+        { type: "input_text", text: simpleReaderInstructions },
+        { type: "input_image", image_url: `data:${mimeType};base64,${imageBase64}`, detail: "original" }
+      ]
+    }],
+    text: {
+      format: {
+        type: "json_schema",
+        name: "prescription_simple_reading",
+        strict: true,
+        schema
+      }
+    }
+  });
+  return simpleReadingSchema.parse(JSON.parse(response.output_text));
 }
 
 export class OpenAIReader implements VisionReader {

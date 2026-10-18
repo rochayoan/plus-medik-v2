@@ -8,6 +8,10 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "benchmark": "tsx scripts/benchmark.ts",
+    "read-image": "tsx scripts/read-image.ts",
+    "judge": "tsx scripts/judge.ts",
+    "consensus": "tsx scripts/consensus.ts",
+    "read-image:openai": "tsx scripts/read-image.ts --openai private-data/receta.jpeg",
     "check": "npm run typecheck && npm run test"
   },
   "engines": {
