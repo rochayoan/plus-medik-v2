@@ -1,0 +1,18 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+.DS_Store
+coverage/
+
+# Datos privados / PHI / benchmarks reales
+private-data/*
+!private-data/.gitkeep
+benchmark-private/
+*.patient.*
+*.phi.*
+
+# Resultados locales
+benchmark-results/
+*.local.json
