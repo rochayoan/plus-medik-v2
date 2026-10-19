@@ -422,7 +422,30 @@ export function packageItems(pkg: CatalogStudy): string[] {
     const items = match[1]!.split(/\s*(?:,|;|\+|\/|\sy\s)\s*/i).map((item) => item.trim()).filter(Boolean);
     if (items.length >= 2) return items;
   }
-  return [];
+  return plusItems(pkg.name);
+}
+
+// Paquete cuyo NOMBRE lista sus estudios unidos por "+" ("GASOMETRIA + LACTATO"). Solo nombres cortos y simples (2 a 4 elementos de hasta 4 palabras,
+// sin paréntesis ni "perfil/panel/combo"): los nombres largos con "+" (paneles de patógenos) no listan componentes que se puedan verificar.
+export function plusItems(name: string): string[] {
+  if (!name.includes("+") || /[()]/.test(name) || /^\s*(perfil|panel|curva|paquete)\b/i.test(name) || /\bcombo\b/i.test(name)) return [];
+  const items = name.split("+").map((item) => item.trim()).filter(Boolean);
+  const simple = items.length >= 2 && items.length <= 4 && items.every((item) => item.split(/\s+/).length <= 4);
+  return simple ? items : [];
+}
+
+// Un texto con elementos unidos por "+" pide VARIAS cosas. Un único estudio solo puede resolverlo si su nombre o alias aprobado las cubre todas.
+// Devuelve los elementos que el estudio elegido NO cubre (vacío si los cubre o si el texto no tiene "+").
+export function uncoveredPlusItems(text: string, study: CatalogStudy): string[] {
+  const parts = text.includes("+") ? text.split("+").map((item) => item.trim()).filter(Boolean) : [];
+  if (parts.length < 2) return [];
+  const all = new Set(DIMS.flatMap((dim) => [...DIM_TOKENS[dim]]));
+  const content = (value: string) => identityTokens(value).filter((token) => !all.has(token) && !CONNECTORS.has(token)).map(stem);
+  const covered = new Set([study.name, ...study.normalizedAliases].flatMap((value) => content(value)));
+  return parts.filter((part) => {
+    const tokens = content(part);
+    return tokens.length > 0 && !tokens.every((token) => covered.has(token));
+  });
 }
 
 // Clave de analito de un texto suelto: sin calificadores, conectores ni plurales (igual que baseKey para estudios).
@@ -499,6 +522,19 @@ export function verifyDecision(text: string, raw: RawDecision, fullCatalog: Cata
   if (raw.status === "MATCH") {
     const chosen = raw.studies[0]!;
     if (!chosen.active) return { kind: "REJECTED", studyIds: [chosen.id], reason: "el estudio elegido no está activo" };
+    // El texto es EXACTAMENTE el nombre o alias aprobado de otro estudio (p. ej. un paquete): el catálogo ya dijo qué es; el modelo no puede elegir otro.
+    const exactOwner = approvedPackage(text, fullCatalog);
+    if (exactOwner && exactOwner.id !== chosen.id) {
+      // Una contradicción de identidad (p. ej. contra el contexto declarado) se informa con su motivo propio.
+      const own = checkIdentity(text, chosen, fullCatalog, context);
+      if (!own.ok) return { kind: "REJECTED", studyIds: [chosen.id], reason: `verificación de identidad: ${own.problems.join("; ")}` };
+      return { kind: "REJECTED", studyIds: [chosen.id, exactOwner.id], reason: `el texto es el nombre aprobado de «${exactOwner.name}», no de «${chosen.name}»` };
+    }
+    // "A + B": un estudio que solo cubre A ignoraría B (parte de lo pedido) y no se cotiza.
+    const uncovered = exactOwner ? [] : uncoveredPlusItems(text, chosen);
+    if (uncovered.length > 0) {
+      return { kind: "REJECTED", studyIds: [chosen.id], reason: `el texto pide varios elementos unidos por "+" y «${chosen.name}» no cubre: ${uncovered.join(", ")}` };
+    }
     const byAlias = approvedAliasOwner(text, fullCatalog)?.id === chosen.id;
     const identity = checkIdentity(text, chosen, fullCatalog, context, { approvedAlias: byAlias });
     if (!identity.ok) return { kind: "REJECTED", studyIds: [chosen.id], reason: `verificación de identidad: ${identity.problems.join("; ")}` };

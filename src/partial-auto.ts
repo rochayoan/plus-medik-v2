@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { isPackageComponent } from "./catalog-shadow.js";
+import { isPackageComponent, packageItems } from "./catalog-shadow.js";
 import { normalizeStudyKey } from "./consensus.js";
+import type { DocumentFunctionInfo } from "./document-function.js";
 import type { StudyImpactResult } from "./study-impact.js";
 import { classifyStudyRisk, contextSensitive, zonesOf, type StudyRisk, type UnknownZone } from "./visual-risk.js";
 import type { AnalysisReason, CatalogCandidate, FinalVisualStudy, QuoteBasis, StudyMatch } from "./analyze.js";
@@ -72,6 +73,8 @@ export interface InternalRecord {
   recipeStops: AnalysisReason[];
   document: {
     type?: string;
+    // Función del documento comprobada (por qué no es una solicitud, o por qué se dudó). Solo para el CRM.
+    function?: DocumentFunctionInfo;
     complete: boolean;
     issueKinds: string[];
     problems: string[];
@@ -82,6 +85,8 @@ export interface InternalRecord {
     // Si hay zonas que no se ven, qué estudios (sin otros bloqueos) necesitan la verificación de impacto.
     impactCheck: { needed: boolean; candidates: Array<{ key: string; text: string }> };
   };
+  // Avisos para el laboratorio (no cambian la cotización): p. ej. un paquete del catálogo cubre varios estudios cotizados por separado.
+  advisories: string[];
   revision: string;
   history: HumanEvent[];
 }
@@ -98,6 +103,7 @@ export interface PartialInput {
   // Hay zonas cortadas, ocultas o ilegibles que no invalidan la lectura de los demás estudios pero pueden contener MÁS estudios o afectar a los visibles.
   unseenRegion: boolean;
   documentType?: string;
+  documentFunction?: DocumentFunctionInfo;
   documentComplete: boolean;
   documentKinds: string[];
   documentProblems: string[];
@@ -213,6 +219,16 @@ export function evaluatePartial(input: PartialInput): { outcome: QuoteOutcome; r
   ];
 
   const allLines = [...lineMap.values()];
+  // Si los componentes cotizados por separado son TODOS los de un paquete activo, se avisa (qué precio aplica es una decisión comercial: no se sustituye).
+  const advisories: string[] = [];
+  const quotedStudies = allLines.map((line) => input.catalogById.get(line.id)).filter((study): study is CatalogStudy => Boolean(study));
+  for (const pkg of input.catalog) {
+    if (!pkg.active || quotedStudies.some((study) => study.id === pkg.id)) continue;
+    const items = packageItems(pkg);
+    if (items.length < 2) continue;
+    const parts = quotedStudies.filter((study) => isPackageComponent(pkg, study));
+    if (parts.length >= items.length) advisories.push(`los estudios ${parts.map((p) => p.code ?? p.name).join(" + ")} forman el paquete «${pkg.name}» (${pkg.code ?? "sin código"}); se cotizaron por separado`);
+  }
   const quotedLines = input.recipeStops.length === 0 ? allLines : [];
   const outcome: QuoteOutcome = quotedLines.length === 0 ? "HUMAN_REVIEW" : pending.length === 0 ? "AUTO_COMPLETE" : "AUTO_PARTIAL";
   const subtotalBs = quotedLines.reduce((sum, line) => sum + line.priceBs, 0);
@@ -228,6 +244,7 @@ export function evaluatePartial(input: PartialInput): { outcome: QuoteOutcome; r
     recipeStops: input.recipeStops,
     document: {
       type: input.documentType,
+      ...(input.documentFunction ? { function: input.documentFunction } : {}),
       complete: input.documentComplete,
       issueKinds: input.documentKinds,
       problems: input.documentProblems,
@@ -236,6 +253,7 @@ export function evaluatePartial(input: PartialInput): { outcome: QuoteOutcome; r
       impact: input.impact && { available: input.impact.available, qualifierRisk: input.impact.qualifierRisk, notes: input.impact.notes },
       impactCheck: { needed: input.unseenRegion && input.recipeStops.length === 0, candidates }
     },
+    advisories,
     revision: revisionOf(quotedLines, pending),
     history: []
   };

@@ -4,6 +4,7 @@ import { strictJsonSchema } from "./ai.js";
 import { cachedAiCall, usageFromResponses, type AiUsage } from "./cache.js";
 import { identityTokens, type ShadowContext } from "./catalog-shadow.js";
 import { normalizeStudyKey } from "./consensus.js";
+import { derivationCues, functionCheckSchema, functionInstructions, fuseFunction, type DocumentFunctionInfo, type FunctionRequest } from "./document-function.js";
 import type { DocumentType } from "./types.js";
 
 // Señal de TIPO e INTEGRIDAD del documento. Conserva el enum DocumentType, el campo completeDocumentVisible y las reglas de
@@ -361,6 +362,8 @@ export interface DocumentSignal {
   };
   reasons: [string, string];
   context?: DocumentContext;
+  // Función del documento (solicitud médica, derivación de muestra...). Ausente si nada la puso en duda.
+  function?: DocumentFunctionInfo;
 }
 
 const union = (a: Region, b: Region): Region => ({ left: Math.min(a.left, b.left), top: Math.min(a.top, b.top), right: Math.max(a.right, b.right), bottom: Math.max(a.bottom, b.bottom) });
@@ -401,6 +404,8 @@ export interface SignalDeps {
   verifyEdges?: (request: EdgeRequest) => Promise<{ value: unknown; usage?: AiUsage }>;
   // Verificación enfocada de ocultamientos (solo si la única objeción son objetos que tapan partes de la hoja).
   verifyHidden?: (request: HiddenRequest) => Promise<{ value: unknown; usage?: AiUsage }>;
+  // Comprobación enfocada de la FUNCIÓN del documento (solo si las lecturas vieron frases de derivación o rótulo de muestra).
+  verifyFunction?: (request: FunctionRequest) => Promise<{ value: unknown; usage?: AiUsage }>;
   model: string;
   reasoning: string;
 }
@@ -415,6 +420,7 @@ function params(model: string, reasoning: string, name: string, schema: Record<s
 const signalParams = (model: string, reasoning: string) => params(model, reasoning, "document_integrity_signal", strictJsonSchema(signalSchema));
 const edgeParams = (model: string, reasoning: string) => params(model, reasoning, "document_edge_verification", strictJsonSchema(edgeCheckSchema));
 const hiddenParams = (model: string, reasoning: string) => params(model, reasoning, "document_hidden_verification", strictJsonSchema(hiddenCheckSchema));
+const functionParams = (model: string, reasoning: string) => params(model, reasoning, "document_function_verification", strictJsonSchema(functionCheckSchema));
 
 function defaultDeps(): SignalDeps {
   const model = process.env.OPENAI_READER_MODEL ?? "gpt-6.1-sol";
@@ -440,7 +446,8 @@ function defaultDeps(): SignalDeps {
     reasoning,
     complete: (request) => call(signalParams(model, reasoning), request.instructions, request.imageBase64, request.mimeType),
     verifyEdges: (request) => call(edgeParams(model, reasoning), request.instructions, request.imageBase64, request.mimeType),
-    verifyHidden: (request) => call(hiddenParams(model, reasoning), request.instructions, request.imageBase64, request.mimeType)
+    verifyHidden: (request) => call(hiddenParams(model, reasoning), request.instructions, request.imageBase64, request.mimeType),
+    verifyFunction: (request) => call(functionParams(model, reasoning), request.instructions, request.imageBase64, request.mimeType)
   };
 }
 
@@ -481,7 +488,51 @@ export async function readDocumentSignal(args: { imageBase64: string; mimeType: 
   };
   const [a, b] = await Promise.all([one("A"), one("B")]);
 
-  const relevantType = a.documentType === b.documentType && (a.documentType === "TEXT_EXPLICIT_REQUEST" || a.documentType === "MARK_DEPENDENT_FORM" || a.documentType === "HANDWRITTEN_REQUEST");
+  const baseRelevantType = a.documentType === b.documentType && (a.documentType === "TEXT_EXPLICIT_REQUEST" || a.documentType === "MARK_DEPENDENT_FORM" || a.documentType === "HANDWRITTEN_REQUEST");
+
+  // FUNCIÓN del documento. El formato (manuscrito, casillas) dice cómo se escribe, no para qué sirve: una tarjeta de derivación de una muestra
+  // ya tomada puede estar escrita igual que una receta. Si CUALQUIERA de las lecturas extrajo frases de derivación o rótulo de muestra, se
+  // comprueba la imagen con dos lecturas independientes; sin verificador, con error o con discrepancia falla cerrado.
+  const cues = derivationCues([...a.printedContext, ...b.printedContext].map((line) => line.text).concat(a.irrelevantCrops, b.irrelevantCrops, [a.reason, b.reason]));
+  let functionInfo: DocumentFunctionInfo | undefined;
+  if (baseRelevantType && cues.length > 0) {
+    functionInfo = { cues, verdict: "UNAVAILABLE", kinds: [], notes: [] };
+    if (!resolved.verifyFunction) functionInfo.notes.push("no hay verificador de la función del documento");
+    else {
+      const verifyFunction = resolved.verifyFunction;
+      const verifyOne = async (variant: "A" | "B") => {
+        const instructions = functionInstructions(variant, cues);
+        let called = false;
+        const value = await cachedAiCall({
+          label: "openai-document-function",
+          provider: "openai",
+          model: resolved.model,
+          imageBase64: args.imageBase64,
+          config: { prompt: instructions, mimeType: args.mimeType, params: functionParams(resolved.model, resolved.reasoning) },
+          parse: (raw) => functionCheckSchema.parse(raw),
+          call: async () => {
+            called = true;
+            const response = await verifyFunction({ instructions, variant, imageBase64: args.imageBase64, mimeType: args.mimeType });
+            if (response.usage) usage.push(response.usage);
+            return { value: functionCheckSchema.parse(response.value), usage: response.usage };
+          }
+        });
+        if (called) calls++;
+        else cacheHits++;
+        return value;
+      };
+      try {
+        const [fa, fb] = await Promise.all([verifyOne("A"), verifyOne("B")]);
+        const fused = fuseFunction(fa, fb);
+        functionInfo = { cues, verdict: fused.verdict, kinds: fused.kinds, notes: fused.notes };
+      } catch (error) {
+        functionInfo.notes.push(`verificación de la función no disponible: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+  const functionBlocked = functionInfo !== undefined && functionInfo.verdict !== "REQUEST";
+  // Lo que ya se sabe que no es una solicitud cotizable no gasta verificaciones visuales posteriores.
+  const relevantType = baseRelevantType && !functionBlocked;
 
   // Verificación de ocultamientos: solo si la ÚNICA objeción son objetos que tapan partes de la hoja (sin cortes por el borde, trazos
   // borrados ni caja inválida) y la duda de cada lectura sobre la zona está explicada por esos objetos. Cualquier fallo o duda mantiene el bloqueo.
@@ -566,6 +617,12 @@ export async function readDocumentSignal(args: { imageBase64: string; mimeType: 
     }
   }
   const signal = fuseSignals(a, b, verified, hiddenVerified);
+  if (functionInfo) {
+    signal.function = functionInfo;
+    // NON_QUOTABLE -> NOT_A_REQUEST; discrepancia, duda o sin verificación -> UNKNOWN (ambos detienen toda la receta en el flujo existente).
+    if (functionInfo.verdict === "NON_QUOTABLE") signal.documentType = "NOT_A_REQUEST";
+    else if (functionInfo.verdict !== "REQUEST") signal.documentType = "UNKNOWN";
+  }
   signal.integrity.edgeNotes = edgeNotes;
   signal.integrity.hiddenNotes = hiddenNotes;
   return { signal, raw: [a, b], usage, calls, cacheHits };

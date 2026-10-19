@@ -1,9 +1,10 @@
 import { readImageWithGemini, readImageWithOpenAI, type SimpleReading } from "./ai.js";
 import { ExactAliasCatalogResolver, uniqueMatchedStudies } from "./catalog.js";
 import { buildSimpleConsensus, isTruncationOf, normalizeStudyKey, normalizeVisibleKey, sameVisibleText, type SimpleConsensus, type SimpleStudy } from "./consensus.js";
-import { activeCatalog, GENERIC_PROFILE_WORDS, identityTokens, qualifiersOf, shadowMatch, type Outcome, type ShadowBatch, type Support } from "./catalog-shadow.js";
+import { activeCatalog, GENERIC_PROFILE_WORDS, identityTokens, isPackageComponent, qualifiersOf, shadowMatch, type Outcome, type ShadowBatch, type Support } from "./catalog-shadow.js";
 import type { AiUsage } from "./cache.js";
 import { readDocumentSignal, type DocumentSignal } from "./document-signal.js";
+import type { DocumentFunctionInfo } from "./document-function.js";
 import { judgeDisputesWithOpenAI, type ResolvedStudy, type SimpleJudgement } from "./judge.js";
 import { evaluatePartial, studyKeyOf, type InternalRecord, type PublicQuote, type QuoteOutcome } from "./partial-auto.js";
 import { verifyStudyImpact, type StudyImpactResult } from "./study-impact.js";
@@ -129,6 +130,8 @@ export interface DocumentGate {
   hiddenNotes?: string[];
   // Tipo de cada problema de integridad vigente (ver IntegrityKind). Sin él, la zona queda sin tipificar (UNTYPED) y cada estudio exige verificación.
   integrityKinds?: string[];
+  // Función del documento comprobada (derivación de muestra, rótulo...): solo si las lecturas vieron frases que la pusieron en duda.
+  function?: DocumentFunctionInfo;
   // Contexto impreso que se entregó al resolvedor semántico (solo lo que ambas lecturas coincidieron en ver).
   context?: { lines: string[]; muestra?: string; tiempo?: string; conflicts: string[] };
 }
@@ -335,7 +338,7 @@ function contrastWithExact(
 
 // Líneas que el contraste semántico respalda: coincidencias confirmadas por el exacto, MATCH semánticos y componentes de compuestos
 // explícitos verificados. Un estudio, una línea, un cobro (UUID), con el precio siempre del catálogo de Supabase.
-function semanticBillableLines(matches: StudyMatch[], catalogById: Map<string, CatalogStudy>): { lines: CatalogCandidate[]; audit: NonNullable<AnalysisQuote["audit"]>; invalidPrice: boolean } {
+function semanticBillableLines(matches: StudyMatch[], catalogById: Map<string, CatalogStudy>): { lines: CatalogCandidate[]; audit: NonNullable<AnalysisQuote["audit"]>; invalidPrice: boolean; overlap: boolean } {
   const lines = new Map<string, CatalogCandidate>();
   const audit = new Map<string, { id: string; basis: QuoteBasis[]; texts: string[] }>();
   let invalidPrice = false;
@@ -356,7 +359,10 @@ function semanticBillableLines(matches: StudyMatch[], catalogById: Map<string, C
       audit.set(id, entry);
     }
   }
-  return { lines: [...lines.values()], audit: [...audit.values()], invalidPrice };
+  // Un paquete y uno de sus componentes nunca se cobran juntos (cobro duplicado).
+  const picked = [...lines.keys()].map((id) => catalogById.get(id)).filter((study): study is CatalogStudy => Boolean(study));
+  const overlap = picked.some((pkg) => picked.some((component) => isPackageComponent(pkg, component)));
+  return { lines: [...lines.values()], audit: [...audit.values()], invalidPrice, overlap };
 }
 
 const toCandidate = (study: CatalogStudy): CatalogCandidate => ({
@@ -527,6 +533,7 @@ export function assembleAnalysis(args: {
   const semanticLines = primary ? semanticBillableLines(matches, catalogById) : undefined;
   // Un precio inválido en cualquier línea semántica impide cobrar (nunca se cotiza con un importe que no sea del catálogo).
   if (semanticLines?.invalidPrice) semanticReasons.push("catalog_price_invalid");
+  if (semanticLines?.overlap) semanticReasons.push("package_component_overlap");
 
   const unmatchedMatches = matches.filter((match) => match.status === "UNMATCHED");
   const ambiguousMatches = matches.filter((match) => match.status === "AMBIGUOUS");
@@ -551,6 +558,9 @@ export function assembleAnalysis(args: {
     if (ambiguousMatches.length > 0) reasons.push("catalog_ambiguous");
     // Cualquier sugerencia del modelo exige revisión humana.
     if (suggestedMatches.length > 0) reasons.push("catalog_model_suggested");
+    // Un paquete y uno de sus componentes nunca se cobran juntos (cobro duplicado).
+    const matched = matches.flatMap((match) => (match.status === "MATCHED" ? [catalogById.get(match.study?.id ?? "")] : [])).filter((study): study is CatalogStudy => Boolean(study));
+    if (matched.some((pkg) => matched.some((component) => isPackageComponent(pkg, component)))) reasons.push("package_component_overlap");
   }
 
   const decision = reasons.length === 0 ? "AUTO_SAFE" : "HUMAN_REVIEW";
@@ -635,6 +645,7 @@ export function assembleAnalysis(args: {
       recipeStops,
       unseenRegion,
       documentType: document?.documentType,
+      documentFunction: document?.function,
       documentComplete: Boolean(document?.completeDocumentVisible),
       documentKinds: kinds,
       documentProblems: document?.integrityProblems ?? [],
@@ -745,6 +756,7 @@ export async function analyzeImage(
     integrityProblems: signal.integrity.problems,
     irrelevantCrops: signal.integrity.irrelevantCrops,
     integrityKinds: signal.integrity.kinds,
+    function: signal.function,
     verifiedEdges: signal.integrity.verifiedEdges,
     edgeNotes: signal.integrity.edgeNotes,
     hiddenVerified: signal.integrity.hiddenVerified,
