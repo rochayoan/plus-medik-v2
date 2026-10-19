@@ -39,8 +39,18 @@ const catalog: CatalogStudy[] = [
 
 const noJudgement: SimpleJudgement = { resolvedStudies: [], unresolvedDisputes: [] };
 
+// Documento íntegro: formulario con marcas y zona de estudios completa.
+const FORM_OK = { documentType: "MARK_DEPENDENT_FORM" as const, completeDocumentVisible: true, agreement: true };
+const SIGNAL_OK = {
+  documentType: "MARK_DEPENDENT_FORM" as const,
+  completeDocumentVisible: true,
+  agreement: true,
+  integrity: { problems: [], irrelevantCrops: ["firma recortada"] },
+  reasons: ["", ""] as [string, string]
+};
+
 function assemble(a: SimpleReading, b: SimpleReading, judgement: SimpleJudgement = noJudgement, studies = catalog) {
-  return assembleAnalysis({ consensus: buildSimpleConsensus(a, b), judgement, catalog: studies });
+  return assembleAnalysis({ consensus: buildSimpleConsensus(a, b), judgement, catalog: studies, document: FORM_OK });
 }
 
 describe("assembleAnalysis", () => {
@@ -163,13 +173,69 @@ describe("assembleAnalysis", () => {
   });
 });
 
+describe("compuerta de documento en el flujo real", () => {
+  const both = reading([visual("FSH"), visual("LH")]);
+  const gate = (document?: Parameters<typeof assembleAnalysis>[0]["document"]) =>
+    assembleAnalysis({ consensus: buildSimpleConsensus(both, both), judgement: noJudgement, catalog, document });
+
+  it("formulario completo -> AUTO_SAFE (el comportamiento exacto/alias no cambia)", () => {
+    const result = gate(FORM_OK);
+    expect(result.decision).toBe("AUTO_SAFE");
+    expect(result.quote?.totalBs).toBe(85);
+  });
+
+  it("manuscrita, no es solicitud, tipo incierto o documento incompleto -> HUMAN_REVIEW aunque todo se resuelva por exacto", () => {
+    const cases: Array<[Parameters<typeof gate>[0], string]> = [
+      [{ documentType: "HANDWRITTEN_REQUEST", completeDocumentVisible: true }, "handwritten_out_of_scope"],
+      [{ documentType: "NOT_A_REQUEST", completeDocumentVisible: true }, "not_a_request"],
+      [{ documentType: "UNKNOWN", completeDocumentVisible: true }, "document_type_uncertain"],
+      [{ documentType: "MARK_DEPENDENT_FORM", completeDocumentVisible: false, integrityProblems: ["cortado por el borde: fila X"] }, "document_not_complete"]
+    ];
+    for (const [document, reason] of cases) {
+      const result = gate(document);
+      expect(result.decision).toBe("HUMAN_REVIEW");
+      expect(result.reasons).toContain(reason);
+      expect(result.quote).toBeUndefined();
+    }
+  });
+
+  it("sin señal de documento, falla cerrado", () => {
+    const result = gate(undefined);
+    expect(result.decision).toBe("HUMAN_REVIEW");
+    expect(result.reasons).toContain("document_type_uncertain");
+  });
+
+  it("analyzeImage propaga la señal con sus problemas de integridad y los recortes irrelevantes", async () => {
+    const readDocument = vi.fn(async () => ({
+      signal: { ...SIGNAL_OK, completeDocumentVisible: false, integrity: { problems: ["lectura A: cortado por el borde: Hepatitis B Antígeno de Superfic"], irrelevantCrops: ["firma"] } }
+    }));
+    const deps: AnalyzeDeps = {
+      readGemini: vi.fn(async () => both), readOpenAI: vi.fn(async () => both), judge: vi.fn(async () => noJudgement),
+      resolveSemantic: vi.fn(async () => { throw new Error("no debe llamarse"); }), readDocument,
+      shadowMatch: vi.fn(async () => { throw new Error("no debe llamarse"); })
+    };
+    const result = await analyzeImage({ imageBase64: "x", mimeType: "image/jpeg", catalog }, deps);
+    expect(readDocument).toHaveBeenCalledTimes(1);
+    expect(result.decision).toBe("HUMAN_REVIEW");
+    expect(result.reasons).toContain("document_not_complete");
+    expect(result.document).toMatchObject({ completeDocumentVisible: false, integrityProblems: [expect.stringContaining("Hepatitis B")], irrelevantCrops: ["firma"] });
+  });
+});
+
 describe("analyzeImage (flujo con dependencias falsas, sin red)", () => {
   const makeDeps = (a: SimpleReading, b: SimpleReading, judgement: SimpleJudgement = noJudgement) => {
     const judge = vi.fn(async () => judgement);
     const deps: AnalyzeDeps = {
       readGemini: vi.fn(async () => a),
       readOpenAI: vi.fn(async () => b),
-      judge
+      judge,
+      readDocument: vi.fn(async () => ({ signal: SIGNAL_OK })),
+      resolveSemantic: vi.fn(async () => {
+        throw new Error("el resolvedor semántico no debe llamarse cuando el matcher exacto resuelve todo");
+      }),
+      shadowMatch: vi.fn(async () => {
+        throw new Error("la integración semántica principal debe estar apagada por defecto");
+      })
     };
     return { deps, judge };
   };

@@ -9,7 +9,9 @@ const labTestRow = z.object({
   name: z.string(),
   normalized_name: z.string(),
   price_bs: z.number().finite(),
-  active: z.boolean()
+  active: z.boolean(),
+  category: z.string().nullable().optional(),
+  sample_type: z.string().nullable().optional()
 });
 
 const aliasRow = z.object({
@@ -60,7 +62,7 @@ export async function loadActiveCatalog(options: SupabaseCatalogOptions = {}): P
   const resolved = { baseUrl, serviceKey, fetchFn: options.fetchFn ?? fetch };
 
   const [testRows, aliasRows] = await Promise.all([
-    fetchAllRows(resolved, "lab_tests?select=id,code,name,normalized_name,price_bs,active&active=eq.true&order=id.asc"),
+    fetchAllRows(resolved, "lab_tests?select=id,code,name,normalized_name,price_bs,active,category,sample_type&active=eq.true&order=id.asc"),
     fetchAllRows(resolved, "lab_test_aliases?select=lab_test_id,normalized_alias&order=id.asc")
   ]);
 
@@ -75,7 +77,9 @@ export async function loadActiveCatalog(options: SupabaseCatalogOptions = {}): P
       normalizedName: row.normalized_name,
       normalizedAliases: [],
       priceBs: row.price_bs,
-      active: true
+      active: true,
+      category: row.category ?? null,
+      sampleType: row.sample_type ?? null
     });
   }
 

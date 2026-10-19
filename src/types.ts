@@ -76,6 +76,9 @@ export interface CatalogStudy {
   // lab_tests.price_bs (tarifa Paciente).
   priceBs: number;
   active: boolean;
+  // Contexto para el resolvedor semántico (opcional; no interviene en el matching exacto).
+  category?: string | null;
+  sampleType?: string | null;
 }
 
 export type CatalogResolution =
