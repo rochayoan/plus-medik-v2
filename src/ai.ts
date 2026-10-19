@@ -1,7 +1,6 @@
-import { ApiError, GoogleGenAI } from "@google/genai";
+import { ApiError, GoogleGenAI, ThinkingLevel } from "@google/genai";
 import OpenAI from "openai";
 import { z } from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
 import { cachedAiCall, recordAiUsage, usageFromChatCompletions, usageFromGemini, usageFromResponses } from "./cache.js";
 import type { JudgeDecision, VisionReading } from "./types.js";
 
@@ -31,6 +30,20 @@ const judgeSchema = z.object({
   rejectedKeys: z.array(z.string()),
   unresolvedKeys: z.array(z.string())
 });
+
+// Esquema JSON para respuestas estructuradas. zod-to-json-schema (v3) no entiende zod 4 y devolvía solo {"$schema": ...}, que la API
+// rechaza ("schema must have a 'type' key"); z.toJSONSchema es el generador nativo de zod 4 y produce el mismo contrato.
+export function strictJsonSchema(schema: z.ZodType): Record<string, unknown> {
+  const { $schema: _ignored, ...rest } = z.toJSONSchema(schema) as Record<string, unknown>;
+  return rest;
+}
+
+// El SDK de Gemini espera el enum ThinkingLevel (LOW/MEDIUM/HIGH); la variable de entorno sigue siendo low|medium|high.
+export function geminiThinkingLevel(value: string): ThinkingLevel {
+  const level = ThinkingLevel[value.trim().toUpperCase() as keyof typeof ThinkingLevel];
+  if (!level || level === ThinkingLevel.THINKING_LEVEL_UNSPECIFIED) throw new Error(`GEMINI_THINKING_LEVEL inválido: "${value}" (usa low, medium o high)`);
+  return level;
+}
 
 export interface VisionReader {
   name: string;
@@ -73,14 +86,11 @@ export class GeminiReader implements VisionReader {
       }],
       config: {
         thinkingConfig: {
-          thinkingLevel: (process.env.GEMINI_THINKING_LEVEL ?? "medium") as "low" | "medium" | "high"
+          thinkingLevel: geminiThinkingLevel(process.env.GEMINI_THINKING_LEVEL ?? "medium")
         },
-        responseFormat: {
-          text: {
-            mimeType: "application/json",
-            schema: zodToJsonSchema(readingSchema)
-          }
-        }
+        // Mismo mecanismo que readImageWithGemini (el campo responseFormat no existe en GenerateContentConfig de este SDK).
+        responseMimeType: "application/json",
+        responseJsonSchema: strictJsonSchema(readingSchema)
       }
     });
 
@@ -325,7 +335,7 @@ export class OpenAIReader implements VisionReader {
           type: "json_schema",
           name: "prescription_vision_reading",
           strict: true,
-          schema: zodToJsonSchema(readingSchema)
+          schema: strictJsonSchema(readingSchema)
         }
       }
     });
@@ -380,7 +390,7 @@ export class OpenAIJudge implements DisputeJudge {
           type: "json_schema",
           name: "prescription_dispute_judgement",
           strict: true,
-          schema: zodToJsonSchema(judgeSchema)
+          schema: strictJsonSchema(judgeSchema)
         }
       }
     });

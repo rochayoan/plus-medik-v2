@@ -57,6 +57,7 @@ export function fuseIndependentReadings(a: VisionReading, b: VisionReading): Fus
 export type SimpleStudy = SimpleReading["requestedStudies"][number];
 
 export type SimpleDisputeReason =
+  | "partial_transcription"
   | "requested_by_one_reader_only"
   | "requested_with_uncertainty_in_other"
   | "not_high_confidence_in_both"
@@ -67,6 +68,8 @@ export interface SimpleDispute {
   reason: SimpleDisputeReason;
   readerA: { requested?: SimpleStudy; uncertain: string[] };
   readerB: { requested?: SimpleStudy; uncertain: string[] };
+  // Solo en partial_transcription: la transcripción más completa (los dos lectores ven la misma fila; uno la copió truncada).
+  preferred?: SimpleStudy;
 }
 
 export interface SimpleConsensus {
@@ -79,7 +82,7 @@ const confidenceScore = { high: 3, medium: 2, low: 1 } as const;
 
 // Normalización simple del texto visible: minúsculas, sin tildes, puntuación/espacios normalizados,
 // "Ig M" -> "igm" y repetición del mismo isotipo al final ("Ig M IgM") colapsada. Sin equivalencias clínicas.
-function normalizeVisibleKey(value: string): string {
+export function normalizeVisibleKey(value: string): string {
   const tokens = normalizeStudyKey(value.normalize("NFKD")).replace(/\big ([a-z])\b/g, "ig$1").split(" ").filter(Boolean);
   while (tokens.length > 1 && tokens[tokens.length - 1] === tokens[tokens.length - 2]) tokens.pop();
   return tokens.join(" ");
@@ -89,6 +92,31 @@ interface KeyedStudy {
   study: SimpleStudy;
   literalKey: string;
   nameKey: string;
+}
+
+const variantOnly = new Set(["iga", "igg", "igm", "ige"]);
+
+// Dos claves son el mismo texto visible si tienen las mismas letras ignorando espaciado/puntuación ("UREA/NUS" vs "UREANUS") o, con las
+// mismas palabras, solo difieren en una "s" final de palabras largas ("BILIRRUBINAS" vs "BILIRRUBINA"). Las variantes clínicas
+// (IgG/IgM, T3/T4) son palabras cortas o difieren en una letra interior: siguen siendo distintas.
+const squash = (key: string): string => key.replace(/ /g, "");
+const singular = (token: string): string => (token.length >= 6 && token.endsWith("s") ? token.slice(0, -1) : token);
+function sameKey(a: string, b: string): boolean {
+  if (a === b || squash(a) === squash(b)) return true;
+  const tokensA = a.split(" ").filter(Boolean);
+  const tokensB = b.split(" ").filter(Boolean);
+  return tokensA.length === tokensB.length && tokensA.every((token, index) => singular(token) === singular(tokensB[index]!));
+}
+export const sameVisibleText = (a: string, b: string): boolean => sameKey(normalizeVisibleKey(a), normalizeVisibleKey(b));
+
+// `short` es un prefijo estricto de `long` por palabras ("nitrogeno ureico" vs "nitrogeno ureico urea nus"): una transcripción truncada.
+// No cuenta si el texto corto es solo una variante ("igg") o no deja ninguna palabra que identifique el estudio.
+export function isTruncationOf(short: string, long: string): boolean {
+  const s = short.split(" ").filter(Boolean);
+  const l = long.split(" ").filter(Boolean);
+  if (s.length === 0 || s.length >= l.length) return false;
+  if (s.every((token) => variantOnly.has(token))) return false;
+  return s.every((token, index) => token === l[index]);
 }
 
 function keyStudies(studies: SimpleStudy[]): KeyedStudy[] {
@@ -103,13 +131,21 @@ function keyStudies(studies: SimpleStudy[]): KeyedStudy[] {
   return [...byLiteral.values()];
 }
 
-// Empareja primero por literalText; lo que quede sin pareja se intenta por normalizedName.
-function pairStudies(a: KeyedStudy[], b: KeyedStudy[]): Array<{ a?: KeyedStudy; b?: KeyedStudy }> {
-  const pairs: Array<{ a?: KeyedStudy; b?: KeyedStudy }> = [];
+interface Pair {
+  a?: KeyedStudy;
+  b?: KeyedStudy;
+  // Los dos lectores ven la misma fila, pero uno transcribió solo el comienzo del texto: lo decide el juez, con el texto completo.
+  partial?: boolean;
+}
+
+// Empareja primero por literalText (ignorando el espaciado); lo que quede sin pareja se intenta por normalizedName y, por último,
+// por transcripción truncada (solo si la relación es única en ambos sentidos: nunca se adivina entre varias filas posibles).
+function pairStudies(a: KeyedStudy[], b: KeyedStudy[]): Pair[] {
+  const pairs: Pair[] = [];
   const remainingB = new Set(b);
   const unmatchedA: KeyedStudy[] = [];
   for (const itemA of a) {
-    const match = [...remainingB].find((itemB) => itemB.literalKey === itemA.literalKey);
+    const match = [...remainingB].find((itemB) => sameKey(itemB.literalKey, itemA.literalKey));
     if (match) {
       remainingB.delete(match);
       pairs.push({ a: itemA, b: match });
@@ -121,6 +157,18 @@ function pairStudies(a: KeyedStudy[], b: KeyedStudy[]): Array<{ a?: KeyedStudy; 
     const match = [...remainingB].find((itemB) => itemB.nameKey === itemA.nameKey);
     if (match) remainingB.delete(match);
     pairs.push({ a: itemA, b: match });
+  }
+  // Transcripciones truncadas entre lo que quedó sin pareja.
+  const lonelyA = pairs.filter((pair) => pair.a && !pair.b);
+  const related = (x: KeyedStudy, y: KeyedStudy) => isTruncationOf(x.literalKey, y.literalKey) || isTruncationOf(y.literalKey, x.literalKey);
+  for (const pair of lonelyA) {
+    const candidates = [...remainingB].filter((itemB) => related(pair.a!, itemB));
+    if (candidates.length !== 1) continue;
+    const reverse = lonelyA.filter((other) => related(other.a!, candidates[0]!));
+    if (reverse.length !== 1) continue;
+    pair.b = candidates[0];
+    pair.partial = true;
+    remainingB.delete(candidates[0]!);
   }
   for (const itemB of remainingB) pairs.push({ b: itemB });
   return pairs;
@@ -168,7 +216,12 @@ export function buildSimpleConsensus(a: SimpleReading, b: SimpleReading): Simple
     const readerB = { requested: studyB, uncertain: relatedB.map((item) => item.text) };
     const hasUncertainty = relatedA.length > 0 || relatedB.length > 0;
 
-    if (studyA && studyB) {
+    if (studyA && studyB && pair.partial) {
+      // El estudio es el de la transcripción más completa; el juez confirma o rechaza esa fila visible.
+      const fuller = isTruncationOf(pair.a!.literalKey, pair.b!.literalKey) ? studyB : studyA;
+      const fullerKey = fuller === studyB ? pair.b!.literalKey : pair.a!.literalKey;
+      disputes.push({ key: fullerKey, reason: "partial_transcription", readerA, readerB, preferred: fuller });
+    } else if (studyA && studyB) {
       if (studyA.confidence === "high" && studyB.confidence === "high" && !hasUncertainty) {
         agreedStudies.push(studyA);
       } else {

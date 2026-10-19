@@ -69,3 +69,30 @@ describe("applyJudgeDecisions con verdict inválido", () => {
     expect(result.resolvedStudies.every((r) => r.verdict === "confirmed" || r.verdict === "rejected")).toBe(true);
   });
 });
+
+describe("applyJudgeDecisions con transcripción parcial", () => {
+  const full: SimpleStudy = { literalText: "NITROGENO UREICO/UREA/NUS", normalizedName: "Nitrógeno ureico / Urea / NUS", evidence: "check", confidence: "high" };
+  const truncated: SimpleStudy = { literalText: "NITROGENO UREICO", normalizedName: "Nitrógeno ureico", evidence: "check", confidence: "high" };
+  const partial: SimpleDispute = {
+    key: "nitrogeno ureico urea nus",
+    reason: "partial_transcription",
+    readerA: { requested: full, uncertain: [] },
+    readerB: { requested: truncated, uncertain: [] },
+    preferred: full
+  };
+
+  it("confirma el estudio con el texto completo, aunque la lectura truncada sea la del primer lector", () => {
+    const swapped: SimpleDispute = { ...partial, readerA: { requested: truncated, uncertain: [] }, readerB: { requested: full, uncertain: [] } };
+    for (const d of [partial, swapped]) {
+      const result = applyJudgeDecisions([d], [{ key: d.key, verdict: "confirmed", reason: "se ve la fila" }]);
+      expect(result.resolvedStudies).toHaveLength(1);
+      expect(result.resolvedStudies[0]!.study.literalText).toBe("NITROGENO UREICO/UREA/NUS");
+    }
+  });
+
+  it("si el juez no lo resuelve, queda sin resolver (no se asume ninguna de las dos lecturas)", () => {
+    const result = applyJudgeDecisions([partial], [{ key: partial.key, verdict: "unresolved", reason: "borroso" }]);
+    expect(result.resolvedStudies).toHaveLength(0);
+    expect(result.unresolvedDisputes).toHaveLength(1);
+  });
+});

@@ -125,7 +125,8 @@ export function applyJudgeDecisions(disputes: SimpleDispute[], rawDecisions: unk
     const decision = forDispute
       .map((candidate) => decisionSchema.safeParse(candidate))
       .find((parsed) => parsed.success)?.data;
-    const study = dispute.readerA.requested ?? dispute.readerB.requested;
+    // En una transcripción parcial, el estudio que se confirma es la lectura más completa (nunca la truncada).
+    const study = dispute.preferred ?? dispute.readerA.requested ?? dispute.readerB.requested;
 
     if (!decision) {
       unresolvedDisputes.push({
