@@ -479,6 +479,37 @@ export function hasContextSensitiveVariants(study: CatalogStudy, catalog: Catalo
   });
 }
 
+// Un componente distinto por cada elemento que el nombre del paquete lista (misma muestra), o undefined si algún elemento no está cubierto.
+export function coveringComponents(pkg: CatalogStudy, studies: CatalogStudy[]): CatalogStudy[] | undefined {
+  const items = packageItems(pkg);
+  if (items.length < 2) return undefined;
+  const packageQualifiers = studyQualifiers(pkg);
+  const unused = new Set(studies.filter((study) => study.id !== pkg.id && study.active));
+  const parts: CatalogStudy[] = [];
+  for (const item of items) {
+    const key = itemKey(item);
+    const hit = [...unused].find((study) => baseKey(study) === key && sampleCompatible(studyQualifiers(study), packageQualifiers));
+    if (!hit) return undefined;
+    unused.delete(hit);
+    parts.push(hit);
+  }
+  return parts;
+}
+
+// Paquetes activos del catálogo cuyos componentes están TODOS entre los estudios seleccionados, sin que el paquete lo esté. Que los estudios se
+// pidieran por separado o como la expresión de un paquete que los lectores separaron no se puede distinguir con lo que hay; el precio aplicable
+// (paquete o suma) lo decide el laboratorio, así que el grupo se retiene en vez de cobrar componentes que podrían ser el paquete.
+export function unresolvedPackageGroups(selected: CatalogStudy[], catalog: CatalogStudy[]): Array<{ pkg: CatalogStudy; parts: CatalogStudy[] }> {
+  const ids = new Set(selected.map((study) => study.id));
+  const groups: Array<{ pkg: CatalogStudy; parts: CatalogStudy[] }> = [];
+  for (const pkg of catalog) {
+    if (!pkg.active || ids.has(pkg.id)) continue;
+    const parts = coveringComponents(pkg, selected);
+    if (parts) groups.push({ pkg, parts });
+  }
+  return groups;
+}
+
 export function verifyPackageComposition(pkg: CatalogStudy, components: CatalogStudy[]): { ok: boolean; reason: string } {
   const items = packageItems(pkg);
   if (items.length < 2) return { ok: false, reason: "el paquete no lista sus componentes en el nombre: no se puede verificar la composición" };

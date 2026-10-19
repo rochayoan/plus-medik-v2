@@ -53,7 +53,12 @@ const CUE_PATTERNS: RegExp[] = [
   // "etiqueta de muestra", "rótulo del tubo", "tarjeta de muestra"
   new RegExp(`\\b(?:etiquetas?|rotulos?|tarjetas?|fichas?) (?:de |del |de la |para )?(?:la )?${SAMPLE}\\b`),
   // "recepción de muestras", "identificación de la muestra", "código de muestra"
-  new RegExp(`\\b(?:recepcion|identificacion|codigo) (?:de |del )?(?:la )?${SAMPLE}\\b`)
+  new RegExp(`\\b(?:recepcion|identificacion|codigo) (?:de |del )?(?:la )?${SAMPLE}\\b`),
+  // OBJETOS físicos de muestra que las lecturas ya describen al explicar qué tapa o aparece en la foto: una jeringa, un vial o un tubo con muestra
+  // delante de un papel indican que el documento puede acompañar una muestra tomada. "tubo" solo cuenta si se dice de qué es ("tubo gástrico" no).
+  /\b(?:jeringas?|eppendorf|criotubos?|vial(?:es)?|ampollas?)\b/,
+  /\btubos? (?:de ensayo|de muestras?|de sangre|de orina|con (?:la |una )?(?:muestras?|sangre|suero|orina|heces)|capilar|recolector)\b/,
+  /\b(?:frascos?|recipientes?|contenedor(?:es)?) (?:de|con|para) (?:la |una )?(?:muestras?|sangre|suero|orina|heces|esputo)\b/
 ];
 
 // Líneas (ya extraídas por las lecturas) que indican que el documento puede acompañar una muestra y no ser una solicitud.

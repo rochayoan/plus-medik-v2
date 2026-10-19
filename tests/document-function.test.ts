@@ -275,3 +275,50 @@ describe("de la función del documento a la cotización (extremo a extremo)", ()
     expect(JSON.stringify(result.publicQuote)).not.toMatch(/deriv|funci|muestra|NOT_A_REQUEST|cue/i);
   });
 });
+
+describe("señales por OBJETOS de muestra descritos en las lecturas existentes (sin palabras clave de derivación)", () => {
+  const positives = [
+    "Una jeringa oculta parte del encabezado y de los campos administrativos", "La jeringa tapa el margen izquierdo", "un tubo de ensayo sobre la hoja",
+    "tubo con sangre delante del formulario", "Tubos de muestra a la izquierda", "un frasco de orina junto al papel", "recipiente con muestra de heces",
+    "vial con suero", "ampolla sobre el formulario", "tubo Eppendorf", "criotubo rotulado"
+  ];
+  const negatives = [
+    "CA 19.9 [páncreas y tubo gástrico]", "tubo digestivo", "Endoscopia del tubo digestivo alto", "un dedo oculta el margen", "sello rojo sobre las filas",
+    "frasco de vidrio decorativo", "hoja superpuesta que oculta el título", "otra hoja de fondo", "anotación manuscrita junto a Otros"
+  ];
+  for (const text of positives) it(`señal por objeto: «${text}»`, () => expect(derivationCues([text])).toEqual([text]));
+  for (const text of negatives) it(`NO es señal: «${text}»`, () => expect(derivationCues([text])).toEqual([]));
+
+  const raw = (overrides: Partial<RawSignal> = {}): RawSignal => ({
+    documentType: "HANDWRITTEN_REQUEST", studyRegion: { left: 100, top: 200, right: 800, bottom: 700 }, studyRegionComplete: true, rowsCutByImageEdge: [],
+    rowsHiddenByObjects: [], erasedOrIllegible: false, irrelevantCrops: [], printedContext: [], reason: "pedido manuscrito", ...overrides
+  });
+  const deps = (reads: (variant: "A" | "B") => RawSignal, kind: FunctionKind) => ({
+    complete: vi.fn(async (request: SignalRequest) => ({ value: reads(request.variant) })),
+    verifyFunction: vi.fn(async () => ({ value: check(kind) })),
+    model: "m",
+    reasoning: "medium"
+  });
+  const run = (d: ReturnType<typeof deps>) => readDocumentSignal({ imageBase64: "aW1n", mimeType: "image/jpeg", deps: d });
+
+  it("un objeto descrito SOLO como recorte irrelevante en UNA lectura activa la comprobación; sin impresos de derivación", async () => {
+    const d = deps((variant) => raw(variant === "A" ? { irrelevantCrops: ["Una jeringa oculta parte del encabezado, sin tapar los estudios"] } : {}), "SAMPLE_DERIVATION");
+    const result = await run(d);
+    expect(d.verifyFunction).toHaveBeenCalledTimes(2);
+    expect(result.signal.documentType).toBe("NOT_A_REQUEST");
+    expect(result.signal.function?.cues[0]).toContain("jeringa");
+  });
+
+  it("un objeto en las filas ocultas también cuenta, y una solicitud real con un tubo al lado se confirma sin perder estudios", async () => {
+    const hidden = (variant: "A" | "B") => raw({ studyRegionComplete: false, rowsHiddenByObjects: variant === "B" ? ["Un tubo de ensayo tapa el borde izquierdo"] : [] });
+    const confirmed = await run(deps(hidden, "MEDICAL_REQUEST"));
+    expect(confirmed.signal.documentType).toBe("HANDWRITTEN_REQUEST");
+    expect(confirmed.signal.function?.verdict).toBe("REQUEST");
+  });
+
+  it("sin objetos ni frases no hay comprobación (costo cero)", async () => {
+    const d = deps(() => raw({ irrelevantCrops: ["un sello en el margen"], reason: "solicitud manuscrita completa" }), "SAMPLE_DERIVATION");
+    await run(d);
+    expect(d.verifyFunction).not.toHaveBeenCalled();
+  });
+});

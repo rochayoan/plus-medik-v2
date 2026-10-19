@@ -1,7 +1,7 @@
 import { readImageWithGemini, readImageWithOpenAI, type SimpleReading } from "./ai.js";
 import { ExactAliasCatalogResolver, uniqueMatchedStudies } from "./catalog.js";
 import { buildSimpleConsensus, isTruncationOf, normalizeStudyKey, normalizeVisibleKey, sameVisibleText, type SimpleConsensus, type SimpleStudy } from "./consensus.js";
-import { activeCatalog, GENERIC_PROFILE_WORDS, identityTokens, isPackageComponent, qualifiersOf, shadowMatch, type Outcome, type ShadowBatch, type Support } from "./catalog-shadow.js";
+import { activeCatalog, GENERIC_PROFILE_WORDS, identityTokens, isPackageComponent, qualifiersOf, unresolvedPackageGroups, shadowMatch, type Outcome, type ShadowBatch, type Support } from "./catalog-shadow.js";
 import type { AiUsage } from "./cache.js";
 import { readDocumentSignal, type DocumentSignal } from "./document-signal.js";
 import type { DocumentFunctionInfo } from "./document-function.js";
@@ -99,6 +99,7 @@ export type AnalysisReason =
   // Solo en las decisiones por estudio del AUTO parcial (CATALOG_PARTIAL_AUTO).
   | "readers_variant_mismatch"
   | "package_component_overlap"
+  | "package_alternative_unresolved"
   | "document_impact_unverified"
   | "document_may_alter_study"
   | "document_study_not_fully_visible"
@@ -338,7 +339,7 @@ function contrastWithExact(
 
 // Líneas que el contraste semántico respalda: coincidencias confirmadas por el exacto, MATCH semánticos y componentes de compuestos
 // explícitos verificados. Un estudio, una línea, un cobro (UUID), con el precio siempre del catálogo de Supabase.
-function semanticBillableLines(matches: StudyMatch[], catalogById: Map<string, CatalogStudy>): { lines: CatalogCandidate[]; audit: NonNullable<AnalysisQuote["audit"]>; invalidPrice: boolean; overlap: boolean } {
+function semanticBillableLines(matches: StudyMatch[], catalogById: Map<string, CatalogStudy>): { lines: CatalogCandidate[]; audit: NonNullable<AnalysisQuote["audit"]>; invalidPrice: boolean; overlap: boolean; packageGroup: boolean } {
   const lines = new Map<string, CatalogCandidate>();
   const audit = new Map<string, { id: string; basis: QuoteBasis[]; texts: string[] }>();
   let invalidPrice = false;
@@ -362,7 +363,8 @@ function semanticBillableLines(matches: StudyMatch[], catalogById: Map<string, C
   // Un paquete y uno de sus componentes nunca se cobran juntos (cobro duplicado).
   const picked = [...lines.keys()].map((id) => catalogById.get(id)).filter((study): study is CatalogStudy => Boolean(study));
   const overlap = picked.some((pkg) => picked.some((component) => isPackageComponent(pkg, component)));
-  return { lines: [...lines.values()], audit: [...audit.values()], invalidPrice, overlap };
+  const packageGroup = unresolvedPackageGroups(picked, [...catalogById.values()]).length > 0;
+  return { lines: [...lines.values()], audit: [...audit.values()], invalidPrice, overlap, packageGroup };
 }
 
 const toCandidate = (study: CatalogStudy): CatalogCandidate => ({
@@ -534,6 +536,7 @@ export function assembleAnalysis(args: {
   // Un precio inválido en cualquier línea semántica impide cobrar (nunca se cotiza con un importe que no sea del catálogo).
   if (semanticLines?.invalidPrice) semanticReasons.push("catalog_price_invalid");
   if (semanticLines?.overlap) semanticReasons.push("package_component_overlap");
+  if (semanticLines?.packageGroup) semanticReasons.push("package_alternative_unresolved");
 
   const unmatchedMatches = matches.filter((match) => match.status === "UNMATCHED");
   const ambiguousMatches = matches.filter((match) => match.status === "AMBIGUOUS");
@@ -561,6 +564,7 @@ export function assembleAnalysis(args: {
     // Un paquete y uno de sus componentes nunca se cobran juntos (cobro duplicado).
     const matched = matches.flatMap((match) => (match.status === "MATCHED" ? [catalogById.get(match.study?.id ?? "")] : [])).filter((study): study is CatalogStudy => Boolean(study));
     if (matched.some((pkg) => matched.some((component) => isPackageComponent(pkg, component)))) reasons.push("package_component_overlap");
+    if (unresolvedPackageGroups(matched, catalog).length > 0) reasons.push("package_alternative_unresolved");
   }
 
   const decision = reasons.length === 0 ? "AUTO_SAFE" : "HUMAN_REVIEW";

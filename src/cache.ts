@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertModelCallsAllowed } from "./offline.js";
 
 // Cambiar este número invalida todo el cache existente (formato de clave/entrada).
 export const CACHE_VERSION = 1;
@@ -131,6 +132,8 @@ export async function cachedAiCall<T>(options: {
     }
   }
 
+  // Modo offline: ANTES de la guarda de gasto, para que ninguna guarda permisiva pueda dejar pasar una llamada real.
+  assertModelCallsAllowed(label, provider, model);
   await realCallGate?.({ label, provider, model });
   const { value, usage } = await options.call();
   await appendUsageLine({

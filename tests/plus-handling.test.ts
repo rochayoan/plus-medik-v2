@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { assembleAnalysis, type DocumentGate } from "../src/analyze.js";
-import { approvedPackage, isPackageComponent, packageItems, plusItems, uncoveredPlusItems, verifyDecision, type RawDecision } from "../src/catalog-shadow.js";
+import { completeQuote } from "../src/quote-completion.js";
+import { approvedPackage, coveringComponents, isPackageComponent, packageItems, plusItems, uncoveredPlusItems, unresolvedPackageGroups, verifyDecision, type RawDecision } from "../src/catalog-shadow.js";
 import { buildSimpleConsensus, normalizeStudyKey, type SimpleStudy } from "../src/consensus.js";
 import type { SimpleReading } from "../src/ai.js";
 import type { CatalogStudy } from "../src/types.js";
@@ -67,14 +68,60 @@ describe("paquete con '+' y componentes: nunca se cobran juntos", () => {
     expect(result.quote).toBeUndefined();
   });
 
-  it("los componentes pedidos por separado se cotizan por separado y el CRM recibe el aviso del paquete (sin sustituir el precio)", () => {
+  it("todos los componentes de un paquete aprobados por separado: el grupo queda PENDIENTE (no se puede distinguir 'separados' de 'el paquete separado por los lectores')", () => {
     const result = run("Zetaina", "Kappaina en sangre");
-    expect(result.internal?.quoted.lines.map((l) => l.code)).toEqual(["z", "k"]);
-    expect(result.publicQuote?.totalBs).toBe(70);
+    expect(result.internal?.quoted.lines).toEqual([]);
+    expect(result.publicQuote).toBeUndefined();
+    expect(result.outcome).toBe("HUMAN_REVIEW");
+    expect(result.internal?.studies.map((s) => s.blockers)).toEqual([["package_alternative_unresolved"], ["package_alternative_unresolved"]]);
     expect(result.internal?.advisories.join(" ")).toContain("ZETAINA + KAPPAINA");
-    expect(JSON.stringify(result.publicQuote)).not.toMatch(/paquete|aviso|advis/i);
+    expect(result.internal?.advisories.join(" ")).toContain("pendientes");
   });
 
+  it("un estudio independiente de la misma receta SÍ se cotiza; solo el grupo queda retenido, y la salida pública no menciona nada", () => {
+    const result = run("Zetaina", "Kappaina en sangre", "Omegaina");
+    expect(result.outcome).toBe("AUTO_PARTIAL");
+    expect(result.internal?.quoted.lines.map((l) => l.code)).toEqual(["o"]);
+    expect(result.publicQuote?.totalBs).toBe(15);
+    expect(JSON.stringify(result.publicQuote)).not.toMatch(/paquete|aviso|advis|pendiente|zeta|kappa/i);
+    expect(result.internal?.pending.filter((p) => p.kind === "STUDY").map((p) => p.text)).toEqual(["Zetaina", "Kappaina en sangre"]);
+  });
+
+  it("también vale para paquetes con la lista entre paréntesis, y con componentes en cualquier orden", () => {
+    expect(run("Kappaina en sangre", "Zetaina").internal?.quoted.lines).toEqual([]);
+    const onlyParens = [zeta, kappa, parens];
+    const reading = (...texts: string[]): SimpleReading => ({ requestedStudies: texts.map(row), uncertainStudies: [], notes: "" });
+    const a = reading("Zetaina", "Kappaina en sangre");
+    const result = assembleAnalysis({ consensus: buildSimpleConsensus(a, a), judgement: { resolvedStudies: [], unresolvedDisputes: [] }, catalog: onlyParens, document: doc, partialAuto: true });
+    expect(result.internal?.quoted.lines).toEqual([]);
+    expect(result.internal?.advisories.join(" ")).toContain("IONO UNO");
+  });
+
+  it("si solo se pide una parte de los componentes NO hay grupo: se cotiza normal", () => {
+    const result = run("Kappaina en sangre", "Omegaina");
+    expect(result.internal?.quoted.lines.map((l) => l.code)).toEqual(["k", "o"]);
+    expect(result.internal?.advisories).toEqual([]);
+  });
+
+  it("el flujo heredado también retiene el grupo: nunca AUTO_SAFE con componentes que podrían ser el paquete", () => {
+    const result = run("Zetaina", "Kappaina en sangre");
+    expect(result.decision).toBe("HUMAN_REVIEW");
+    expect(result.reasons).toContain("package_alternative_unresolved");
+    expect(result.quote).toBeUndefined();
+    const solo = run("Kappaina en sangre", "Omegaina");
+    expect(solo.decision).toBe("AUTO_SAFE");
+  });
+
+  it("completar con revisión humana: asignar el paquete a uno de los pendientes y descartar el otro cobra una sola vez el paquete", () => {
+    const record = run("Zetaina", "Kappaina en sangre").internal!;
+    const result = completeQuote(record, [
+      { pendingKey: "zetaina", action: "ASSIGN", studyIds: [zk.id], reviewer: "ana" },
+      { pendingKey: "kappaina en sangre", action: "NOT_REQUESTED", reviewer: "ana" }
+    ], { revision: record.revision, catalog, now: () => new Date("2026-10-20T10:00:00.000Z") });
+    expect(result.rejected).toEqual([]);
+    expect(result.record.quoted.lines.map((l) => l.code)).toEqual(["zk"]);
+    expect(result.publicQuote?.totalBs).toBe(60);
+  });
   it("un solo componente no genera aviso", () => {
     expect(run("Zetaina").internal?.advisories).toEqual([]);
   });
@@ -137,5 +184,26 @@ describe("texto con '+': un solo estudio no puede ignorar parte de lo pedido", (
 
   it("sin '+', nada cambia: «Zetaina» sigue siendo un MATCH simple", () => {
     expect(verifyDecision("Zetaina", decision("MATCH", [zeta]), catalog).kind).toBe("MATCH");
+  });
+});
+
+describe("coveringComponents / unresolvedPackageGroups", () => {
+  it("un componente distinto por elemento; un mismo estudio no cubre dos elementos", () => {
+    expect(coveringComponents(zk, [zeta, kappa, omega])?.map((s) => s.code)).toEqual(["z", "k"]);
+    expect(coveringComponents(zk, [zeta, omega])).toBeUndefined();
+    expect(coveringComponents(zk, [zeta, zeta])).toBeUndefined();
+    expect(coveringComponents(zeta, [zeta])).toBeUndefined();
+    expect(coveringComponents(panel, [zeta, kappa])).toBeUndefined();
+  });
+  it("estudios inactivos o de otra muestra no cubren", () => {
+    expect(coveringComponents(zk, [zeta, { ...kappa, active: false }])).toBeUndefined();
+    const urine = study("ku", "KAPPAINA EN ORINA", "URIANALISIS", 20);
+    const sangre = study("zs", "ZETAINA + KAPPAINA EN SANGRE", "QUIMICA SANGUINEA", 80);
+    expect(coveringComponents(sangre, [zeta, urine])).toBeUndefined();
+  });
+  it("no hay grupo si el paquete ya está seleccionado", () => {
+    expect(unresolvedPackageGroups([zeta, kappa, zk], catalog).map((g) => g.pkg.code)).toEqual(["pp"]);
+    expect(unresolvedPackageGroups([zeta, kappa], catalog).map((g) => g.pkg.code).sort()).toEqual(["pp", "zk"]);
+    expect(unresolvedPackageGroups([omega], catalog)).toEqual([]);
   });
 });

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { isPackageComponent, packageItems } from "./catalog-shadow.js";
+import { isPackageComponent, unresolvedPackageGroups } from "./catalog-shadow.js";
 import { normalizeStudyKey } from "./consensus.js";
 import type { DocumentFunctionInfo } from "./document-function.js";
 import type { StudyImpactResult } from "./study-impact.js";
@@ -188,6 +188,18 @@ export function evaluatePartial(input: PartialInput): { outcome: QuoteOutcome; r
     }
   }
 
+  // Componentes que juntos forman un paquete activo: no se sabe si se pidieron por separado o como la expresión del paquete que los lectores separaron
+  // (el precio aplicable lo decide el laboratorio), así que ese grupo queda pendiente. Si solo están algunos componentes, no hay grupo.
+  const groupIds = new Set<string>();
+  const selected = [...new Set(input.studies.flatMap((_study, index) => idsOf(index)))].map((id) => input.catalogById.get(id)).filter((study): study is CatalogStudy => Boolean(study));
+  const groups = unresolvedPackageGroups(selected, input.catalog);
+  for (const group of groups) for (const part of group.parts) groupIds.add(part.id);
+  if (groupIds.size > 0) {
+    input.studies.forEach((_study, index) => {
+      if (idsOf(index).some((id) => groupIds.has(id))) blockers[index]!.push("package_alternative_unresolved");
+    });
+  }
+
   const studies: StudyDecision[] = input.studies.map((study, index) => ({
     key: keys[index]!,
     text: study.literalText,
@@ -219,16 +231,8 @@ export function evaluatePartial(input: PartialInput): { outcome: QuoteOutcome; r
   ];
 
   const allLines = [...lineMap.values()];
-  // Si los componentes cotizados por separado son TODOS los de un paquete activo, se avisa (qué precio aplica es una decisión comercial: no se sustituye).
-  const advisories: string[] = [];
-  const quotedStudies = allLines.map((line) => input.catalogById.get(line.id)).filter((study): study is CatalogStudy => Boolean(study));
-  for (const pkg of input.catalog) {
-    if (!pkg.active || quotedStudies.some((study) => study.id === pkg.id)) continue;
-    const items = packageItems(pkg);
-    if (items.length < 2) continue;
-    const parts = quotedStudies.filter((study) => isPackageComponent(pkg, study));
-    if (parts.length >= items.length) advisories.push(`los estudios ${parts.map((p) => p.code ?? p.name).join(" + ")} forman el paquete «${pkg.name}» (${pkg.code ?? "sin código"}); se cotizaron por separado`);
-  }
+  // Aviso para el laboratorio: qué paquete forman los estudios retenidos y por qué (qué precio aplica, paquete o suma, es una decisión comercial).
+  const advisories = groups.map((group) => `los estudios ${group.parts.map((p) => p.code ?? p.name).join(" + ")} forman el paquete «${group.pkg.name}» (${group.pkg.code ?? "sin código"}); quedaron pendientes porque no se puede saber si se pidieron por separado o como ese paquete`);
   const quotedLines = input.recipeStops.length === 0 ? allLines : [];
   const outcome: QuoteOutcome = quotedLines.length === 0 ? "HUMAN_REVIEW" : pending.length === 0 ? "AUTO_COMPLETE" : "AUTO_PARTIAL";
   const subtotalBs = quotedLines.reduce((sum, line) => sum + line.priceBs, 0);

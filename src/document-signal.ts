@@ -493,7 +493,7 @@ export async function readDocumentSignal(args: { imageBase64: string; mimeType: 
   // FUNCIÓN del documento. El formato (manuscrito, casillas) dice cómo se escribe, no para qué sirve: una tarjeta de derivación de una muestra
   // ya tomada puede estar escrita igual que una receta. Si CUALQUIERA de las lecturas extrajo frases de derivación o rótulo de muestra, se
   // comprueba la imagen con dos lecturas independientes; sin verificador, con error o con discrepancia falla cerrado.
-  const cues = derivationCues([...a.printedContext, ...b.printedContext].map((line) => line.text).concat(a.irrelevantCrops, b.irrelevantCrops, [a.reason, b.reason]));
+  const cues = derivationCues([...a.printedContext, ...b.printedContext].map((line) => line.text).concat(a.irrelevantCrops, b.irrelevantCrops, a.rowsHiddenByObjects, b.rowsHiddenByObjects, [a.reason, b.reason]));
   let functionInfo: DocumentFunctionInfo | undefined;
   if (baseRelevantType && cues.length > 0) {
     functionInfo = { cues, verdict: "UNAVAILABLE", kinds: [], notes: [] };
