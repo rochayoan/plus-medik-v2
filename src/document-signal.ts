@@ -126,6 +126,24 @@ export function hardProblems(raw: RawSignal, hiddenVerified = false): string[] {
   return problems;
 }
 
+// Tipo de cada problema de integridad. Permiten decidir (cotización parcial) qué problemas solo dejan estudios sin ver y cuáles invalidan
+// toda la lectura:
+//  - CUT_EDGE / HIDDEN / EDGE_UNVERIFIED: hay zonas que no se ven (pueden contener MÁS estudios o afectar a los visibles).
+//  - ERASED / INVALID_BOX / UNEXPLAINED_DOUBT: la lectura misma no es confiable (tachaduras, caja inválida, duda del modelo sin causa).
+export type IntegrityKind = "CUT_EDGE" | "HIDDEN" | "EDGE_UNVERIFIED" | "ERASED" | "INVALID_BOX" | "UNEXPLAINED_DOUBT";
+
+export function integrityKinds(raw: RawSignal, verifiedEdges: ReadonlySet<Edge> = new Set(), hiddenVerified = false): IntegrityKind[] {
+  const kinds: IntegrityKind[] = [];
+  if (raw.rowsCutByImageEdge.length > 0) kinds.push("CUT_EDGE");
+  if (!hiddenVerified && raw.rowsHiddenByObjects.length > 0) kinds.push("HIDDEN");
+  if (touchedEdges(raw.studyRegion).some((edge) => !verifiedEdges.has(edge))) kinds.push("EDGE_UNVERIFIED");
+  if (raw.erasedOrIllegible) kinds.push("ERASED");
+  if (!validRegion(raw.studyRegion)) kinds.push("INVALID_BOX");
+  const explained = raw.rowsCutByImageEdge.length > 0 || raw.rowsHiddenByObjects.length > 0 || raw.erasedOrIllegible;
+  if (!raw.studyRegionComplete && !explained) kinds.push("UNEXPLAINED_DOUBT");
+  return kinds;
+}
+
 const proximityProblem = (edges: Edge[]) => `la zona de estudios toca el borde ${edges.map((edge) => EDGE_NAMES[edge]).join(" y ")} de la imagen`;
 
 // La decisión de integridad es del código: no basta con que el modelo diga "completo". Los bordes verificados no cuentan como problema.
@@ -195,14 +213,15 @@ export function edgeCheckPassed(value: EdgeCheck, edges: Edge[]): { ok: boolean;
 
 // ───────────────────────────── verificación enfocada de ocultamientos ─────────────────────────────
 // Un dedo, sello o doblez que tapa el margen o el guion que antecede a una línea ya legible no debería impedir una cotización; uno que podría
-// tapar letras de un estudio o una marca de selección sí. En vez de interpretar el texto libre de la primera lectura, se vuelve a mirar la
+// tapar letras de un estudio pedido o una marca de selección sí. En vez de interpretar el texto libre de la primera lectura, se vuelve a mirar la
 // imagen con una pregunta concreta por objeto, en dos lecturas independientes. Solo se acepta si AMBAS dicen, para TODOS los objetos, que
-// lo oculto es únicamente guion/viñeta/margen/espacio vacío, nombran el texto visible contiguo y no tienen otras dudas sobre la zona.
+// lo oculto no puede ser un estudio pedido ni su marca (guion/viñeta/margen/espacio vacío, o el rótulo de filas con su casilla visible y vacía
+// en un formulario de casillas), nombran el texto visible contiguo y no tienen otras dudas sobre la zona. Nunca se supone lo que hay debajo.
 
 const hiddenCheckSchema = z.object({
   items: z.array(z.object({
     index: z.number().int(),
-    couldHide: z.enum(["STUDY_TEXT", "MARK_OR_SELECTION", "ONLY_BULLET_MARGIN_OR_BLANK"]),
+    couldHide: z.enum(["STUDY_TEXT", "MARK_OR_SELECTION", "ONLY_BULLET_MARGIN_OR_BLANK", "UNSELECTED_ROW_LABEL_ONLY"]),
     visibleNeighbor: z.string()
   })),
   otherDoubts: z.boolean(),
@@ -219,31 +238,46 @@ export interface HiddenRequest {
 }
 
 export function hiddenInstructions(variant: "A" | "B", hidden: string[]): string {
-  const rules = [
-    "- couldHide = STUDY_TEXT si lo oculto podría contener letras o palabras del nombre de un estudio (o su continuación), una cantidad o cualquier texto de la solicitud.",
-    "- couldHide = MARK_OR_SELECTION si podría contener una casilla, una marca de selección (X, check, círculo, subrayado, tachado) o una casilla sin ver.",
-    "- couldHide = ONLY_BULLET_MARGIN_OR_BLANK SOLO si lo único que podría haber debajo es el guion o la viñeta que antecede a una línea ya legible, un margen o espacio vacío, y el texto de esa línea se ve COMPLETO a su lado.",
+  // Las definiciones son las mismas en las dos lecturas; lo que cambia es el método (qué se mira primero) y el orden de presentación.
+  // Se invierte solo el orden de las definiciones de couldHide: la regla general y las de cierre quedan fijas para no sesgar a una de las lecturas.
+  const general = [
+    "- Primero distingue QUÉ podría estar debajo: (a) letras o continuación del texto de un estudio PEDIDO, (b) la marca de selección o su casilla, (c) solo el rótulo de filas que NO están pedidas, (d) solo guion, viñeta, margen o vacío. Nunca supongas lo que hay debajo de un objeto: solo cuenta lo que puedes ver junto a él."
+  ];
+  const definitions = [
+    "- couldHide = STUDY_TEXT si lo oculto podría contener letras, palabras o la continuación del nombre de un estudio que está pedido o cuya selección NO puedes comprobar, un pedido escrito a mano (no hay casillas), una cantidad o cualquier texto de la solicitud que podría ser un estudio.",
+    "- couldHide = MARK_OR_SELECTION si podría contener una casilla, un óvalo, una marca de selección (X, check, círculo, subrayado, tachado, raya sobre el texto) o parte de ella, sin ver entera.",
+    "- couldHide = UNSELECTED_ROW_LABEL_ONLY SOLO si se cumplen las TRES condiciones: (1) es un formulario impreso donde un estudio se pide con una marca DENTRO de su casilla, óvalo o círculo, y NO subrayando, rayando ni tachando el texto del rótulo; (2) lo oculto es únicamente texto del rótulo de filas cuya casilla u óvalo se ve ENTERO y VACÍO; (3) ninguna de esas filas muestra señal alguna de selección. Si un estudio puede pedirse subrayando, rayando o tachando el texto, o el pedido es manuscrito, NO uses este valor: elige STUDY_TEXT.",
+    "- couldHide = ONLY_BULLET_MARGIN_OR_BLANK SOLO si lo único que podría haber debajo es el guion o la viñeta que antecede a una línea ya legible, un margen o espacio vacío, y el texto de esa línea se ve COMPLETO a su lado."
+  ];
+  const closing = [
     "- Ante la duda razonable sobre lo que hay debajo, elige STUDY_TEXT.",
-    "- visibleNeighbor: el texto de la solicitud que SÍ se ve junto a lo oculto (la palabra o línea contigua), literal. Si no hay ninguno, deja la cadena vacía.",
+    "- visibleNeighbor: el texto de la solicitud que SÍ se ve junto a lo oculto (la palabra o línea contigua), literal. Con UNSELECTED_ROW_LABEL_ONLY nombra el rótulo visible de la fila cuya casilla vacía ves. Si no hay ninguno, deja la cadena vacía.",
     "- otherDoubts: true si, SIN contar los objetos de la lista, aún hay algún motivo para dudar de que toda la lista de estudios esté completa y legible (filas cortadas por el borde, trazos borrados o ilegibles, texto que continúa fuera de la foto)."
   ];
+  const method = variant === "A"
+    ? "Método: recorre los objetos en orden y, para cada uno, mira qué filas, casillas y marcas toca."
+    : "Método: primero mira las casillas y marcas de selección que quedan junto a cada objeto y después el texto que tapa; responde por cada objeto en orden.";
   return `
 Una lectura previa indicó que estos objetos (dedos, sellos, dobleces, otras hojas) ocultan partes de la solicitud de estudios:
 ${hidden.map((item, index) => `${index}. ${item}`).join("\n")}
 Mira la imagen y, para CADA objeto (con su índice), decide qué podría haber debajo de lo que tapa.
-${(variant === "A" ? rules : [...rules].reverse()).join("\n")}
+${method}
+${[...general, ...(variant === "A" ? definitions : [...definitions].reverse()), ...closing].join("\n")}
 Ignora el encabezado, los datos del paciente, las firmas y los sellos: solo importa la lista de estudios y sus marcas.
 En reason explica en una frase qué ves junto a cada objeto.
 `;
 }
 
-// Acepta solo si TODOS los objetos están respondidos como "solo guion/margen/vacío", con texto contiguo nombrado, y sin otras dudas.
-export function hiddenCheckPassed(value: HiddenCheck, count: number): { ok: boolean; notes: string[] } {
+// Acepta solo si TODOS los objetos están respondidos como "no pueden ocultar un estudio pedido ni su marca" (guion/margen/vacío o, solo en un
+// formulario de casillas, rótulo de filas con casilla vacía visible), con texto contiguo nombrado, y sin otras dudas.
+export function hiddenCheckPassed(value: HiddenCheck, count: number, options: { allowUnselectedLabels?: boolean } = {}): { ok: boolean; notes: string[] } {
   const notes: string[] = [];
   for (let index = 0; index < count; index++) {
     const item = value.items.find((candidate) => candidate.index === index);
     if (!item) notes.push(`objeto ${index}: sin respuesta`);
-    else if (item.couldHide !== "ONLY_BULLET_MARGIN_OR_BLANK") notes.push(`objeto ${index}: podría ocultar ${item.couldHide === "STUDY_TEXT" ? "texto de un estudio" : "una marca de selección"}`);
+    else if (item.couldHide === "STUDY_TEXT") notes.push(`objeto ${index}: podría ocultar texto de un estudio`);
+    else if (item.couldHide === "MARK_OR_SELECTION") notes.push(`objeto ${index}: podría ocultar una marca de selección`);
+    else if (item.couldHide === "UNSELECTED_ROW_LABEL_ONLY" && !options.allowUnselectedLabels) notes.push(`objeto ${index}: solo se acepta que tape rótulos sin marcar en un formulario de casillas`);
     else if (item.visibleNeighbor.trim() === "") notes.push(`objeto ${index}: no se nombró el texto visible contiguo`);
   }
   if (value.otherDoubts) notes.push("hay otras dudas sobre la zona de estudios");
@@ -322,6 +356,8 @@ export interface DocumentSignal {
     // Objetos que ocultaban partes de la hoja y que la verificación enfocada confirmó que solo tapaban guiones, márgenes o espacio vacío.
     hiddenVerified?: boolean;
     hiddenNotes?: string[];
+    // Tipos de los problemas que siguen vigentes (unión de las dos lecturas). Vacío si el documento está completo.
+    kinds?: IntegrityKind[];
   };
   reasons: [string, string];
   context?: DocumentContext;
@@ -344,7 +380,8 @@ export function fuseSignals(a: RawSignal, b: RawSignal, verifiedEdges: ReadonlyS
       irrelevantCrops: [...new Set([...a.irrelevantCrops, ...b.irrelevantCrops])],
       studyRegion: validRegion(a.studyRegion) && validRegion(b.studyRegion) ? union(a.studyRegion, b.studyRegion) : undefined,
       verifiedEdges: [...verifiedEdges].map((edge) => EDGE_NAMES[edge]),
-      hiddenVerified
+      hiddenVerified,
+      kinds: [...new Set([...integrityKinds(a, verifiedEdges, hiddenVerified), ...integrityKinds(b, verifiedEdges, hiddenVerified)])]
     },
     reasons: [a.reason, b.reason],
     context: fuseContext(a.printedContext, b.printedContext)
@@ -478,8 +515,10 @@ export async function readDocumentSignal(args: { imageBase64: string; mimeType: 
     };
     try {
       const [ha, hb] = await Promise.all([verifyOne("A"), verifyOne("B")]);
-      const resultA = hiddenCheckPassed(ha, hiddenList.length);
-      const resultB = hiddenCheckPassed(hb, hiddenList.length);
+      // Rótulos sin marcar solo se aceptan en formularios de casillas; un pedido manuscrito o impreso en texto no tiene casillas que comprobar.
+      const options = { allowUnselectedLabels: a.documentType === "MARK_DEPENDENT_FORM" && b.documentType === "MARK_DEPENDENT_FORM" };
+      const resultA = hiddenCheckPassed(ha, hiddenList.length, options);
+      const resultB = hiddenCheckPassed(hb, hiddenList.length, options);
       hiddenNotes.push(...resultA.notes.map((note) => `verificación A: ${note}`), ...resultB.notes.map((note) => `verificación B: ${note}`));
       hiddenVerified = resultA.ok && resultB.ok;
     } catch (error) {

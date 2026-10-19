@@ -4,7 +4,9 @@ import { buildSimpleConsensus, isTruncationOf, normalizeStudyKey, normalizeVisib
 import { activeCatalog, GENERIC_PROFILE_WORDS, identityTokens, qualifiersOf, shadowMatch, type Outcome, type ShadowBatch, type Support } from "./catalog-shadow.js";
 import type { AiUsage } from "./cache.js";
 import { readDocumentSignal, type DocumentSignal } from "./document-signal.js";
-import { judgeDisputesWithOpenAI, type SimpleJudgement } from "./judge.js";
+import { judgeDisputesWithOpenAI, type ResolvedStudy, type SimpleJudgement } from "./judge.js";
+import { evaluatePartial, studyKeyOf, type InternalRecord, type PublicQuote, type QuoteOutcome } from "./partial-auto.js";
+import { verifyStudyImpact, type StudyImpactResult } from "./study-impact.js";
 import {
   resolveCatalogSemantically,
   type SemanticBatchResult,
@@ -18,6 +20,8 @@ export type VisualSource = "agreed" | "judge_confirmed";
 
 export interface FinalVisualStudy extends SimpleStudy {
   source: VisualSource;
+  // Solo si la certeza la fijó la resolución de una disputa de certeza (ver judgeResolvedConfidence): qué se hizo y por qué.
+  confidenceNote?: string;
 }
 
 export interface CatalogCandidate {
@@ -90,7 +94,14 @@ export type AnalysisReason =
   | "semantic_passes_disagree"
   | "semantic_contradicts_exact"
   | "semantic_auto_not_enabled"
-  | "catalog_price_invalid";
+  | "catalog_price_invalid"
+  // Solo en las decisiones por estudio del AUTO parcial (CATALOG_PARTIAL_AUTO).
+  | "readers_variant_mismatch"
+  | "package_component_overlap"
+  | "document_impact_unverified"
+  | "document_may_alter_study"
+  | "document_study_not_fully_visible"
+  | "document_context_unverified";
 
 // Por qué una línea entró en la cotización (solo con la integración semántica principal): auditoría, no afecta al cobro.
 export type QuoteBasis = "EXACT_CONFIRMED" | "SEMANTIC" | "COMPOSITE_COMPONENT";
@@ -116,6 +127,8 @@ export interface DocumentGate {
   // Objetos que tapaban partes de la hoja y que la verificación enfocada confirmó que solo ocultaban guiones, márgenes o espacio vacío.
   hiddenVerified?: boolean;
   hiddenNotes?: string[];
+  // Tipo de cada problema de integridad vigente (ver IntegrityKind). Sin él, la zona queda sin tipificar (UNTYPED) y cada estudio exige verificación.
+  integrityKinds?: string[];
   // Contexto impreso que se entregó al resolvedor semántico (solo lo que ambas lecturas coincidieron en ver).
   context?: { lines: string[]; muestra?: string; tiempo?: string; conflicts: string[] };
 }
@@ -157,14 +170,31 @@ export interface AnalysisResult {
     simulatedDecision: "AUTO_SAFE" | "HUMAN_REVIEW";
     quote?: AnalysisQuote;
   };
+  // AUTO PARCIAL (solo con CATALOG_PARTIAL_AUTO=on; los campos heredados decision/reasons/quote no cambian de significado: AUTO_SAFE y `quote`
+  // existen únicamente cuando TODA la receta quedó cotizada).
+  //   outcome      AUTO_COMPLETE | AUTO_PARTIAL | HUMAN_REVIEW
+  //   publicQuote  LO ÚNICO que ve el paciente (estudios cotizados, precios e importe de esos estudios). Nunca contiene estados ni pendientes.
+  //   internal     registro para el CRM: decisiones por estudio, pendientes, bloqueos, problemas del documento, UUID y auditoría.
+  outcome?: QuoteOutcome;
+  publicQuote?: PublicQuote;
+  internal?: InternalRecord;
   quote?: AnalysisQuote;
 }
 
-export type HandwrittenAutoMode = "off" | "shadow";
+// off: un pedido manuscrito va siempre a revisión humana (handwritten_out_of_scope).
+// shadow: además evalúa y reporta (sin autorizar nada) si un manuscrito legible sería AUTO bajo criterios estrictos.
+// on: el manuscrito deja de bloquearse por serlo y se rige por los MISMOS requisitos que un pedido impreso (lectura confiable, consenso,
+//     variantes claras, matching verificado y precios del catálogo). Apagado por defecto hasta validar el comportamiento.
+export type HandwrittenAutoMode = "off" | "shadow" | "on";
 
-// Bandera del AUTO manuscrito. Solo existe el modo "shadow" (evaluar y reportar sin autorizar nada); cualquier otro valor la deja apagada.
 export function handwrittenAutoMode(env: NodeJS.ProcessEnv = process.env): HandwrittenAutoMode {
-  return env.CATALOG_HANDWRITTEN_AUTO?.trim().toLowerCase() === "shadow" ? "shadow" : "off";
+  const value = env.CATALOG_HANDWRITTEN_AUTO?.trim().toLowerCase();
+  return value === "shadow" || value === "on" ? value : "off";
+}
+
+// Bandera del AUTO parcial (decisiones por estudio, salida pública y registro interno). Apagada por defecto.
+export function partialAutoEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.CATALOG_PARTIAL_AUTO?.trim().toLowerCase() === "on";
 }
 
 // Mismas variantes explícitas (isotipo, libre/total, cualitativo, método, población, muestra, seriado/simple, 24 h...) en dos transcripciones.
@@ -344,12 +374,36 @@ const observationFor = (text: string): StudyObservation => ({
 });
 
 // Estudios visuales finales: acordados + confirmados por el juez. Los rechazados se excluyen.
+// Una disputa que existía SOLO por la certeza ("not_high_confidence_in_both") y que el juez confirmó mirando la imagen ("se ve claramente").
+// Ambos lectores ya habían transcrito el mismo estudio, sin incertidumbres relacionadas, con las mismas variantes y al menos uno con certeza alta:
+// lo único pendiente era la certeza autodeclarada de la otra lectura, que el juez resolvió. Cualquier otro caso (un solo lector, una incertidumbre
+// relacionada, variantes distintas, una lectura con certeza baja, ninguna alta) conserva la certeza del lector y sigue bloqueando.
+// Si no se cumple todo eso, la certeza es la MÁS BAJA de las dos lecturas (no la del lector que el juez usó de referencia por su orden).
+export function judgeResolvedConfidence(resolved: ResolvedStudy, consensus: SimpleConsensus): Partial<FinalVisualStudy> {
+  const dispute = consensus.disputes.find((candidate) => candidate.key === resolved.key);
+  if (!dispute || dispute.reason !== "not_high_confidence_in_both") return {};
+  const a = dispute.readerA.requested;
+  const b = dispute.readerB.requested;
+  if (!a || !b) return {};
+  const rank = { low: 1, medium: 2, high: 3 } as const;
+  const weakest = rank[a.confidence] <= rank[b.confidence] ? a.confidence : b.confidence;
+  const unrelated = dispute.readerA.uncertain.length === 0 && dispute.readerB.uncertain.length === 0 && sameVariants(a.literalText, b.literalText);
+  // Una duda de certeza sobre un estudio cuyo texto lleva una variante clínicamente decisiva (isotipo IgG/IgM, libre/total, cuali/cuantitativo,
+  // población) puede ser justamente esa variante: el juez no la resuelve por certeza, queda la lectura más débil. Tampoco si los dos textos
+  // no son la MISMA transcripción visible.
+  const decisive = Object.entries(qualifiersOf(identityTokens(`${a.literalText} ${b.literalText}`))).some(([dim, values]) => (["isotipo", "libreTotal", "cuantificacion", "poblacion"] as string[]).includes(dim) && values.size > 0);
+  if (unrelated && !decisive && sameVisibleText(a.literalText, b.literalText) && weakest !== "low" && (a.confidence === "high" || b.confidence === "high")) {
+    return { confidence: "high", confidenceNote: `certeza ${a.confidence}/${b.confidence} de los lectores resuelta por el juez (confirmado viendo la imagen)` };
+  }
+  return { confidence: weakest };
+}
+
 export function finalVisualStudiesOf(consensus: SimpleConsensus, judgement: SimpleJudgement): FinalVisualStudy[] {
   const all = [
     ...consensus.agreedStudies.map((study) => ({ ...study, source: "agreed" as const })),
     ...judgement.resolvedStudies
       .filter((resolved) => resolved.verdict === "confirmed")
-      .map((resolved) => ({ ...resolved.study, source: "judge_confirmed" as const }))
+      .map((resolved) => ({ ...resolved.study, ...judgeResolvedConfidence(resolved, consensus), source: "judge_confirmed" as const }))
   ];
   // Una selección visual, un estudio: el mismo texto (ignorando espaciado y puntuación) no se cuenta dos veces.
   const kept: FinalVisualStudy[] = [];
@@ -381,6 +435,12 @@ export function assembleAnalysis(args: {
   semanticAuto?: boolean;
   // Evalúa (sin autorizar) qué pasaría con un pedido manuscrito si pudiera ser AUTO. Requiere `primary` para tener algún resultado útil.
   handwrittenShadow?: boolean;
+  // El manuscrito no se bloquea por serlo (CATALOG_HANDWRITTEN_AUTO=on); se rige por los mismos requisitos que un impreso.
+  handwrittenAllowed?: boolean;
+  // Activa las decisiones por estudio / salida pública / registro interno (CATALOG_PARTIAL_AUTO=on).
+  partialAuto?: boolean;
+  // Resultado de la verificación de impacto (solo se usa si hay zonas que no se ven).
+  impact?: StudyImpactResult;
 }): AnalysisResult {
   const { consensus, judgement, catalog, semantic, document, primary } = args;
   const semanticAuto = Boolean(primary && args.semanticAuto);
@@ -439,10 +499,12 @@ export function assembleAnalysis(args: {
 
   // Integración semántica principal: contraste por estudio. Cualquier fallo (GPT, catálogo, verificación) deja el estudio sin respaldo.
   const semanticReasons: AnalysisReason[] = [];
+  // Motivos del contraste semántico de CADA estudio (alineados con matches), para las decisiones por estudio.
+  const matchSemanticReasons: AnalysisReason[][] = matches.map(() => []);
   if (primary) {
     const resultByText = new Map((primary.error ? [] : primary.batch?.results ?? []).map((result) => [result.literalText, result]));
     if (primary.error || !primary.batch) semanticReasons.push("semantic_unavailable");
-    for (const match of matches) {
+    for (const [matchIndex, match] of matches.entries()) {
       if (match.partialTranscriptionOf) {
         // La versión incompleta no puede producir coincidencia; el motivo global ya fuerza revisión.
         match.semanticPrimary = { kind: "NO_MATCH", agreement: true, studyIds: [], contrast: "NO_SEMANTIC_MATCH", reading: "", reason: `transcripción parcial de «${match.partialTranscriptionOf}»` };
@@ -451,6 +513,7 @@ export function assembleAnalysis(args: {
       const judged = contrastWithExact(match, resultByText.get(match.matchedText), catalogById, semanticAuto);
       match.semanticPrimary = judged.info;
       semanticReasons.push(...judged.reasons);
+      matchSemanticReasons[matchIndex] = judged.reasons;
       if (judged.info.contrast === "SEMANTIC_ONLY") {
         match.status = "SEMANTIC_CANDIDATE";
         match.study = toCandidate(catalogById.get(judged.info.studyIds[0]!)!);
@@ -472,7 +535,7 @@ export function assembleAnalysis(args: {
   const reasons: AnalysisReason[] = [];
   // Compuerta de documento (README: "documento soportado y visible completo"). Sin señal, nunca AUTO.
   if (!document || document.documentType === "UNKNOWN") reasons.push("document_type_uncertain");
-  else if (document.documentType === "HANDWRITTEN_REQUEST") reasons.push("handwritten_out_of_scope");
+  else if (document.documentType === "HANDWRITTEN_REQUEST") { if (!args.handwrittenAllowed) reasons.push("handwritten_out_of_scope"); }
   else if (document.documentType === "NOT_A_REQUEST") reasons.push("not_a_request");
   if (document && !document.completeDocumentVisible) reasons.push("document_not_complete");
   if (unresolvedDisputes.length > 0) reasons.push("visual_disputes_unresolved");
@@ -531,6 +594,58 @@ export function assembleAnalysis(args: {
     quote = { lines, totalBs: lines.reduce((sum, line) => sum + line.priceBs, 0), tariff: "PACIENTE" };
   }
 
+  // AUTO PARCIAL: decisión por estudio + salida pública + registro interno. No toca decision/reasons/quote (que siguen significando "receta completa").
+  let outcome: QuoteOutcome | undefined;
+  let publicQuote: PublicQuote | undefined;
+  let internal: InternalRecord | undefined;
+  if (args.partialAuto) {
+    const studyReasons = matches.map((match, index) => {
+      const own = new Set<AnalysisReason>(matchSemanticReasons[index]);
+      if (finalVisualStudies[index]!.confidence !== "high") own.add("non_high_certainty_study");
+      if (match.partialTranscriptionOf) own.add("visual_partial_transcription");
+      if (!primary) {
+        if (match.status === "UNMATCHED") own.add("catalog_unmatched");
+        else if (match.status === "AMBIGUOUS") own.add("catalog_ambiguous");
+        else if (match.status === "MODEL_SUGGESTED") own.add("catalog_model_suggested");
+      }
+      return [...own];
+    });
+    // Motivos que invalidan TODA la lectura: el tipo de documento (incierto, no es una solicitud, manuscrito sin permiso) y la ausencia de estudios.
+    // Un documento incompleto (corte, objeto, trazo ilegible, caja inválida, duda sin causa o problema sin tipo) NO detiene la receta: crea una
+    // zona desconocida y cada estudio solo se cotiza si se demuestra que no depende de ella (ver visual-risk.ts).
+    const kinds = document?.integrityKinds ?? [];
+    const recipeStops: AnalysisReason[] = [];
+    if (!document || document.documentType === "UNKNOWN") recipeStops.push("document_type_uncertain");
+    else if (document.documentType === "HANDWRITTEN_REQUEST" && !args.handwrittenAllowed) recipeStops.push("handwritten_out_of_scope");
+    else if (document.documentType === "NOT_A_REQUEST") recipeStops.push("not_a_request");
+    if (finalVisualStudies.length === 0) recipeStops.push("no_requested_studies");
+    const unseenRegion = Boolean(document && !document.completeDocumentVisible);
+    const variantMismatch = new Set<string>();
+    for (const study of finalVisualStudies) {
+      const pair = study.source === "agreed" ? consensus.agreedPairs?.find((candidate) => candidate.a.literalText === study.literalText) : undefined;
+      if (pair && !sameVariants(pair.a.literalText, pair.b.literalText)) variantMismatch.add(studyKeyOf(study.literalText));
+    }
+    const evaluation = evaluatePartial({
+      studies: finalVisualStudies,
+      matches,
+      studyReasons,
+      catalogById,
+      catalog,
+      unresolvedDisputes,
+      recipeStops,
+      unseenRegion,
+      documentType: document?.documentType,
+      documentComplete: Boolean(document?.completeDocumentVisible),
+      documentKinds: kinds,
+      documentProblems: document?.integrityProblems ?? [],
+      impact: args.impact,
+      variantMismatch
+    });
+    outcome = evaluation.outcome;
+    publicQuote = evaluation.publicQuote;
+    internal = evaluation.record;
+  }
+
   // Modo sombra del AUTO manuscrito: solo se evalúa y se informa; la decisión de producción no cambia.
   let handwrittenShadow: AnalysisResult["handwrittenShadow"];
   if (args.handwrittenShadow && document?.documentType === "HANDWRITTEN_REQUEST") {
@@ -567,6 +682,9 @@ export function assembleAnalysis(args: {
     },
     semanticPrimary,
     handwrittenShadow,
+    outcome,
+    publicQuote,
+    internal,
     quote
   };
 }
@@ -578,6 +696,8 @@ export interface AnalyzeDeps {
   resolveSemantic: typeof resolveCatalogSemantically;
   readDocument: (args: { imageBase64: string; mimeType: string }) => Promise<{ signal: DocumentSignal }>;
   shadowMatch: typeof shadowMatch;
+  // Verificación de impacto de las zonas que no se ven sobre cada estudio visible (AUTO parcial). Si falta o falla, ningún estudio se cotiza.
+  verifyImpact?: (args: { imageBase64: string; mimeType: string; studies: Array<{ key: string; text: string }>; problems: string[] }) => Promise<StudyImpactResult>;
 }
 
 export const defaultAnalyzeDeps: AnalyzeDeps = {
@@ -586,7 +706,8 @@ export const defaultAnalyzeDeps: AnalyzeDeps = {
   judge: judgeDisputesWithOpenAI,
   resolveSemantic: resolveCatalogSemantically,
   readDocument: readDocumentSignal,
-  shadowMatch
+  shadowMatch,
+  verifyImpact: verifyStudyImpact
 };
 
 // Bandera del AUTO semántico: solo tiene efecto con la integración semántica principal encendida. Apagada por defecto.
@@ -601,13 +722,16 @@ export function semanticPrimaryEnabled(env: NodeJS.ProcessEnv = process.env): bo
 
 // Flujo completo: lectores (con cache) -> consenso -> juez solo si hay disputas -> catálogo -> decisión.
 export async function analyzeImage(
-  args: { imageBase64: string; mimeType: string; catalog: CatalogStudy[]; semanticPrimary?: boolean; semanticAuto?: boolean; handwrittenAuto?: HandwrittenAutoMode },
+  args: { imageBase64: string; mimeType: string; catalog: CatalogStudy[]; semanticPrimary?: boolean; semanticAuto?: boolean; handwrittenAuto?: HandwrittenAutoMode; partialAuto?: boolean },
   deps: AnalyzeDeps = defaultAnalyzeDeps
 ): Promise<AnalysisResult> {
   const { imageBase64, mimeType, catalog } = args;
   const primaryEnabled = args.semanticPrimary ?? semanticPrimaryEnabled();
   const autoEnabled = primaryEnabled && (args.semanticAuto ?? semanticAutoEnabled());
-  const handwrittenShadow = primaryEnabled && (args.handwrittenAuto ?? handwrittenAutoMode()) === "shadow";
+  const handwrittenMode = args.handwrittenAuto ?? handwrittenAutoMode();
+  const handwrittenShadow = primaryEnabled && handwrittenMode === "shadow";
+  const handwrittenAllowed = handwrittenMode === "on";
+  const partialEnabled = args.partialAuto ?? partialAutoEnabled();
   const [gemini, openai, documentRead]: [SimpleReading, SimpleReading, { signal: DocumentSignal }] = await Promise.all([
     deps.readGemini(imageBase64, mimeType),
     deps.readOpenAI(imageBase64, mimeType),
@@ -620,6 +744,7 @@ export async function analyzeImage(
     agreement: signal.agreement,
     integrityProblems: signal.integrity.problems,
     irrelevantCrops: signal.integrity.irrelevantCrops,
+    integrityKinds: signal.integrity.kinds,
     verifiedEdges: signal.integrity.verifiedEdges,
     edgeNotes: signal.integrity.edgeNotes,
     hiddenVerified: signal.integrity.hiddenVerified,
@@ -631,6 +756,24 @@ export async function analyzeImage(
   const judgement: SimpleJudgement = consensus.hasDisputes
     ? await deps.judge({ imageBase64, mimeType, gemini, openai, disputes: consensus.disputes })
     : { resolvedStudies: [], unresolvedDisputes: [] };
+
+  // Ensamblado final. Con el AUTO parcial, si hay zonas que no se ven y estudios que dependen de comprobar que no los afectan, se verifica el
+  // impacto (dos lecturas) y se vuelve a ensamblar; si la verificación falta o falla, esos estudios quedan pendientes (nunca se asume lo oculto).
+  const finish = async (extra: { primary?: SemanticPrimaryInput; semantic?: SemanticBatchResult }): Promise<AnalysisResult> => {
+    const common = { consensus, judgement, catalog, document, ...extra, semanticAuto: autoEnabled, handwrittenShadow, handwrittenAllowed, partialAuto: partialEnabled };
+    const first = assembleAnalysis(common);
+    const check = first.internal?.document.impactCheck;
+    if (!partialEnabled || !check?.needed || check.candidates.length === 0) return first;
+    let impact: StudyImpactResult;
+    try {
+      impact = deps.verifyImpact
+        ? await deps.verifyImpact({ imageBase64, mimeType, studies: check.candidates, problems: document.integrityProblems?.length ? document.integrityProblems : ["la zona de estudios no pudo confirmarse completa y el motivo no está tipificado"] })
+        : { available: false, unaffected: new Set(), qualifierRisk: true, notes: ["no hay verificador de impacto"] };
+    } catch (error) {
+      impact = { available: false, unaffected: new Set(), qualifierRisk: true, notes: [`verificación de impacto no disponible: ${error instanceof Error ? error.message : String(error)}`] };
+    }
+    return assembleAnalysis({ ...common, impact });
+  };
 
   if (primaryEnabled) {
     // Capa semántica principal: TODOS los estudios visuales finales pasan por GPT (catálogo activo completo, dos pasadas, verificador).
@@ -644,7 +787,7 @@ export async function analyzeImage(
     } catch (error) {
       primary = { error: error instanceof Error ? error.message : String(error) };
     }
-    return assembleAnalysis({ consensus, judgement, catalog, document, primary, semanticAuto: autoEnabled, handwrittenShadow });
+    return finish({ primary });
   }
 
   // Segunda capa: solo los textos que el matcher exacto/alias deja UNMATCHED, todos en UNA sola llamada.
@@ -656,5 +799,5 @@ export async function analyzeImage(
   const queries = [...new Map(unmatchedStudies.map((visual) => [visual.literalText, { literalText: visual.literalText, normalizedName: visual.normalizedName }])).values()];
   const semantic = queries.length > 0 ? await deps.resolveSemantic({ queries, catalog }) : undefined;
 
-  return assembleAnalysis({ consensus, judgement, catalog, semantic, document });
+  return finish({ semantic });
 }

@@ -99,8 +99,32 @@ imagen ─┬─> Gemini (OpenRouter) ─┐
 | `CATALOG_SEMANTIC_PRIMARY=on` | GPT resuelve todos los estudios contra el catálogo activo completo (dos pasadas independientes + verificador determinístico + contexto del documento) y se contrasta con el matcher exacto. Los resultados quedan como *candidatos*: la decisión sigue en `HUMAN_REVIEW`. |
 | `CATALOG_SEMANTIC_AUTO=on` | Además, los MATCH semánticos verificados y los compuestos explícitos (p. ej. GOT/GPT) pueden entrar a una cotización `AUTO_SAFE`. Solo tiene efecto con `PRIMARY=on`. **No activar para usuarios reales sin autorización expresa.** |
 | `CATALOG_HANDWRITTEN_AUTO=shadow` | Solo **simula**: para un pedido manuscrito legible informa en `handwrittenShadow` si sería AUTO (documento verificado completo, dos lecturas idénticas sin juez, certeza alta, mismas variantes y matching semántico verificado). **Nunca cambia la decisión real**: el manuscrito sigue en `HUMAN_REVIEW`. Requiere `PRIMARY=on`. |
+| `CATALOG_HANDWRITTEN_AUTO=on` | El pedido manuscrito deja de ir a revisión por serlo y se rige por los **mismos requisitos que un impreso** (lectura confiable, consenso, variantes claras, matching verificado y precios del catálogo). |
+| `CATALOG_PARTIAL_AUTO=on` | **AUTO parcial**: cada estudio se decide por separado; los seguros se cotizan automáticamente aunque otros requieran revisión (ver abajo). |
 
-Las dos primeras solo se encienden con el valor exacto `on`; la de manuscritos solo reconoce `shadow`. Para una prueba local puntual: `CATALOG_SEMANTIC_PRIMARY=on CATALOG_SEMANTIC_AUTO=on npm run analyze-image -- private-data/<imagen>`.
+Las banderas de AUTO (`PRIMARY`, `AUTO`, `PARTIAL`, y `HANDWRITTEN=on`) solo se encienden con el valor exacto `on`; `HANDWRITTEN=shadow` solo simula.
+
+### Salida pública y registro interno (con `CATALOG_PARTIAL_AUTO=on`)
+
+`analyzeImage` devuelve, además de los campos heredados (que no cambian de significado: `decision=AUTO_SAFE` y `quote` existen solo cuando TODA la receta quedó cotizada):
+
+| Campo | Para quién | Contenido |
+| --- | --- | --- |
+| `outcome` | sistema | `AUTO_COMPLETE` (nada pendiente), `AUTO_PARTIAL` (hay estudios cotizados y otros pendientes) o `HUMAN_REVIEW` (ningún estudio verificable, o un motivo que invalida toda la lectura). |
+| `publicQuote` | **paciente** | Solo los estudios cotizados con su precio y "Total de los estudios cotizados". Sin estados, advertencias, motivos, UUID ni pendientes. Ausente si no hay cotización automática. |
+| `internal` | **CRM / revisión humana** | Decisión por estudio, pendientes (estudios dudosos, disputas, zona de la receta que no se ve), bloqueos, problemas del documento, UUID y auditoría de cada línea. |
+
+**Riesgo visual por estudio** (`src/visual-risk.ts`). Un corte, sello, objeto, trazo ilegible, caja inválida o problema sin tipo no detiene la receta: crea una *zona desconocida* que solo se registra en `internal.document.zones`. Cada estudio visible y sin otros bloqueos se clasifica como `CLEAR` (sin zonas), `INDEPENDENT` (dos lecturas independientes confirmaron que su texto y su marca se ven enteros y que ninguna zona puede afectarlo), `AFFECTED` (una zona lo afecta o podría afectarlo, o su casilla/texto está tapado) o `UNKNOWN` (sin verificación, error, sin respuesta, o un título oculto podría calificarlo). Solo `CLEAR` e `INDEPENDENT` se cotizan; la zona desconocida siempre queda pendiente, por lo que nunca hay AUTO completo con zonas sin ver. En zonas no localizadas (trazos borrados, caja inválida, duda sin causa) no se descarta un título oculto, así que los estudios con variantes de muestra/tiempo quedan pendientes. Solo detienen toda la receta: tipo de documento incierto, no es una solicitud, manuscrito sin permiso y ausencia de estudios. `completeQuote` (`src/quote-completion.ts`) permite completar luego con revisión humana sin duplicar cobros. Para una prueba local puntual: `CATALOG_SEMANTIC_PRIMARY=on CATALOG_SEMANTIC_AUTO=on npm run analyze-image -- private-data/<imagen>`.
+
+### Verificador de identidad del matching semántico (reglas generales)
+
+El verificador determinista (`src/catalog-shadow.ts`) revisa cada decisión del modelo contra el catálogo. Reglas relevantes:
+
+- **Alias aprobado = decisión del laboratorio.** Si el texto es exactamente un alias aprobado de UN solo estudio activo (y nadie más lo reclama ni coincide con un nombre), el estudio se acepta sin compararlo con sus variantes hermanas ni con las alternativas del modelo: el alias ya fija la variante ("T4L" = T4 LIBRE). Lo que CONTRADICE sigue bloqueando: un calificador que el alias o el texto dice y el estudio contradice, y el contexto declarado del documento cuando existe una variante compatible. Un nombre exacto sin alias no tiene esta autoridad.
+- **Coordinación elíptica.** En un compuesto como "X total y libre" el fragmento que solo trae calificadores ("libre", "IgM") hereda el analito del fragmento hermano, únicamente si ambos estudios son variantes del mismo analito. Nunca mezcla familias distintas.
+- **Servicios adicionales.** "Urocultivo y ATB": si el texto pide un antibiograma y el nombre del estudio no lo incluye (ni un alias aprobado lo cubre), el estudio queda en revisión. Cotizar solo el cultivo ignoraría parte de lo pedido; si el laboratorio lo cubre, se declara con un alias aprobado.
+- **Certeza.** Una disputa que existía solo por certeza ("no alta en ambos") y que el juez confirmó viendo la imagen se resuelve como certeza alta únicamente si ambos lectores transcribieron el mismo estudio, sin incertidumbres relacionadas ni variantes distintas, ninguno con certeza baja y al menos uno alta (queda una nota de auditoría). En cualquier otro caso manda la lectura MÁS débil, sin depender de qué lector usó el juez como referencia.
+- **Siguen siendo decisiones del laboratorio** (no del código): la composición y el precio de un perfil (p. ej. perfil lipídico), qué variante es la predeterminada (TSH, VIH, BUN/Urea...), si un cultivo incluye antibiograma, y si "AM/PM" significa 08:00/16:00.
 
 ### Cache y control de gasto
 

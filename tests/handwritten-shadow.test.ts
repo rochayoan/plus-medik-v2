@@ -61,9 +61,9 @@ function assemble(options: {
 }
 
 describe("handwrittenAutoMode (bandera nueva)", () => {
-  it("apagada por defecto; solo el valor exacto 'shadow' evalúa en sombra; 'on' y demás NO autorizan nada", () => {
+  it("apagada por defecto; shadow evalúa sin autorizar; on (el manuscrito se rige como un impreso) solo con el valor exacto; cualquier otro la deja apagada", () => {
     expect(handwrittenAutoMode({})).toBe("off");
-    expect(handwrittenAutoMode({ CATALOG_HANDWRITTEN_AUTO: "on" })).toBe("off");
+    expect(handwrittenAutoMode({ CATALOG_HANDWRITTEN_AUTO: "on" })).toBe("on");
     expect(handwrittenAutoMode({ CATALOG_HANDWRITTEN_AUTO: "true" })).toBe("off");
     expect(handwrittenAutoMode({ CATALOG_HANDWRITTEN_AUTO: " Shadow " })).toBe("shadow");
   });

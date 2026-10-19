@@ -87,6 +87,45 @@ describe("hiddenCheckPassed: solo se acepta si TODO lo oculto es guion, margen o
   });
 });
 
+describe("hiddenCheckPassed: texto tapado vs marcas de selección tapadas", () => {
+  const unselected = (extra: Partial<HiddenCheck> = {}, count = 1) => check("UNSELECTED_ROW_LABEL_ONLY", extra, count);
+
+  it("rótulo de filas sin marcar solo se acepta si el llamador lo permite (formulario de casillas) y con texto contiguo nombrado", () => {
+    expect(hiddenCheckPassed(unselected(), 1, { allowUnselectedLabels: true })).toEqual({ ok: true, notes: [] });
+    expect(hiddenCheckPassed(unselected(), 1).ok).toBe(false);
+    expect(hiddenCheckPassed(unselected(), 1, { allowUnselectedLabels: false }).notes.join(" ")).toContain("formulario de casillas");
+    const noNeighbor = unselected();
+    noNeighbor.items[0]!.visibleNeighbor = "";
+    expect(hiddenCheckPassed(noNeighbor, 1, { allowUnselectedLabels: true }).ok).toBe(false);
+  });
+
+  it("una marca o un texto de estudio que podrían estar tapados nunca pasan, ni mezclados con rótulos sin marcar", () => {
+    for (const blocked of ["STUDY_TEXT", "MARK_OR_SELECTION"] as const) {
+      const mixed = unselected({}, 2);
+      mixed.items[1]!.couldHide = blocked;
+      expect(hiddenCheckPassed(mixed, 2, { allowUnselectedLabels: true }).ok).toBe(false);
+    }
+    expect(hiddenCheckPassed(unselected({ otherDoubts: true }), 1, { allowUnselectedLabels: true }).ok).toBe(false);
+  });
+
+  it("las instrucciones separan texto de marcas, exigen las tres condiciones y mantienen fijas las reglas generales entre lecturas", () => {
+    const a = hiddenInstructions("A", [FINGER_A]);
+    const b = hiddenInstructions("B", [FINGER_A]);
+    for (const text of [a, b]) {
+      expect(text).toContain("Nunca supongas lo que hay debajo de un objeto");
+      expect(text).toContain("couldHide = UNSELECTED_ROW_LABEL_ONLY SOLO si se cumplen las TRES condiciones");
+      expect(text).toContain("NO subrayando, rayando ni tachando el texto del rótulo");
+      expect(text).toContain("casilla u óvalo se ve ENTERO y VACÍO");
+      expect(text).toContain("o el pedido es manuscrito, NO uses este valor");
+    }
+    const lines = (text: string) => text.split("\n");
+    expect(lines(a).filter((line) => line.startsWith("- couldHide")).sort()).toEqual(lines(b).filter((line) => line.startsWith("- couldHide")).sort());
+    expect(lines(a).find((line) => line.startsWith("- Primero distingue"))).toEqual(lines(b).find((line) => line.startsWith("- Primero distingue")));
+    const duda = "- Ante la duda razonable sobre lo que hay debajo, elige STUDY_TEXT.";
+    for (const text of [a, b]) expect(lines(text).indexOf(duda)).toBeGreaterThan(lines(text).findLastIndex((line) => line.startsWith("- couldHide")));
+  });
+});
+
 describe("integridad con ocultamientos verificados", () => {
   it("sin verificación, el objeto y la duda del modelo bloquean (comportamiento previo)", () => {
     expect(evaluateIntegrity(raw()).complete).toBe(false);
@@ -171,6 +210,47 @@ describe("readDocumentSignal: verificación enfocada de ocultamientos", () => {
     expect(error.signal.integrity.hiddenNotes?.join(" ")).toContain("no disponible");
     expect((await run(deps(twoFingers, async () => ({ value: { items: "mal" } })))).signal.completeDocumentVisible).toBe(false);
     expect((await run(deps(twoFingers))).signal.completeDocumentVisible).toBe(false);
+  });
+
+  describe("sello sobre rótulos sin marcar", () => {
+    const stamp = "Un sello cubre el final del texto de varias filas de la columna derecha.";
+    const formRead = (type: RawSignal["documentType"] = "MARK_DEPENDENT_FORM") => () => raw({ documentType: type, rowsHiddenByObjects: [stamp] });
+    const labelsOnly = async () => ({ value: check("UNSELECTED_ROW_LABEL_ONLY", {}, 1) });
+
+    it("formulario de casillas: ambas lecturas confirman que solo tapa rótulos sin marcar -> documento completo", async () => {
+      const result = await run(deps(formRead(), labelsOnly));
+      expect(result.signal.completeDocumentVisible).toBe(true);
+      expect(result.signal.integrity.hiddenVerified).toBe(true);
+    });
+
+    it("pedido manuscrito o impreso en texto (sin casillas): el mismo veredicto NO se acepta", async () => {
+      for (const type of ["HANDWRITTEN_REQUEST", "TEXT_EXPLICIT_REQUEST"] as const) {
+        const result = await run(deps(formRead(type), labelsOnly));
+        expect(result.signal.completeDocumentVisible).toBe(false);
+        expect(result.signal.integrity.hiddenNotes?.join(" ")).toContain("formulario de casillas");
+      }
+    });
+
+    it("basta una lectura que vea posible texto de un estudio o una marca tapada para que siga bloqueado (discrepancia real)", async () => {
+      for (const other of ["STUDY_TEXT", "MARK_OR_SELECTION"] as const) {
+        const d = deps(formRead(), async (request) => ({ value: check(request.variant === "A" ? "UNSELECTED_ROW_LABEL_ONLY" : other, {}, 1) }));
+        expect((await run(d)).signal.completeDocumentVisible).toBe(false);
+      }
+    });
+
+    it("sin texto contiguo nombrado u otras dudas sobre la zona, bloquea", async () => {
+      const noNeighbor = async () => ({ value: { items: [{ index: 0, couldHide: "UNSELECTED_ROW_LABEL_ONLY", visibleNeighbor: " " }], otherDoubts: false, reason: "" } });
+      expect((await run(deps(formRead(), noNeighbor))).signal.completeDocumentVisible).toBe(false);
+      const doubts = async () => ({ value: check("UNSELECTED_ROW_LABEL_ONLY", { otherDoubts: true }, 1) });
+      expect((await run(deps(formRead(), doubts))).signal.completeDocumentVisible).toBe(false);
+    });
+
+    it("un sello que además corta filas por el borde no se verifica ni se perdona", async () => {
+      const d = deps(() => raw({ documentType: "MARK_DEPENDENT_FORM", rowsHiddenByObjects: [stamp], rowsCutByImageEdge: ["fila derecha"] }), labelsOnly);
+      const result = await run(d);
+      expect(d.verifyHidden).not.toHaveBeenCalled();
+      expect(result.signal.completeDocumentVisible).toBe(false);
+    });
   });
 
   it("no se verifica (ni se perdona) cuando además hay cortes por el borde, trazos ilegibles, caja inválida o una duda sin explicar", async () => {
