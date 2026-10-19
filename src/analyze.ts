@@ -1,7 +1,7 @@
 import { readImageWithGemini, readImageWithOpenAI, type SimpleReading } from "./ai.js";
 import { ExactAliasCatalogResolver, uniqueMatchedStudies } from "./catalog.js";
 import { buildSimpleConsensus, isTruncationOf, normalizeStudyKey, normalizeVisibleKey, sameVisibleText, type SimpleConsensus, type SimpleStudy } from "./consensus.js";
-import { activeCatalog, GENERIC_PROFILE_WORDS, shadowMatch, type Outcome, type ShadowBatch, type Support } from "./catalog-shadow.js";
+import { activeCatalog, GENERIC_PROFILE_WORDS, identityTokens, qualifiersOf, shadowMatch, type Outcome, type ShadowBatch, type Support } from "./catalog-shadow.js";
 import type { AiUsage } from "./cache.js";
 import { readDocumentSignal, type DocumentSignal } from "./document-signal.js";
 import { judgeDisputesWithOpenAI, type SimpleJudgement } from "./judge.js";
@@ -113,6 +113,9 @@ export interface DocumentGate {
   // Bordes a los que se acercaba la zona de estudios y que la verificación enfocada confirmó completos (no bloquean).
   verifiedEdges?: string[];
   edgeNotes?: string[];
+  // Objetos que tapaban partes de la hoja y que la verificación enfocada confirmó que solo ocultaban guiones, márgenes o espacio vacío.
+  hiddenVerified?: boolean;
+  hiddenNotes?: string[];
   // Contexto impreso que se entregó al resolvedor semántico (solo lo que ambas lecturas coincidieron en ver).
   context?: { lines: string[]; muestra?: string; tiempo?: string; conflicts: string[] };
 }
@@ -146,7 +149,69 @@ export interface AnalysisResult {
     error?: string;
     autoCandidate: { decision: "AUTO_SAFE" | "HUMAN_REVIEW"; reasons: AnalysisReason[]; quote?: AnalysisQuote };
   };
+  // Solo con CATALOG_HANDWRITTEN_AUTO=shadow y un pedido manuscrito: qué pasaría si los manuscritos legibles pudieran ser AUTO. NUNCA cambia
+  // `decision` (el manuscrito sigue en HUMAN_REVIEW con handwritten_out_of_scope) ni produce una cotización real.
+  handwrittenShadow?: {
+    eligible: boolean;
+    blockers: string[];
+    simulatedDecision: "AUTO_SAFE" | "HUMAN_REVIEW";
+    quote?: AnalysisQuote;
+  };
   quote?: AnalysisQuote;
+}
+
+export type HandwrittenAutoMode = "off" | "shadow";
+
+// Bandera del AUTO manuscrito. Solo existe el modo "shadow" (evaluar y reportar sin autorizar nada); cualquier otro valor la deja apagada.
+export function handwrittenAutoMode(env: NodeJS.ProcessEnv = process.env): HandwrittenAutoMode {
+  return env.CATALOG_HANDWRITTEN_AUTO?.trim().toLowerCase() === "shadow" ? "shadow" : "off";
+}
+
+// Mismas variantes explícitas (isotipo, libre/total, cualitativo, método, población, muestra, seriado/simple, 24 h...) en dos transcripciones.
+function sameVariants(a: string, b: string): boolean {
+  const qa = qualifiersOf(identityTokens(a));
+  const qb = qualifiersOf(identityTokens(b));
+  return (Object.keys(qa) as Array<keyof typeof qa>).every((dim) => qa[dim].size === qb[dim].size && [...qa[dim]].every((value) => qb[dim].has(value)));
+}
+
+// Evaluación en SOMBRA del AUTO manuscrito. Exige TODO: documento verificado completo y legible; dos lecturas concordantes sin juez, con certeza
+// alta y las mismas variantes explícitas; cada estudio resuelto por el matching semántico verificado; y cualquier otro motivo de revisión ausente.
+// Ante la menor duda el resultado simulado es HUMAN_REVIEW.
+function evaluateHandwrittenShadow(args: {
+  document: DocumentGate;
+  consensus: SimpleConsensus;
+  studies: FinalVisualStudy[];
+  primary: SemanticPrimaryInput | undefined;
+  otherReasons: AnalysisReason[];
+  lines?: { lines: CatalogCandidate[]; audit: NonNullable<AnalysisQuote["audit"]> };
+}): NonNullable<AnalysisResult["handwrittenShadow"]> {
+  const { document, consensus, studies, primary, otherReasons, lines } = args;
+  const blockers: string[] = [];
+  if (!primary) blockers.push("requiere la integración semántica principal (matching verificado)");
+  else if (primary.error || !primary.batch) blockers.push("el resolvedor semántico no estuvo disponible");
+  if (!document.completeDocumentVisible || (document.integrityProblems?.length ?? 0) > 0) blockers.push("el documento no se verificó completo y legible");
+  if (document.agreement === false) blockers.push("las dos lecturas del documento no coinciden en el tipo");
+  if (studies.length === 0) blockers.push("no hay estudios");
+  if (consensus.disputes.length > 0) blockers.push("hubo disputas entre lectores: se exige concordancia directa, sin juez");
+  for (const study of studies) {
+    if (study.source !== "agreed") { blockers.push(`«${study.literalText}» no fue acordado directamente por ambos lectores`); continue; }
+    if (study.confidence !== "high") blockers.push(`«${study.literalText}» no tiene certeza alta`);
+    const pair = consensus.agreedPairs?.find((candidate) => candidate.a.literalText === study.literalText);
+    if (!pair) blockers.push(`no constan las dos lecturas de «${study.literalText}»`);
+    else {
+      if (pair.a.confidence !== "high" || pair.b.confidence !== "high") blockers.push(`«${study.literalText}» no tiene certeza alta en ambos lectores`);
+      if (!sameVariants(pair.a.literalText, pair.b.literalText)) blockers.push(`los lectores difieren en una variante de «${pair.a.literalText}» / «${pair.b.literalText}»`);
+    }
+  }
+  for (const reason of otherReasons) blockers.push(`motivo de revisión pendiente: ${reason}`);
+  const eligible = blockers.length === 0 && Boolean(lines) && lines!.lines.length > 0;
+  if (blockers.length === 0 && !eligible) blockers.push("no se pudo construir la cotización simulada");
+  return {
+    eligible,
+    blockers,
+    simulatedDecision: eligible ? "AUTO_SAFE" : "HUMAN_REVIEW",
+    quote: eligible ? { lines: lines!.lines, totalBs: lines!.lines.reduce((sum, line) => sum + line.priceBs, 0), tariff: "PACIENTE", audit: lines!.audit } : undefined
+  };
 }
 
 // Resultado de la capa semántica principal para el ensamblado: el lote verificado, o el error que la dejó no disponible.
@@ -314,6 +379,8 @@ export function assembleAnalysis(args: {
   primary?: SemanticPrimaryInput;
   // Solo con `primary`: los MATCH semánticos verificados (y compuestos explícitos) pueden ser AUTO. Apagado por defecto.
   semanticAuto?: boolean;
+  // Evalúa (sin autorizar) qué pasaría con un pedido manuscrito si pudiera ser AUTO. Requiere `primary` para tener algún resultado útil.
+  handwrittenShadow?: boolean;
 }): AnalysisResult {
   const { consensus, judgement, catalog, semantic, document, primary } = args;
   const semanticAuto = Boolean(primary && args.semanticAuto);
@@ -464,6 +531,13 @@ export function assembleAnalysis(args: {
     quote = { lines, totalBs: lines.reduce((sum, line) => sum + line.priceBs, 0), tariff: "PACIENTE" };
   }
 
+  // Modo sombra del AUTO manuscrito: solo se evalúa y se informa; la decisión de producción no cambia.
+  let handwrittenShadow: AnalysisResult["handwrittenShadow"];
+  if (args.handwrittenShadow && document?.documentType === "HANDWRITTEN_REQUEST") {
+    const otherReasons = [...new Set([...documentReasons, ...semanticReasons.filter((reason) => reason !== "semantic_auto_not_enabled")])].filter((reason) => reason !== "handwritten_out_of_scope");
+    handwrittenShadow = evaluateHandwrittenShadow({ document, consensus, studies: finalVisualStudies, primary, otherReasons, lines: semanticLines });
+  }
+
   return {
     decision,
     reasons,
@@ -492,6 +566,7 @@ export function assembleAnalysis(args: {
       candidatesSentToModel: semantic.candidatesSentToModel
     },
     semanticPrimary,
+    handwrittenShadow,
     quote
   };
 }
@@ -526,12 +601,13 @@ export function semanticPrimaryEnabled(env: NodeJS.ProcessEnv = process.env): bo
 
 // Flujo completo: lectores (con cache) -> consenso -> juez solo si hay disputas -> catálogo -> decisión.
 export async function analyzeImage(
-  args: { imageBase64: string; mimeType: string; catalog: CatalogStudy[]; semanticPrimary?: boolean; semanticAuto?: boolean },
+  args: { imageBase64: string; mimeType: string; catalog: CatalogStudy[]; semanticPrimary?: boolean; semanticAuto?: boolean; handwrittenAuto?: HandwrittenAutoMode },
   deps: AnalyzeDeps = defaultAnalyzeDeps
 ): Promise<AnalysisResult> {
   const { imageBase64, mimeType, catalog } = args;
   const primaryEnabled = args.semanticPrimary ?? semanticPrimaryEnabled();
   const autoEnabled = primaryEnabled && (args.semanticAuto ?? semanticAutoEnabled());
+  const handwrittenShadow = primaryEnabled && (args.handwrittenAuto ?? handwrittenAutoMode()) === "shadow";
   const [gemini, openai, documentRead]: [SimpleReading, SimpleReading, { signal: DocumentSignal }] = await Promise.all([
     deps.readGemini(imageBase64, mimeType),
     deps.readOpenAI(imageBase64, mimeType),
@@ -546,6 +622,8 @@ export async function analyzeImage(
     irrelevantCrops: signal.integrity.irrelevantCrops,
     verifiedEdges: signal.integrity.verifiedEdges,
     edgeNotes: signal.integrity.edgeNotes,
+    hiddenVerified: signal.integrity.hiddenVerified,
+    hiddenNotes: signal.integrity.hiddenNotes,
     context: signal.context && { lines: signal.context.lines, muestra: signal.context.muestra, tiempo: signal.context.tiempo, conflicts: signal.context.conflicts }
   };
 
@@ -566,7 +644,7 @@ export async function analyzeImage(
     } catch (error) {
       primary = { error: error instanceof Error ? error.message : String(error) };
     }
-    return assembleAnalysis({ consensus, judgement, catalog, document, primary, semanticAuto: autoEnabled });
+    return assembleAnalysis({ consensus, judgement, catalog, document, primary, semanticAuto: autoEnabled, handwrittenShadow });
   }
 
   // Segunda capa: solo los textos que el matcher exacto/alias deja UNMATCHED, todos en UNA sola llamada.

@@ -381,6 +381,54 @@ function itemsOf(text: string): string[] {
   return text.split(/[,;/+()]|\sy\s/i).map((part) => part.trim()).filter(Boolean);
 }
 
+// ───────────────────────────── paquetes aprobados ─────────────────────────────
+// Un alias aprobado del catálogo manda sobre la descomposición: "ELECTROLITOS EN SANGRE (NA, K Y CL)" es el alias de 413 IONOGRAMA 1
+// (sodio, potasio, cloro), un estudio único con su propio precio, no tres cobros. Antes de aceptar el paquete se verifica que los
+// componentes propuestos por el modelo sean EXACTAMENTE los que el nombre del paquete lista (misma muestra); si no, revisión humana.
+
+// El estudio activo cuyo nombre o alias aprobado es exactamente el texto (mismo criterio que el matcher exacto). Único o nada.
+export function approvedPackage(text: string, catalog: CatalogStudy[]): CatalogStudy | undefined {
+  const key = normalizeStudyKey(text);
+  if (key === "") return undefined;
+  const hits = catalog.filter((study) => study.active && (study.normalizedName === key || study.normalizedAliases.includes(key)));
+  return hits.length === 1 ? hits[0] : undefined;
+}
+
+// Componentes que el nombre del paquete lista entre paréntesis: "IONOGRAMA 1 (sodio, potasio, cloro)" -> [sodio, potasio, cloro].
+export function packageItems(pkg: CatalogStudy): string[] {
+  for (const match of [...pkg.name.matchAll(/\(([^()]+)\)/g)].reverse()) {
+    const items = match[1]!.split(/\s*(?:,|;|\+|\/|\sy\s)\s*/i).map((item) => item.trim()).filter(Boolean);
+    if (items.length >= 2) return items;
+  }
+  return [];
+}
+
+// Clave de analito de un texto suelto: sin calificadores, conectores ni plurales (igual que baseKey para estudios).
+function itemKey(item: string): string {
+  const all = new Set(DIMS.flatMap((dim) => [...DIM_TOKENS[dim]]));
+  return identityTokens(item).filter((token) => !all.has(token) && !CONNECTORS.has(token)).map(stem).sort().join(" ");
+}
+
+function sampleCompatible(a: Qualifiers, b: Qualifiers): boolean {
+  return (["muestra", "tiempo"] as const).every((dim) => a[dim].size === 0 || b[dim].size === 0 || intersects(a[dim], b[dim]));
+}
+
+export function verifyPackageComposition(pkg: CatalogStudy, components: CatalogStudy[]): { ok: boolean; reason: string } {
+  const items = packageItems(pkg);
+  if (items.length < 2) return { ok: false, reason: "el paquete no lista sus componentes en el nombre: no se puede verificar la composición" };
+  if (items.length !== components.length) return { ok: false, reason: `el paquete lista ${items.length} componentes (${items.join(", ")}) y se propusieron ${components.length}` };
+  if (components.some((component) => !component.active)) return { ok: false, reason: "un componente propuesto no está activo" };
+  const packageQualifiers = studyQualifiers(pkg);
+  const unused = new Set(components);
+  for (const item of items) {
+    const key = itemKey(item);
+    const hit = [...unused].find((component) => baseKey(component) === key && sampleCompatible(studyQualifiers(component), packageQualifiers));
+    if (!hit) return { ok: false, reason: `el componente "${item}" del paquete no está entre los propuestos (o es de otra muestra)` };
+    unused.delete(hit);
+  }
+  return { ok: true, reason: "" };
+}
+
 export function verifyDecision(text: string, raw: RawDecision, fullCatalog: CatalogStudy[], context?: ShadowContext): Outcome {
   if (raw.status === "NO_MATCH") return { kind: "NO_MATCH", reason: raw.reason || raw.notes.join("; ") || "sin coincidencia" };
   if (raw.status === "AMBIGUOUS") return { kind: "AMBIGUOUS", studyIds: raw.studies.map((s) => s.id), reason: raw.reason };
@@ -406,8 +454,27 @@ export function verifyDecision(text: string, raw: RawDecision, fullCatalog: Cata
     return { kind: "MATCH", studyId: chosen.id, support: supportOf(text, chosen), notes: raw.notes };
   }
 
-  // COMPOSITE: cada componente debe estar nombrado en el texto, ser compatible por sí mismo y la lista debe quedar cubierta.
+  // COMPOSITE. Primero, un alias aprobado de un paquete del catálogo manda: se acepta el paquete único si la composición coincide.
+  const pkg = approvedPackage(text, fullCatalog);
+  if (pkg) {
+    const composition = verifyPackageComposition(pkg, raw.studies);
+    if (!composition.ok) {
+      return { kind: "REJECTED", studyIds: [pkg.id, ...raw.studies.map((s) => s.id)], reason: `el texto es el alias aprobado de «${pkg.name}», pero ${composition.reason}` };
+    }
+    return { kind: "MATCH", studyId: pkg.id, support: "EXACT", notes: [`paquete aprobado «${pkg.name}»: componentes verificados (${packageItems(pkg).join(", ")})`] };
+  }
+
+  // Sin paquete: cada componente debe estar nombrado en el texto, ser compatible por sí mismo y la lista debe quedar cubierta.
   const textNorm = normalizeStudyKey(text);
+  // La muestra declarada en el texto FUERA de los fragmentos ("ELECTROLITOS EN SANGRE (NA, K Y CL)") califica a todos los componentes;
+  // la que pertenece a un fragmento ("Glucosa y orina completa") no se traslada a los demás.
+  let remainder = textNorm;
+  for (const fragment of raw.fragments) {
+    const fragNorm = normalizeStudyKey(fragment);
+    if (fragNorm !== "") remainder = remainder.replace(fragNorm, " ");
+  }
+  const sharedSample = qualifiersOf(identityTokens(remainder)).muestra;
+  const inherited: ShadowContext = { lines: context?.lines ?? [], muestra: sharedSample.size === 1 ? [...sharedSample][0] : context?.muestra, tiempo: context?.tiempo };
   const components: Array<{ studyId: string; fragment: string; support: Support }> = [];
   for (let i = 0; i < raw.studies.length; i++) {
     const study = raw.studies[i]!;
@@ -415,7 +482,7 @@ export function verifyDecision(text: string, raw: RawDecision, fullCatalog: Cata
     const fragNorm = normalizeStudyKey(fragment);
     if (fragNorm === "" || !textNorm.includes(fragNorm)) return { kind: "REJECTED", studyIds: raw.studies.map((s) => s.id), reason: `el fragmento "${fragment}" no aparece en el texto` };
     if (!study.active) return { kind: "REJECTED", studyIds: [study.id], reason: "un componente no está activo" };
-    const identity = checkIdentity(fragment, study, fullCatalog, context);
+    const identity = checkIdentity(fragment, study, fullCatalog, inherited);
     if (!identity.ok) return { kind: "REJECTED", studyIds: [study.id], reason: `componente "${fragment}": ${identity.problems.join("; ")}` };
     if (identity.plausibleSiblings.length > 0) {
       return { kind: "AMBIGUOUS", studyIds: [study.id, ...identity.plausibleSiblings.map((s) => s.id)], reason: `el componente "${fragment}" tiene variantes plausibles` };

@@ -113,11 +113,14 @@ export function touchedEdges(region: Region): Edge[] {
 }
 
 // Problemas que NUNCA se relajan: lo que el modelo no confirma, lo que enumera como cortado/oculto/ilegible y una caja inválida.
-export function hardProblems(raw: RawSignal): string[] {
+// Única excepción: lo oculto por objetos que la verificación enfocada (dos lecturas) confirmó que solo tapa un guion, viñeta, margen o espacio
+// vacío. En ese caso la duda del modelo sobre la zona (studyRegionComplete=false) solo se perdona si él mismo la explicó con esos objetos.
+export function hardProblems(raw: RawSignal, hiddenVerified = false): string[] {
   const problems: string[] = [];
-  if (!raw.studyRegionComplete) problems.push("el modelo no confirma que la zona de estudios esté completa");
+  const explainedByHidden = hiddenVerified && raw.rowsHiddenByObjects.length > 0;
+  if (!raw.studyRegionComplete && !explainedByHidden) problems.push("el modelo no confirma que la zona de estudios esté completa");
   for (const row of raw.rowsCutByImageEdge) problems.push(`cortado por el borde: ${row}`);
-  for (const row of raw.rowsHiddenByObjects) problems.push(`oculto por un objeto: ${row}`);
+  if (!hiddenVerified) for (const row of raw.rowsHiddenByObjects) problems.push(`oculto por un objeto: ${row}`);
   if (raw.erasedOrIllegible) problems.push("hay trazos borrados o escritura ilegible en la zona de estudios");
   if (!validRegion(raw.studyRegion)) problems.push("la caja de la zona de estudios es inválida");
   return problems;
@@ -126,8 +129,8 @@ export function hardProblems(raw: RawSignal): string[] {
 const proximityProblem = (edges: Edge[]) => `la zona de estudios toca el borde ${edges.map((edge) => EDGE_NAMES[edge]).join(" y ")} de la imagen`;
 
 // La decisión de integridad es del código: no basta con que el modelo diga "completo". Los bordes verificados no cuentan como problema.
-export function evaluateIntegrity(raw: RawSignal, verifiedEdges: ReadonlySet<Edge> = new Set()): IntegrityEvaluation {
-  const problems = hardProblems(raw);
+export function evaluateIntegrity(raw: RawSignal, verifiedEdges: ReadonlySet<Edge> = new Set(), hiddenVerified = false): IntegrityEvaluation {
+  const problems = hardProblems(raw, hiddenVerified);
   const unverified = touchedEdges(raw.studyRegion).filter((edge) => !verifiedEdges.has(edge));
   if (unverified.length > 0) problems.push(proximityProblem(unverified));
   return { complete: problems.length === 0, problems };
@@ -187,6 +190,63 @@ export function edgeCheckPassed(value: EdgeCheck, edges: Edge[]): { ok: boolean;
     else if (check.elementsNearEdge.length === 0 || check.elementsNearEdge.some((element) => element.text.trim() === "")) notes.push(`${EDGE_NAMES[edge]}: no se identificó lo que hay junto al borde`);
     else if (check.elementsNearEdge.some((element) => !element.fullyVisible)) notes.push(`${EDGE_NAMES[edge]}: hay un elemento que no se ve entero`);
   }
+  return { ok: notes.length === 0, notes };
+}
+
+// ───────────────────────────── verificación enfocada de ocultamientos ─────────────────────────────
+// Un dedo, sello o doblez que tapa el margen o el guion que antecede a una línea ya legible no debería impedir una cotización; uno que podría
+// tapar letras de un estudio o una marca de selección sí. En vez de interpretar el texto libre de la primera lectura, se vuelve a mirar la
+// imagen con una pregunta concreta por objeto, en dos lecturas independientes. Solo se acepta si AMBAS dicen, para TODOS los objetos, que
+// lo oculto es únicamente guion/viñeta/margen/espacio vacío, nombran el texto visible contiguo y no tienen otras dudas sobre la zona.
+
+const hiddenCheckSchema = z.object({
+  items: z.array(z.object({
+    index: z.number().int(),
+    couldHide: z.enum(["STUDY_TEXT", "MARK_OR_SELECTION", "ONLY_BULLET_MARGIN_OR_BLANK"]),
+    visibleNeighbor: z.string()
+  })),
+  otherDoubts: z.boolean(),
+  reason: z.string()
+});
+export type HiddenCheck = z.infer<typeof hiddenCheckSchema>;
+
+export interface HiddenRequest {
+  instructions: string;
+  variant: "A" | "B";
+  hidden: string[];
+  imageBase64: string;
+  mimeType: string;
+}
+
+export function hiddenInstructions(variant: "A" | "B", hidden: string[]): string {
+  const rules = [
+    "- couldHide = STUDY_TEXT si lo oculto podría contener letras o palabras del nombre de un estudio (o su continuación), una cantidad o cualquier texto de la solicitud.",
+    "- couldHide = MARK_OR_SELECTION si podría contener una casilla, una marca de selección (X, check, círculo, subrayado, tachado) o una casilla sin ver.",
+    "- couldHide = ONLY_BULLET_MARGIN_OR_BLANK SOLO si lo único que podría haber debajo es el guion o la viñeta que antecede a una línea ya legible, un margen o espacio vacío, y el texto de esa línea se ve COMPLETO a su lado.",
+    "- Ante la duda razonable sobre lo que hay debajo, elige STUDY_TEXT.",
+    "- visibleNeighbor: el texto de la solicitud que SÍ se ve junto a lo oculto (la palabra o línea contigua), literal. Si no hay ninguno, deja la cadena vacía.",
+    "- otherDoubts: true si, SIN contar los objetos de la lista, aún hay algún motivo para dudar de que toda la lista de estudios esté completa y legible (filas cortadas por el borde, trazos borrados o ilegibles, texto que continúa fuera de la foto)."
+  ];
+  return `
+Una lectura previa indicó que estos objetos (dedos, sellos, dobleces, otras hojas) ocultan partes de la solicitud de estudios:
+${hidden.map((item, index) => `${index}. ${item}`).join("\n")}
+Mira la imagen y, para CADA objeto (con su índice), decide qué podría haber debajo de lo que tapa.
+${(variant === "A" ? rules : [...rules].reverse()).join("\n")}
+Ignora el encabezado, los datos del paciente, las firmas y los sellos: solo importa la lista de estudios y sus marcas.
+En reason explica en una frase qué ves junto a cada objeto.
+`;
+}
+
+// Acepta solo si TODOS los objetos están respondidos como "solo guion/margen/vacío", con texto contiguo nombrado, y sin otras dudas.
+export function hiddenCheckPassed(value: HiddenCheck, count: number): { ok: boolean; notes: string[] } {
+  const notes: string[] = [];
+  for (let index = 0; index < count; index++) {
+    const item = value.items.find((candidate) => candidate.index === index);
+    if (!item) notes.push(`objeto ${index}: sin respuesta`);
+    else if (item.couldHide !== "ONLY_BULLET_MARGIN_OR_BLANK") notes.push(`objeto ${index}: podría ocultar ${item.couldHide === "STUDY_TEXT" ? "texto de un estudio" : "una marca de selección"}`);
+    else if (item.visibleNeighbor.trim() === "") notes.push(`objeto ${index}: no se nombró el texto visible contiguo`);
+  }
+  if (value.otherDoubts) notes.push("hay otras dudas sobre la zona de estudios");
   return { ok: notes.length === 0, notes };
 }
 
@@ -259,6 +319,9 @@ export interface DocumentSignal {
     // Bordes a los que se acercaba la zona y que la verificación enfocada confirmó completos.
     verifiedEdges?: string[];
     edgeNotes?: string[];
+    // Objetos que ocultaban partes de la hoja y que la verificación enfocada confirmó que solo tapaban guiones, márgenes o espacio vacío.
+    hiddenVerified?: boolean;
+    hiddenNotes?: string[];
   };
   reasons: [string, string];
   context?: DocumentContext;
@@ -267,10 +330,10 @@ export interface DocumentSignal {
 const union = (a: Region, b: Region): Region => ({ left: Math.min(a.left, b.left), top: Math.min(a.top, b.top), right: Math.max(a.right, b.right), bottom: Math.max(a.bottom, b.bottom) });
 
 // Misma semántica que fuseIndependentReadings: tipo distinto -> UNKNOWN; completo solo si ambas lecturas lo ven completo.
-export function fuseSignals(a: RawSignal, b: RawSignal, verifiedEdges: ReadonlySet<Edge> = new Set()): DocumentSignal {
+export function fuseSignals(a: RawSignal, b: RawSignal, verifiedEdges: ReadonlySet<Edge> = new Set(), hiddenVerified = false): DocumentSignal {
   const agreement = a.documentType === b.documentType;
-  const evalA = evaluateIntegrity(a, verifiedEdges);
-  const evalB = evaluateIntegrity(b, verifiedEdges);
+  const evalA = evaluateIntegrity(a, verifiedEdges, hiddenVerified);
+  const evalB = evaluateIntegrity(b, verifiedEdges, hiddenVerified);
   const problems = [...evalA.problems.map((p) => `lectura A: ${p}`), ...evalB.problems.map((p) => `lectura B: ${p}`)];
   return {
     documentType: agreement ? a.documentType : "UNKNOWN",
@@ -280,7 +343,8 @@ export function fuseSignals(a: RawSignal, b: RawSignal, verifiedEdges: ReadonlyS
       problems,
       irrelevantCrops: [...new Set([...a.irrelevantCrops, ...b.irrelevantCrops])],
       studyRegion: validRegion(a.studyRegion) && validRegion(b.studyRegion) ? union(a.studyRegion, b.studyRegion) : undefined,
-      verifiedEdges: [...verifiedEdges].map((edge) => EDGE_NAMES[edge])
+      verifiedEdges: [...verifiedEdges].map((edge) => EDGE_NAMES[edge]),
+      hiddenVerified
     },
     reasons: [a.reason, b.reason],
     context: fuseContext(a.printedContext, b.printedContext)
@@ -298,6 +362,8 @@ export interface SignalDeps {
   complete: (request: SignalRequest) => Promise<{ value: unknown; usage?: AiUsage }>;
   // Verificación enfocada de bordes (solo se llama si la zona se acerca a un borde y no hay problemas duros).
   verifyEdges?: (request: EdgeRequest) => Promise<{ value: unknown; usage?: AiUsage }>;
+  // Verificación enfocada de ocultamientos (solo si la única objeción son objetos que tapan partes de la hoja).
+  verifyHidden?: (request: HiddenRequest) => Promise<{ value: unknown; usage?: AiUsage }>;
   model: string;
   reasoning: string;
 }
@@ -311,6 +377,7 @@ function params(model: string, reasoning: string, name: string, schema: Record<s
 }
 const signalParams = (model: string, reasoning: string) => params(model, reasoning, "document_integrity_signal", strictJsonSchema(signalSchema));
 const edgeParams = (model: string, reasoning: string) => params(model, reasoning, "document_edge_verification", strictJsonSchema(edgeCheckSchema));
+const hiddenParams = (model: string, reasoning: string) => params(model, reasoning, "document_hidden_verification", strictJsonSchema(hiddenCheckSchema));
 
 function defaultDeps(): SignalDeps {
   const model = process.env.OPENAI_READER_MODEL ?? "gpt-6.1-sol";
@@ -335,12 +402,15 @@ function defaultDeps(): SignalDeps {
     model,
     reasoning,
     complete: (request) => call(signalParams(model, reasoning), request.instructions, request.imageBase64, request.mimeType),
-    verifyEdges: (request) => call(edgeParams(model, reasoning), request.instructions, request.imageBase64, request.mimeType)
+    verifyEdges: (request) => call(edgeParams(model, reasoning), request.instructions, request.imageBase64, request.mimeType),
+    verifyHidden: (request) => call(hiddenParams(model, reasoning), request.instructions, request.imageBase64, request.mimeType)
   };
 }
 
 export interface DocumentSignalResult {
   signal: DocumentSignal;
+  // Las dos lecturas de primera pasada, tal como las devolvió el modelo (auditoría y simulaciones sin llamadas).
+  raw?: [RawSignal, RawSignal];
   usage: AiUsage[];
   calls: number;
   cacheHits: number;
@@ -374,11 +444,53 @@ export async function readDocumentSignal(args: { imageBase64: string; mimeType: 
   };
   const [a, b] = await Promise.all([one("A"), one("B")]);
 
+  const relevantType = a.documentType === b.documentType && (a.documentType === "TEXT_EXPLICIT_REQUEST" || a.documentType === "MARK_DEPENDENT_FORM" || a.documentType === "HANDWRITTEN_REQUEST");
+
+  // Verificación de ocultamientos: solo si la ÚNICA objeción son objetos que tapan partes de la hoja (sin cortes por el borde, trazos
+  // borrados ni caja inválida) y la duda de cada lectura sobre la zona está explicada por esos objetos. Cualquier fallo o duda mantiene el bloqueo.
+  const hiddenList = [...new Map([...a.rowsHiddenByObjects, ...b.rowsHiddenByObjects].map((item) => [normalizeStudyKey(item), item])).values()];
+  const explainable = (raw: RawSignal) =>
+    raw.rowsCutByImageEdge.length === 0 && !raw.erasedOrIllegible && validRegion(raw.studyRegion) && (raw.studyRegionComplete || raw.rowsHiddenByObjects.length > 0);
+  let hiddenVerified = false;
+  const hiddenNotes: string[] = [];
+  if (hiddenList.length > 0 && relevantType && explainable(a) && explainable(b) && resolved.verifyHidden) {
+    const verifyHidden = resolved.verifyHidden;
+    const verifyOne = async (variant: "A" | "B") => {
+      const instructions = hiddenInstructions(variant, hiddenList);
+      let called = false;
+      const value = await cachedAiCall({
+        label: "openai-document-hidden",
+        provider: "openai",
+        model: resolved.model,
+        imageBase64: args.imageBase64,
+        config: { prompt: instructions, mimeType: args.mimeType, params: hiddenParams(resolved.model, resolved.reasoning) },
+        parse: (raw) => hiddenCheckSchema.parse(raw),
+        call: async () => {
+          called = true;
+          const response = await verifyHidden({ instructions, variant, hidden: hiddenList, imageBase64: args.imageBase64, mimeType: args.mimeType });
+          if (response.usage) usage.push(response.usage);
+          return { value: hiddenCheckSchema.parse(response.value), usage: response.usage };
+        }
+      });
+      if (called) calls++;
+      else cacheHits++;
+      return value;
+    };
+    try {
+      const [ha, hb] = await Promise.all([verifyOne("A"), verifyOne("B")]);
+      const resultA = hiddenCheckPassed(ha, hiddenList.length);
+      const resultB = hiddenCheckPassed(hb, hiddenList.length);
+      hiddenNotes.push(...resultA.notes.map((note) => `verificación A: ${note}`), ...resultB.notes.map((note) => `verificación B: ${note}`));
+      hiddenVerified = resultA.ok && resultB.ok;
+    } catch (error) {
+      hiddenNotes.push(`verificación de ocultamientos no disponible: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   // Verificación de bordes: solo si la ÚNICA objeción es la proximidad al borde (sin cortes, ocultamientos ni dudas del modelo) y es una
   // solicitud que podría llegar a AUTO. Cualquier fallo o duda deja el borde sin verificar, y entonces bloquea.
   const touched = [...new Set([...touchedEdges(a.studyRegion), ...touchedEdges(b.studyRegion)])];
-  const relevantType = a.documentType === b.documentType && (a.documentType === "TEXT_EXPLICIT_REQUEST" || a.documentType === "MARK_DEPENDENT_FORM");
-  const onlyProximity = hardProblems(a).length === 0 && hardProblems(b).length === 0;
+  const onlyProximity = hardProblems(a, hiddenVerified).length === 0 && hardProblems(b, hiddenVerified).length === 0;
   let verified = new Set<Edge>();
   const edgeNotes: string[] = [];
   if (touched.length > 0 && relevantType && onlyProximity && resolved.verifyEdges) {
@@ -414,7 +526,8 @@ export async function readDocumentSignal(args: { imageBase64: string; mimeType: 
       edgeNotes.push(`verificación de borde no disponible: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  const signal = fuseSignals(a, b, verified);
+  const signal = fuseSignals(a, b, verified, hiddenVerified);
   signal.integrity.edgeNotes = edgeNotes;
-  return { signal, usage, calls, cacheHits };
+  signal.integrity.hiddenNotes = hiddenNotes;
+  return { signal, raw: [a, b], usage, calls, cacheHits };
 }

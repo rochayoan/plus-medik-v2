@@ -227,12 +227,28 @@ describe("readDocumentSignal: verificación enfocada de bordes", () => {
     expect(d.complete).toHaveBeenCalledTimes(2);
   });
 
-  it("manuscritos y tipos distintos no se verifican (ya están bloqueados por su tipo)", async () => {
+  it("un manuscrito junto al borde también se verifica (el AUTO manuscrito se evalúa en modo sombra), pero su tipo sigue siendo manuscrito", async () => {
     const handwritten = deps({ documentType: "HANDWRITTEN_REQUEST", studyRegion: nearTop }, async () => ({ value: edgeOk("top") }));
     const result = await run(handwritten);
-    expect(handwritten.verifyEdges).not.toHaveBeenCalled();
+    expect(handwritten.verifyEdges).toHaveBeenCalledTimes(2);
     expect(result.signal.documentType).toBe("HANDWRITTEN_REQUEST");
+    expect(result.signal.completeDocumentVisible).toBe(true);
+  });
+
+  it("tipos distintos entre lecturas, o documentos que no son solicitudes, no se verifican", async () => {
+    const mixed = {
+      complete: vi.fn(async (request: SignalRequest) => ({ value: raw({ documentType: request.variant === "A" ? "MARK_DEPENDENT_FORM" : "HANDWRITTEN_REQUEST", studyRegion: nearTop }) })),
+      verifyEdges: vi.fn(async (_request: EdgeRequest) => ({ value: edgeOk("top") })),
+      model: "m",
+      reasoning: "medium"
+    };
+    const result = await readDocumentSignal({ imageBase64: "aW1n", mimeType: "image/png", deps: mixed });
+    expect(mixed.verifyEdges).not.toHaveBeenCalled();
+    expect(result.signal.documentType).toBe("UNKNOWN");
     expect(result.signal.completeDocumentVisible).toBe(false);
+    const notRequest = deps({ documentType: "NOT_A_REQUEST", studyRegion: nearTop }, async () => ({ value: edgeOk("top") }));
+    await run(notRequest);
+    expect(notRequest.verifyEdges).not.toHaveBeenCalled();
   });
 
   it("la verificación se pide con los bordes de cualquiera de las dos lecturas", async () => {

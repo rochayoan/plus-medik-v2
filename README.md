@@ -98,8 +98,9 @@ imagen ─┬─> Gemini (OpenRouter) ─┐
 | --- | --- |
 | `CATALOG_SEMANTIC_PRIMARY=on` | GPT resuelve todos los estudios contra el catálogo activo completo (dos pasadas independientes + verificador determinístico + contexto del documento) y se contrasta con el matcher exacto. Los resultados quedan como *candidatos*: la decisión sigue en `HUMAN_REVIEW`. |
 | `CATALOG_SEMANTIC_AUTO=on` | Además, los MATCH semánticos verificados y los compuestos explícitos (p. ej. GOT/GPT) pueden entrar a una cotización `AUTO_SAFE`. Solo tiene efecto con `PRIMARY=on`. **No activar para usuarios reales sin autorización expresa.** |
+| `CATALOG_HANDWRITTEN_AUTO=shadow` | Solo **simula**: para un pedido manuscrito legible informa en `handwrittenShadow` si sería AUTO (documento verificado completo, dos lecturas idénticas sin juez, certeza alta, mismas variantes y matching semántico verificado). **Nunca cambia la decisión real**: el manuscrito sigue en `HUMAN_REVIEW`. Requiere `PRIMARY=on`. |
 
-Solo el valor exacto `on` las enciende. Para una prueba local puntual: `CATALOG_SEMANTIC_PRIMARY=on CATALOG_SEMANTIC_AUTO=on npm run analyze-image -- private-data/<imagen>`.
+Las dos primeras solo se encienden con el valor exacto `on`; la de manuscritos solo reconoce `shadow`. Para una prueba local puntual: `CATALOG_SEMANTIC_PRIMARY=on CATALOG_SEMANTIC_AUTO=on npm run analyze-image -- private-data/<imagen>`.
 
 ### Cache y control de gasto
 
