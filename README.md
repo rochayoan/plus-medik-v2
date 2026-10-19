@@ -74,6 +74,40 @@ Si algo falla: `HUMAN_REVIEW`.
 
 Objetivo de producto: `WRONG_AUTO = 0`.
 
+## Pipeline real (`analyzeImage`, `npm run analyze-image -- <imagen>`)
+
+```text
+imagen ─┬─> Gemini (OpenRouter) ─┐
+        ├─> lector OpenAI ───────┼─> consenso ─> juez (solo disputas)
+        └─> señal de documento ──┘            │
+            (tipo, integridad, contexto)       ↓
+                                  catálogo de Supabase (solo lectura)
+                                  matcher exacto/alias  +  GPT-6.1 Sol (opcional, ver banderas)
+                                               ↓
+                                 safety fail-closed ─> AUTO_SAFE | HUMAN_REVIEW
+```
+
+- **Señal de documento:** dos lecturas independientes del tipo (impreso, formulario con marcas, manuscrito...) y de la integridad de la zona de estudios. Una zona que solo se *acerca* a un borde se verifica con dos lecturas enfocadas; cortes, objetos que tapan y trazos ilegibles siempre bloquean. También extrae el contexto impreso (título, muestra declarada).
+- **Consenso:** una misma selección visual transcrita distinto (espaciado, plural, texto truncado) cuenta una sola vez; una lectura truncada nunca produce coincidencia por sí sola.
+- **Cotización:** una línea por UUID de `lab_tests`, con el precio siempre de Supabase (tarifa Paciente). Los modelos nunca deciden códigos ni precios.
+- **Decisión:** cualquier ambigüedad, estudio ausente, perfil sin composición aprobada, documento incompleto o manuscrito => `HUMAN_REVIEW`. Con las banderas apagadas (por defecto), AUTO solo es posible por coincidencia exacta/alias.
+
+### Banderas semánticas (apagadas por defecto)
+
+| Variable | Efecto |
+| --- | --- |
+| `CATALOG_SEMANTIC_PRIMARY=on` | GPT resuelve todos los estudios contra el catálogo activo completo (dos pasadas independientes + verificador determinístico + contexto del documento) y se contrasta con el matcher exacto. Los resultados quedan como *candidatos*: la decisión sigue en `HUMAN_REVIEW`. |
+| `CATALOG_SEMANTIC_AUTO=on` | Además, los MATCH semánticos verificados y los compuestos explícitos (p. ej. GOT/GPT) pueden entrar a una cotización `AUTO_SAFE`. Solo tiene efecto con `PRIMARY=on`. **No activar para usuarios reales sin autorización expresa.** |
+
+Solo el valor exacto `on` las enciende. Para una prueba local puntual: `CATALOG_SEMANTIC_PRIMARY=on CATALOG_SEMANTIC_AUTO=on npm run analyze-image -- private-data/<imagen>`.
+
+### Cache y control de gasto
+
+- Toda llamada a un modelo pasa por un cache local (`.cache/ai`, ignorado por Git; `AI_CACHE=on|off|refresh`) y queda registrada en `.cache/usage.jsonl`.
+- `npx tsx scripts/spend.ts init` fija el presupuesto, `npx tsx scripts/spend.ts` informa el gasto nuevo y `npx tsx scripts/spend.ts estimate` estima costos por etapa.
+- Los scripts de validación que pueden gastar (`shadow-match`, `benchmark-catalog`, `semantic-primary-check`, `semantic-auto-check`, `context-check`) **bloquean toda llamada real** salvo que se autorice un máximo por corrida: `PLUSMEDIK_AUTHORIZE_PAID_CALLS=0.15 npx tsx scripts/context-check.ts ...`. Las respuestas ya cacheadas no necesitan autorización.
+- `src/pipeline.ts` y `src/safety.ts` son el core original (`PlusMedikCore`), conservado y cubierto por tests; el flujo real es `src/analyze.ts`.
+
 ## Privacidad
 
 Nunca commitear imágenes de pacientes, nombres, teléfonos, OCR clínico ni datasets privados. `private-data/` y `benchmark-private/` están ignorados.

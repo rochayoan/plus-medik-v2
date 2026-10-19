@@ -83,6 +83,14 @@ async function readEntry<T>(file: string, key: string, parse: (raw: unknown) => 
   }
 }
 
+// Gancho opcional que se ejecuta justo antes de CADA llamada real a un modelo (no en cache hits). Por defecto no hay ninguno; las herramientas
+// de pruebas pagadas instalan uno (scripts/lib/paid-guard.ts) que lanza para bloquear la llamada. Si el gancho lanza, la llamada no se hace.
+export type RealCallGate = (info: { label: string; provider: string; model: string }) => void | Promise<void>;
+let realCallGate: RealCallGate | undefined;
+export function setRealCallGate(gate: RealCallGate | undefined): void {
+  realCallGate = gate;
+}
+
 export async function cachedAiCall<T>(options: {
   label: string;
   provider: string;
@@ -123,6 +131,7 @@ export async function cachedAiCall<T>(options: {
     }
   }
 
+  await realCallGate?.({ label, provider, model });
   const { value, usage } = await options.call();
   await appendUsageLine({
     timestamp: new Date().toISOString(),
