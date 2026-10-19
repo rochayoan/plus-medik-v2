@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { isPackageComponent, unresolvedPackageGroups } from "./catalog-shadow.js";
+import { isPackageComponent } from "./catalog-shadow.js";
+import { droppedLineItemDetails, heldPackageGroups, lineServiceGap } from "./line-groups.js";
 import { normalizeStudyKey } from "./consensus.js";
 import type { DocumentFunctionInfo } from "./document-function.js";
 import type { StudyImpactResult } from "./study-impact.js";
@@ -142,6 +143,10 @@ function baseBlockers(input: PartialInput): AnalysisReason[][] {
     const match = input.matches[index]!;
     if (input.variantMismatch.has(studyKeyOf(study.literalText))) blockers.add("readers_variant_mismatch");
     const lines = linesOf(match);
+    // La línea original (lineText) no se pierde: un paquete nombrado que las filas no reconstruyen, o un servicio pedido que el estudio no cubre.
+    if (study.lineProblem) blockers.add("package_line_unreconstructable");
+    const chosen = lines.map((line) => input.catalogById.get(line.id)).filter((candidate): candidate is CatalogStudy => Boolean(candidate));
+    if (chosen.length > 0 && lineServiceGap(study, chosen).length > 0) blockers.add("line_service_not_covered");
     if (lines.length === 0 && blockers.size === 0) blockers.add("catalog_unmatched");
     if (lines.some((line) => !validPrice(input.catalogById.get(line.id)?.priceBs ?? Number.NaN))) blockers.add("catalog_price_invalid");
     return [...blockers];
@@ -191,8 +196,9 @@ export function evaluatePartial(input: PartialInput): { outcome: QuoteOutcome; r
   // Componentes que juntos forman un paquete activo: no se sabe si se pidieron por separado o como la expresión del paquete que los lectores separaron
   // (el precio aplicable lo decide el laboratorio), así que ese grupo queda pendiente. Si solo están algunos componentes, no hay grupo.
   const groupIds = new Set<string>();
-  const selected = [...new Set(input.studies.flatMap((_study, index) => idsOf(index)))].map((id) => input.catalogById.get(id)).filter((study): study is CatalogStudy => Boolean(study));
-  const groups = unresolvedPackageGroups(selected, input.catalog);
+  // Salvo que cada componente se haya pedido en SU PROPIA línea (lineText): eso es evidencia de pedido por separado.
+  const pairs = input.studies.flatMap((study, index) => idsOf(index).flatMap((id) => { const found = input.catalogById.get(id); return found ? [{ study: found, source: study }] : []; }));
+  const groups = heldPackageGroups(pairs, input.catalog);
   for (const group of groups) for (const part of group.parts) groupIds.add(part.id);
   if (groupIds.size > 0) {
     input.studies.forEach((_study, index) => {
@@ -222,17 +228,20 @@ export function evaluatePartial(input: PartialInput): { outcome: QuoteOutcome; r
     }
   });
 
+  const dropped = droppedLineItemDetails(input.studies);
   const pending: PendingItem[] = [
     ...input.studies.flatMap((study, index): PendingItem[] =>
       studies[index]!.decision === "AUTO" ? [] : [{ key: keys[index]!, kind: "STUDY", text: study.literalText, blockers: studies[index]!.blockers, candidates: candidatesOf(input.matches[index]!, input.catalogById) }]
     ),
+    // Un elemento que la línea nombra y ninguna fila representa es un estudio posiblemente pedido y no leído: la receta no puede quedar completa.
+    ...dropped.map((entry): PendingItem => ({ key: `line:${normalizeStudyKey(entry.item)}`, kind: "STUDY", text: entry.item, blockers: ["line_item_unrepresented"] })),
     ...input.unresolvedDisputes.map((dispute): PendingItem => ({ key: `dispute:${dispute.key}`, kind: "DISPUTE", text: dispute.key, blockers: [dispute.reason] })),
     ...(zones.length > 0 ? [{ key: "UNSEEN_REGION", kind: "UNSEEN_REGION" as const, blockers: zones.map((zone) => zone.kind) }] : [])
   ];
 
   const allLines = [...lineMap.values()];
   // Aviso para el laboratorio: qué paquete forman los estudios retenidos y por qué (qué precio aplica, paquete o suma, es una decisión comercial).
-  const advisories = groups.map((group) => `los estudios ${group.parts.map((p) => p.code ?? p.name).join(" + ")} forman el paquete «${group.pkg.name}» (${group.pkg.code ?? "sin código"}); quedaron pendientes porque no se puede saber si se pidieron por separado o como ese paquete`);
+  const advisories = [...dropped.map((entry) => entry.message), ...groups.map((group) => `los estudios ${group.parts.map((p) => p.code ?? p.name).join(" + ")} forman el paquete «${group.pkg.name}» (${group.pkg.code ?? "sin código"}); quedaron pendientes porque no se puede saber si se pidieron por separado o como ese paquete`)];
   const quotedLines = input.recipeStops.length === 0 ? allLines : [];
   const outcome: QuoteOutcome = quotedLines.length === 0 ? "HUMAN_REVIEW" : pending.length === 0 ? "AUTO_COMPLETE" : "AUTO_PARTIAL";
   const subtotalBs = quotedLines.reduce((sum, line) => sum + line.priceBs, 0);

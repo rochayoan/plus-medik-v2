@@ -1,12 +1,13 @@
 import { readImageWithGemini, readImageWithOpenAI, type SimpleReading } from "./ai.js";
 import { ExactAliasCatalogResolver, uniqueMatchedStudies } from "./catalog.js";
 import { buildSimpleConsensus, isTruncationOf, normalizeStudyKey, normalizeVisibleKey, sameVisibleText, type SimpleConsensus, type SimpleStudy } from "./consensus.js";
-import { activeCatalog, GENERIC_PROFILE_WORDS, identityTokens, isPackageComponent, qualifiersOf, unresolvedPackageGroups, shadowMatch, type Outcome, type ShadowBatch, type Support } from "./catalog-shadow.js";
+import { collapseExplicitPackages, droppedLineItemDetails, heldPackageGroups, lineServiceGap, reliableLineText } from "./line-groups.js";
+import { activeCatalog, GENERIC_PROFILE_WORDS, identityTokens, isPackageComponent, qualifiersOf, shadowMatch, type Outcome, type ShadowBatch, type Support } from "./catalog-shadow.js";
 import type { AiUsage } from "./cache.js";
 import { readDocumentSignal, type DocumentSignal } from "./document-signal.js";
 import type { DocumentFunctionInfo } from "./document-function.js";
 import { judgeDisputesWithOpenAI, type ResolvedStudy, type SimpleJudgement } from "./judge.js";
-import { evaluatePartial, studyKeyOf, type InternalRecord, type PublicQuote, type QuoteOutcome } from "./partial-auto.js";
+import { evaluatePartial, linesOf, studyKeyOf, type InternalRecord, type PublicQuote, type QuoteOutcome } from "./partial-auto.js";
 import { verifyStudyImpact, type StudyImpactResult } from "./study-impact.js";
 import {
   resolveCatalogSemantically,
@@ -23,6 +24,12 @@ export interface FinalVisualStudy extends SimpleStudy {
   source: VisualSource;
   // Solo si la certeza la fijó la resolución de una disputa de certeza (ver judgeResolvedConfidence): qué se hizo y por qué.
   confidenceNote?: string;
+  // Texto completo de la línea donde aparece el estudio, solo si las dos lecturas coinciden en él (ver line-groups.ts).
+  lineText?: string;
+  // Si la línea es un paquete aprobado y las filas leídas no lo reconstruyen sin ambigüedad: qué pasó (el estudio queda pendiente).
+  lineProblem?: string;
+  // Si varias filas de una línea se reunieron en el paquete aprobado que la línea nombra: los textos originales.
+  collapsedFrom?: string[];
 }
 
 export interface CatalogCandidate {
@@ -100,6 +107,9 @@ export type AnalysisReason =
   | "readers_variant_mismatch"
   | "package_component_overlap"
   | "package_alternative_unresolved"
+  | "package_line_unreconstructable"
+  | "line_item_unrepresented"
+  | "line_service_not_covered"
   | "document_impact_unverified"
   | "document_may_alter_study"
   | "document_study_not_fully_visible"
@@ -342,6 +352,7 @@ function contrastWithExact(
 function semanticBillableLines(matches: StudyMatch[], catalogById: Map<string, CatalogStudy>): { lines: CatalogCandidate[]; audit: NonNullable<AnalysisQuote["audit"]>; invalidPrice: boolean; overlap: boolean; packageGroup: boolean } {
   const lines = new Map<string, CatalogCandidate>();
   const audit = new Map<string, { id: string; basis: QuoteBasis[]; texts: string[] }>();
+  const pairs: Array<{ study: CatalogStudy; source: FinalVisualStudy }> = [];
   let invalidPrice = false;
   for (const match of matches) {
     const info = match.semanticPrimary;
@@ -354,6 +365,7 @@ function semanticBillableLines(matches: StudyMatch[], catalogById: Map<string, C
       if (!study) continue;
       if (!Number.isFinite(study.priceBs) || study.priceBs < 0) invalidPrice = true;
       if (!lines.has(id)) lines.set(id, toCandidate(study));
+      pairs.push({ study, source: match.visual });
       const entry = audit.get(id) ?? { id, basis: [], texts: [] };
       if (!entry.basis.includes(basis)) entry.basis.push(basis);
       if (!entry.texts.includes(match.matchedText)) entry.texts.push(match.matchedText);
@@ -363,7 +375,7 @@ function semanticBillableLines(matches: StudyMatch[], catalogById: Map<string, C
   // Un paquete y uno de sus componentes nunca se cobran juntos (cobro duplicado).
   const picked = [...lines.keys()].map((id) => catalogById.get(id)).filter((study): study is CatalogStudy => Boolean(study));
   const overlap = picked.some((pkg) => picked.some((component) => isPackageComponent(pkg, component)));
-  const packageGroup = unresolvedPackageGroups(picked, [...catalogById.values()]).length > 0;
+  const packageGroup = heldPackageGroups(pairs, [...catalogById.values()]).length > 0;
   return { lines: [...lines.values()], audit: [...audit.values()], invalidPrice, overlap, packageGroup };
 }
 
@@ -406,17 +418,27 @@ export function judgeResolvedConfidence(resolved: ResolvedStudy, consensus: Simp
   return { confidence: weakest };
 }
 
-export function finalVisualStudiesOf(consensus: SimpleConsensus, judgement: SimpleJudgement): FinalVisualStudy[] {
+export function finalVisualStudiesOf(consensus: SimpleConsensus, judgement: SimpleJudgement, catalog?: CatalogStudy[]): FinalVisualStudy[] {
+  const pairOf = (study: SimpleStudy) => consensus.agreedPairs?.find((candidate) => candidate.a === study);
+  const withLine = <T extends SimpleStudy>(study: T, a?: SimpleStudy, b?: SimpleStudy): T & { lineText?: string } => {
+    const lineText = reliableLineText(a, b);
+    const { lineText: _own, ...rest } = study;
+    return (lineText ? { ...rest, lineText } : rest) as T & { lineText?: string };
+  };
   const all = [
-    ...consensus.agreedStudies.map((study) => ({ ...study, source: "agreed" as const })),
+    ...consensus.agreedStudies.map((study) => ({ ...withLine(study, pairOf(study)?.a, pairOf(study)?.b), source: "agreed" as const })),
     ...judgement.resolvedStudies
       .filter((resolved) => resolved.verdict === "confirmed")
-      .map((resolved) => ({ ...resolved.study, ...judgeResolvedConfidence(resolved, consensus), source: "judge_confirmed" as const }))
+      .map((resolved) => {
+        const dispute = consensus.disputes.find((candidate) => candidate.key === resolved.key);
+        return { ...withLine(resolved.study, dispute?.readerA.requested, dispute?.readerB.requested), ...judgeResolvedConfidence(resolved, consensus), source: "judge_confirmed" as const };
+      })
   ];
   // Una selección visual, un estudio: el mismo texto (ignorando espaciado y puntuación) no se cuenta dos veces.
   const kept: FinalVisualStudy[] = [];
   for (const study of all) if (!kept.some((other) => sameVisibleText(other.literalText, study.literalText))) kept.push(study);
-  return kept;
+  // Con el catálogo, las líneas que son un paquete aprobado se reconstruyen (o quedan pendientes si no se puede sin ambigüedad).
+  return catalog ? collapseExplicitPackages(kept, catalog) : kept;
 }
 
 // Estudios finales cuyo texto es un comienzo truncado de OTRO estudio final ("NITROGENO UREICO" frente a "NITROGENO UREICO/UREA/NUS").
@@ -452,7 +474,7 @@ export function assembleAnalysis(args: {
 }): AnalysisResult {
   const { consensus, judgement, catalog, semantic, document, primary } = args;
   const semanticAuto = Boolean(primary && args.semanticAuto);
-  const finalVisualStudies = finalVisualStudiesOf(consensus, judgement);
+  const finalVisualStudies = finalVisualStudiesOf(consensus, judgement, catalog);
   const partialOf = partialTranscriptions(finalVisualStudies);
   const semanticByText = new Map<string, SemanticItemResult>((semantic?.items ?? []).map((item) => [item.literalText, item]));
 
@@ -537,6 +559,15 @@ export function assembleAnalysis(args: {
   if (semanticLines?.invalidPrice) semanticReasons.push("catalog_price_invalid");
   if (semanticLines?.overlap) semanticReasons.push("package_component_overlap");
   if (semanticLines?.packageGroup) semanticReasons.push("package_alternative_unresolved");
+  if (primary) {
+    if (matches.some((match) => match.visual.lineProblem)) semanticReasons.push("package_line_unreconstructable");
+    if (droppedLineItemDetails(finalVisualStudies).length > 0) semanticReasons.push("line_item_unrepresented");
+    const gap = matches.some((match) => {
+      const ids = linesOf(match).map((line) => catalogById.get(line.id)).filter((study): study is CatalogStudy => Boolean(study));
+      return ids.length > 0 && lineServiceGap(match.visual, ids).length > 0;
+    });
+    if (gap) semanticReasons.push("line_service_not_covered");
+  }
 
   const unmatchedMatches = matches.filter((match) => match.status === "UNMATCHED");
   const ambiguousMatches = matches.filter((match) => match.status === "AMBIGUOUS");
@@ -564,7 +595,11 @@ export function assembleAnalysis(args: {
     // Un paquete y uno de sus componentes nunca se cobran juntos (cobro duplicado).
     const matched = matches.flatMap((match) => (match.status === "MATCHED" ? [catalogById.get(match.study?.id ?? "")] : [])).filter((study): study is CatalogStudy => Boolean(study));
     if (matched.some((pkg) => matched.some((component) => isPackageComponent(pkg, component)))) reasons.push("package_component_overlap");
-    if (unresolvedPackageGroups(matched, catalog).length > 0) reasons.push("package_alternative_unresolved");
+    const matchedPairs = matches.flatMap((match) => { const study = match.status === "MATCHED" ? catalogById.get(match.study?.id ?? "") : undefined; return study ? [{ study, source: match.visual }] : []; });
+    if (heldPackageGroups(matchedPairs, catalog).length > 0) reasons.push("package_alternative_unresolved");
+    if (matches.some((match) => match.visual.lineProblem)) reasons.push("package_line_unreconstructable");
+    if (droppedLineItemDetails(finalVisualStudies).length > 0) reasons.push("line_item_unrepresented");
+    if (matchedPairs.some((pair) => lineServiceGap(pair.source, [pair.study]).length > 0)) reasons.push("line_service_not_covered");
   }
 
   const decision = reasons.length === 0 ? "AUTO_SAFE" : "HUMAN_REVIEW";
@@ -794,7 +829,7 @@ export async function analyzeImage(
   if (primaryEnabled) {
     // Capa semántica principal: TODOS los estudios visuales finales pasan por GPT (catálogo activo completo, dos pasadas, verificador).
     // Cualquier fallo no autoriza AUTO: el resultado queda con semantic_unavailable y HUMAN_REVIEW.
-    const literalTexts = [...new Set(finalVisualStudiesOf(consensus, judgement).map((visual) => visual.literalText))];
+    const literalTexts = [...new Set(finalVisualStudiesOf(consensus, judgement, catalog).map((visual) => visual.literalText))];
     let primary: SemanticPrimaryInput;
     try {
       if (activeCatalog(catalog).length === 0) throw new Error("el catálogo activo está vacío");
@@ -809,7 +844,7 @@ export async function analyzeImage(
   // Segunda capa: solo los textos que el matcher exacto/alias deja UNMATCHED, todos en UNA sola llamada.
   // Si el matcher exacto resuelve todo, no se llama a GPT.
   const exact = new ExactAliasCatalogResolver(catalog);
-  const unmatchedStudies = finalVisualStudiesOf(consensus, judgement).filter(
+  const unmatchedStudies = finalVisualStudiesOf(consensus, judgement, catalog).filter(
     (visual) => exact.resolve(observationFor(visual.literalText)).status === "UNMATCHED"
   );
   const queries = [...new Map(unmatchedStudies.map((visual) => [visual.literalText, { literalText: visual.literalText, normalizedName: visual.normalizedName }])).values()];
@@ -817,3 +852,12 @@ export async function analyzeImage(
 
   return finish({ semantic });
 }
+
+// Lecturas con el contrato ANTERIOR a lineText y documentFunction (prompt y esquema anteriores). Existe SOLO para repetir sin gasto lo ya guardado en
+// la caché local (la clave incluye prompt y esquema) y comparar antes/después. En producción nunca se usa.
+export const legacyReplayDeps: AnalyzeDeps = {
+  ...defaultAnalyzeDeps,
+  readGemini: (imageBase64, mimeType) => readImageWithGemini(imageBase64, mimeType, undefined, undefined, "legacy"),
+  readOpenAI: (imageBase64, mimeType) => readImageWithOpenAI(imageBase64, mimeType, undefined, undefined, "legacy"),
+  readDocument: (args) => readDocumentSignal({ ...args, compat: "legacy" })
+};

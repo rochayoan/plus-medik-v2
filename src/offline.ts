@@ -41,8 +41,10 @@ function block(what: string): never {
   throw new OfflineViolation(what);
 }
 
+// PLUSMEDIK_OFFLINE=1 activa la capa estricta fuera de las pruebas. Dentro de vitest la variable solo bloquea la RED (capa 2): las pruebas simulan las
+// llamadas a modelos con funciones locales (no son llamadas reales) y una llamada real igualmente fallaría en la red bloqueada.
 export function isOfflineStrict(env: NodeJS.ProcessEnv = process.env): boolean {
-  return state.strict || truthy(env.PLUSMEDIK_OFFLINE);
+  return state.strict || (truthy(env.PLUSMEDIK_OFFLINE) && !env.VITEST);
 }
 
 // Lo llama cachedAiCall justo antes de cualquier llamada real (después de comprobar el cache, antes de la guarda de gasto).
@@ -72,6 +74,9 @@ export function enforceOffline(options: { strict?: boolean } = {}): void {
   (https as { get: unknown }).get = blockedRequest;
   state.network = true;
 }
+
+// Con PLUSMEDIK_OFFLINE=1 la red queda bloqueada en cuanto se carga este módulo (lo carga cachedAiCall), sin que el script tenga que acordarse.
+if (truthy(process.env.PLUSMEDIK_OFFLINE)) enforceOffline({ strict: false });
 
 // Solo para pruebas: restaura la red y la capa estricta. Falla fuera de vitest para que un script no pueda desactivar la protección.
 export function releaseOfflineForTests(): void {

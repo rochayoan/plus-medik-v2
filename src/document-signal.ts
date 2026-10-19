@@ -4,7 +4,7 @@ import { strictJsonSchema } from "./ai.js";
 import { cachedAiCall, usageFromResponses, type AiUsage } from "./cache.js";
 import { identityTokens, type ShadowContext } from "./catalog-shadow.js";
 import { normalizeStudyKey } from "./consensus.js";
-import { derivationCues, functionCheckSchema, functionInstructions, fuseFunction, type DocumentFunctionInfo, type FunctionRequest } from "./document-function.js";
+import { derivationCues, FUNCTION_DEFINITIONS, FUNCTION_KINDS, functionCheckSchema, functionInstructions, fuseFunction, fuseKinds, type DocumentFunctionInfo, type FunctionKind, type FunctionRequest } from "./document-function.js";
 import type { DocumentType } from "./types.js";
 
 // Señal de TIPO e INTEGRIDAD del documento. Conserva el enum DocumentType, el campo completeDocumentVisible y las reglas de
@@ -45,9 +45,18 @@ const signalSchema = z.object({
   erasedOrIllegible: z.boolean(),
   irrelevantCrops: z.array(z.string()),
   printedContext: z.array(contextLineSchema).default([]),
+  // Para QUÉ sirve el documento (función), no cómo se escribe (formato). Ver FUNCTION_DEFINITIONS.
+  documentFunction: z.enum(FUNCTION_KINDS),
+  functionEvidence: z.array(z.string()),
   reason: z.string()
 });
-export type RawSignal = z.infer<typeof signalSchema>;
+// Esquema y prompt ANTERIORES a documentFunction. Solo para repetir sin gasto lecturas ya guardadas con ese contrato (la clave de caché incluye prompt y
+// esquema): `compat: "legacy"`. En producción nunca se usa.
+const legacySignalSchema = signalSchema.omit({ documentFunction: true, functionEvidence: true });
+type ModelSignal = z.infer<typeof signalSchema>;
+// documentFunction y functionEvidence son obligatorios en lo que devuelve el modelo, pero opcionales en el tipo: las lecturas guardadas antes de existir
+// el campo y las simulaciones de prueba no los traen, y en ese caso se usa la comprobación por señales (derivationCues).
+export type RawSignal = Omit<ModelSignal, "documentFunction" | "functionEvidence"> & { documentFunction?: FunctionKind; functionEvidence?: string[] };
 
 // La zona de estudios no puede acercarse al borde de la imagen sin verificación: 15/1000 = 1.5 %.
 export const EDGE_MARGIN = 15;
@@ -63,7 +72,12 @@ const definitions: Record<(typeof DOCUMENT_TYPES)[number], string> = {
   UNKNOWN: "UNKNOWN: no se puede determinar el tipo de documento."
 };
 
-export function documentInstructions(variant: "A" | "B"): string {
+export function documentInstructions(variant: "A" | "B", options: { legacy?: boolean } = {}): string {
+  const functionBlock = options.legacy ? "" : `documentFunction: para QUÉ sirve el documento, decidido por su FUNCIÓN y no por su formato (escrito a mano, impreso o con casillas no decide nada):
+${(variant === "A" ? FUNCTION_DEFINITIONS : [...FUNCTION_DEFINITIONS].reverse()).join("\n")}
+- Una palabra suelta como 'derivación' no basta: decide por lo que el documento ES. Una muestra física visible (tubo, jeringa, frasco) junto al papel, o un texto que dice que la muestra ya se tomó y se envía a otro laboratorio, indican derivación de muestra. Una firma y sello de un médico que ordena estudios para un paciente indican solicitud médica.
+- functionEvidence: hasta 5 textos literales u objetos visibles que justifican tu clasificación.
+`;
   const order = variant === "A" ? [...DOCUMENT_TYPES] : [...DOCUMENT_TYPES].reverse();
   return `
 Clasifica el documento de la imagen (una solicitud de estudios de laboratorio) y evalúa si la ZONA RELEVANTE está completa, sin leer ni listar los estudios.
@@ -93,7 +107,7 @@ paciente o del médico, fechas, números de registro, direcciones, firmas ni sel
   "Laboratorio") NO es una declaración de muestra.
 - declaresCollection: H24 u OCCASIONAL solo si la línea declara cómo se recolecta (orina de 24 horas / ocasional); NONE en otro caso.
 Si no hay líneas útiles, devuelve [].
-En reason explica en una frase qué ves (qué documento es, cómo se piden los estudios y qué recortes hay).
+${functionBlock}En reason explica en una frase qué ves (qué documento es, cómo se piden los estudios y qué recortes hay).
 `;
 }
 
@@ -393,6 +407,8 @@ export function fuseSignals(a: RawSignal, b: RawSignal, verifiedEdges: ReadonlyS
 
 export interface SignalRequest {
   instructions: string;
+  // Contrato anterior a documentFunction (solo repeticiones sin gasto de lecturas ya guardadas).
+  legacy?: boolean;
   variant: "A" | "B";
   imageBase64: string;
   mimeType: string;
@@ -417,7 +433,7 @@ function params(model: string, reasoning: string, name: string, schema: Record<s
     text: { format: { type: "json_schema" as const, name, strict: true, schema } }
   };
 }
-const signalParams = (model: string, reasoning: string) => params(model, reasoning, "document_integrity_signal", strictJsonSchema(signalSchema));
+const signalParams = (model: string, reasoning: string, legacy = false) => params(model, reasoning, "document_integrity_signal", strictJsonSchema(legacy ? legacySignalSchema : signalSchema));
 const edgeParams = (model: string, reasoning: string) => params(model, reasoning, "document_edge_verification", strictJsonSchema(edgeCheckSchema));
 const hiddenParams = (model: string, reasoning: string) => params(model, reasoning, "document_hidden_verification", strictJsonSchema(hiddenCheckSchema));
 const functionParams = (model: string, reasoning: string) => params(model, reasoning, "document_function_verification", strictJsonSchema(functionCheckSchema));
@@ -444,7 +460,7 @@ function defaultDeps(): SignalDeps {
   return {
     model,
     reasoning,
-    complete: (request) => call(signalParams(model, reasoning), request.instructions, request.imageBase64, request.mimeType),
+    complete: (request) => call(signalParams(model, reasoning, request.legacy), request.instructions, request.imageBase64, request.mimeType),
     verifyEdges: (request) => call(edgeParams(model, reasoning), request.instructions, request.imageBase64, request.mimeType),
     verifyHidden: (request) => call(hiddenParams(model, reasoning), request.instructions, request.imageBase64, request.mimeType),
     verifyFunction: (request) => call(functionParams(model, reasoning), request.instructions, request.imageBase64, request.mimeType)
@@ -460,26 +476,27 @@ export interface DocumentSignalResult {
   cacheHits: number;
 }
 
-export async function readDocumentSignal(args: { imageBase64: string; mimeType: string; deps?: Partial<SignalDeps> }): Promise<DocumentSignalResult> {
+export async function readDocumentSignal(args: { imageBase64: string; mimeType: string; deps?: Partial<SignalDeps>; compat?: "legacy" }): Promise<DocumentSignalResult> {
+  const legacy = args.compat === "legacy";
   const resolved = { ...defaultDeps(), ...args.deps };
   const usage: AiUsage[] = [];
   let calls = 0;
   let cacheHits = 0;
   const one = async (variant: "A" | "B"): Promise<RawSignal> => {
-    const instructions = documentInstructions(variant);
+    const instructions = documentInstructions(variant, { legacy });
     let called = false;
     const value = await cachedAiCall({
       label: "openai-document-signal",
       provider: "openai",
       model: resolved.model,
       imageBase64: args.imageBase64,
-      config: { prompt: instructions, mimeType: args.mimeType, params: signalParams(resolved.model, resolved.reasoning) },
-      parse: (raw) => signalSchema.parse(raw),
+      config: { prompt: instructions, mimeType: args.mimeType, params: signalParams(resolved.model, resolved.reasoning, legacy) },
+      parse: (raw) => (legacy ? legacySignalSchema : signalSchema).parse(raw) as RawSignal,
       call: async () => {
         called = true;
-        const response = await resolved.complete({ instructions, variant, imageBase64: args.imageBase64, mimeType: args.mimeType });
+        const response = await resolved.complete({ instructions, variant, imageBase64: args.imageBase64, mimeType: args.mimeType, legacy });
         if (response.usage) usage.push(response.usage);
-        return { value: signalSchema.parse(response.value), usage: response.usage };
+        return { value: (legacy ? legacySignalSchema : signalSchema).parse(response.value) as RawSignal, usage: response.usage };
       }
     });
     if (called) calls++;
@@ -493,10 +510,28 @@ export async function readDocumentSignal(args: { imageBase64: string; mimeType: 
   // FUNCIÓN del documento. El formato (manuscrito, casillas) dice cómo se escribe, no para qué sirve: una tarjeta de derivación de una muestra
   // ya tomada puede estar escrita igual que una receta. Si CUALQUIERA de las lecturas extrajo frases de derivación o rótulo de muestra, se
   // comprueba la imagen con dos lecturas independientes; sin verificador, con error o con discrepancia falla cerrado.
-  const cues = derivationCues([...a.printedContext, ...b.printedContext].map((line) => line.text).concat(a.irrelevantCrops, b.irrelevantCrops, a.rowsHiddenByObjects, b.rowsHiddenByObjects, [a.reason, b.reason]));
+  //  1. Las dos lecturas ya clasifican la función (documentFunction): ambas solicitud -> sigue; ambas "no es solicitud" -> NON_QUOTABLE; cualquier
+  //     otra combinación (una dice solicitud y la otra no, o dudan) -> UNCLEAR, sin más llamadas. No depende de palabras clave.
+  //  2. Si las lecturas son anteriores al campo (no lo traen), o si ambas dicen "solicitud" pero extrajeron una frase explícita de derivación o rótulo,
+  //     se comprueba la imagen con dos lecturas más (señales por palabras clave y objetos). Cualquier fallo de esa comprobación bloquea.
+  const textSources = [...a.printedContext, ...b.printedContext].map((line) => line.text).concat(a.irrelevantCrops, b.irrelevantCrops, a.rowsHiddenByObjects, b.rowsHiddenByObjects, [a.reason, b.reason]);
+  const hasReadings = a.documentFunction !== undefined && b.documentFunction !== undefined;
+  const readingsVerdict = hasReadings ? fuseKinds(a.documentFunction!, b.documentFunction!) : undefined;
+  const cues = derivationCues(textSources, { objects: !hasReadings });
   let functionInfo: DocumentFunctionInfo | undefined;
-  if (baseRelevantType && cues.length > 0) {
-    functionInfo = { cues, verdict: "UNAVAILABLE", kinds: [], notes: [] };
+  if (baseRelevantType && hasReadings) {
+    functionInfo = {
+      cues,
+      verdict: readingsVerdict!,
+      kinds: [a.documentFunction!, b.documentFunction!],
+      notes: [`lectura A: ${a.documentFunction} (${(a.functionEvidence ?? []).join("; ")})`, `lectura B: ${b.documentFunction} (${(b.functionEvidence ?? []).join("; ")})`],
+      source: "readings"
+    };
+  }
+  const needsVerification = baseRelevantType && cues.length > 0 && (!hasReadings || readingsVerdict === "REQUEST");
+  if (needsVerification) {
+    const readingNotes = functionInfo?.notes ?? [];
+    functionInfo = { cues, verdict: "UNAVAILABLE", kinds: [], notes: [...readingNotes], source: "verification" };
     if (!resolved.verifyFunction) functionInfo.notes.push("no hay verificador de la función del documento");
     else {
       const verifyFunction = resolved.verifyFunction;
@@ -524,7 +559,7 @@ export async function readDocumentSignal(args: { imageBase64: string; mimeType: 
       try {
         const [fa, fb] = await Promise.all([verifyOne("A"), verifyOne("B")]);
         const fused = fuseFunction(fa, fb);
-        functionInfo = { cues, verdict: fused.verdict, kinds: fused.kinds, notes: fused.notes };
+        functionInfo = { cues, verdict: fused.verdict, kinds: fused.kinds, notes: [...readingNotes, ...fused.notes], source: "verification" };
       } catch (error) {
         functionInfo.notes.push(`verificación de la función no disponible: ${error instanceof Error ? error.message : String(error)}`);
       }

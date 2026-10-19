@@ -99,20 +99,46 @@ export class GeminiReader implements VisionReader {
   }
 }
 
-const simpleReadingSchema = z.object({
-  requestedStudies: z.array(z.object({
-    literalText: z.string(),
-    normalizedName: z.string(),
-    evidence: z.enum(["x", "check", "circle", "underline", "strike", "scribble", "explicit_text"]),
-    confidence: z.enum(["high", "medium", "low"])
+export const studyBaseSchema = z.object({
+  literalText: z.string(),
+  normalizedName: z.string(),
+  evidence: z.enum(["x", "check", "circle", "underline", "strike", "scribble", "explicit_text"]),
+  confidence: z.enum(["high", "medium", "low"])
+});
+
+export const simpleReadingSchema = z.object({
+  requestedStudies: z.array(studyBaseSchema.extend({
+    // Texto COMPLETO de la línea o fila donde aparece el estudio (con "+", "/", "y", comas y calificadores). Varios estudios de una misma línea
+    // comparten el mismo lineText. Preserva la agrupación original que literalText pierde cuando el lector separa una expresión.
+    lineText: z.string()
   })),
   uncertainStudies: z.array(z.string()),
   notes: z.string()
 });
 
-export type SimpleReading = z.infer<typeof simpleReadingSchema>;
+// Contrato ANTERIOR a lineText. Solo para repetir sin gasto lecturas ya guardadas (la clave de caché incluye prompt y esquema): compat "legacy".
+export const legacyReadingSchema = z.object({
+  requestedStudies: z.array(studyBaseSchema),
+  uncertainStudies: z.array(z.string()),
+  notes: z.string()
+});
+export type ReaderCompat = "legacy" | undefined;
 
-const simpleReaderInstructions = `
+type ModelReading = z.infer<typeof simpleReadingSchema>;
+// lineText es obligatorio en lo que devuelve el modelo, pero opcional en el tipo: las lecturas guardadas antes de existir el campo y las simulaciones de
+// prueba no lo traen, y en ese caso el sistema se comporta como siempre (sin agrupación por línea).
+export type SimpleReading = Omit<ModelReading, "requestedStudies"> & {
+  requestedStudies: Array<Omit<ModelReading["requestedStudies"][number], "lineText"> & { lineText?: string }>;
+};
+
+const LINE_TEXT_RULE = `- lineText: el texto COMPLETO de la línea o fila de la solicitud donde aparece ese estudio, tal como es visible
+  (con "+", "/", "y", comas y calificadores), no solo el estudio. Si varios estudios comparten una misma línea
+  (por ejemplo "Gasometría + Lactato" o "TGO / TGP"), todos devuelven la MISMA lineText y cada uno su propio literalText.
+  Si cada estudio está en su propia línea o fila, lineText es el texto de esa línea. En un formulario de casillas es
+  el rótulo completo de la fila marcada. No inventes ni completes texto que no se vea.
+`;
+
+export const simpleReaderInstructionsFor = (legacy: boolean): string => `
 Analiza la imagen completa de esta solicitud de laboratorio.
 Devuelve SOLO los estudios que fueron realmente solicitados. Una solicitud puede
 estar expresada por texto explícito, X, check, círculo, subrayado, tachado, rayón
@@ -120,7 +146,7 @@ u otra marca. No listes todas las opciones impresas en el formato.
 Para cada estudio devuelve:
 - literalText: el texto tal como es realmente visible en la imagen, sin corregir ni completar.
 - normalizedName: el nombre limpio del mismo estudio, sin agregar información que no se vea.
-
+${legacy ? "" : LINE_TEXT_RULE}
 Reglas estrictas:
 - No completes pares ni grupos clínicos. No infieras IgG porque aparezca IgM, ni al revés;
   cada variante cuenta solo si está marcada o escrita por sí misma.
@@ -131,6 +157,8 @@ Reglas estrictas:
 - Si no estás seguro de si un estudio fue solicitado, ponlo en uncertainStudies.
 Usa "notes" para cualquier observación relevante (imagen cortada, ilegible, etc.).
 `;
+
+const simpleReaderInstructions = simpleReaderInstructionsFor(false);
 
 const UNAVAILABLE_RETRY_DELAYS_MS = [3000, 6000, 12000];
 const INVALID_RESPONSE_RETRIES = 1;
@@ -156,15 +184,18 @@ async function withUnavailableRetry<T>(call: () => Promise<T>): Promise<T> {
 async function readImageWithGeminiViaOpenRouter(
   imageBase64: string,
   mimeType: string,
-  apiKey: string
+  apiKey: string,
+  legacy = false
 ): Promise<SimpleReading> {
+  const readingSchema = legacy ? legacyReadingSchema : simpleReadingSchema;
+  const readerInstructions = simpleReaderInstructionsFor(legacy);
   const model = process.env.OPENROUTER_GEMINI_MODEL ?? "google/gemini-3.8-flash";
   const reasoningEffort = process.env.OPENROUTER_GEMINI_REASONING ?? "medium";
   if (!["low", "medium", "high"].includes(reasoningEffort)) {
     throw new Error(`OPENROUTER_GEMINI_REASONING inválido: "${reasoningEffort}" (usa low, medium o high)`);
   }
   const client = new OpenAI({ apiKey, baseURL: "https://openrouter.ai/api/v1" });
-  const { $schema: _ignored, ...schema } = z.toJSONSchema(simpleReadingSchema);
+  const { $schema: _ignored, ...schema } = z.toJSONSchema(readingSchema);
   const request = {
     model,
     // OpenRouter reserva crédito por el máximo de salida; sin tope pide 65536 y falla con saldo bajo.
@@ -173,7 +204,7 @@ async function readImageWithGeminiViaOpenRouter(
     messages: [{
       role: "user" as const,
       content: [
-        { type: "text" as const, text: simpleReaderInstructions },
+        { type: "text" as const, text: readerInstructions },
         { type: "image_url" as const, image_url: { url: `data:${mimeType};base64,${imageBase64}` } }
       ]
     }],
@@ -189,8 +220,8 @@ async function readImageWithGeminiViaOpenRouter(
     provider: "openrouter",
     model,
     imageBase64,
-    config: { prompt: simpleReaderInstructions, mimeType, params },
-    parse: (raw) => simpleReadingSchema.parse(raw),
+    config: { prompt: readerInstructions, mimeType, params },
+    parse: (raw) => readingSchema.parse(raw),
     // Contenido que no se puede parsear/validar: se reintenta la misma petición (misma imagen, prompt y modelo).
     call: async () => {
       for (let attempt = 0; ; attempt++) {
@@ -198,7 +229,7 @@ async function readImageWithGeminiViaOpenRouter(
         const choice = response.choices[0];
         const usage = usageFromChatCompletions(response.usage);
         try {
-          return { value: simpleReadingSchema.parse(JSON.parse(choice?.message.content ?? "{}")), usage };
+          return { value: readingSchema.parse(JSON.parse(choice?.message.content ?? "{}")), usage };
         } catch (error) {
           await recordAiUsage({ label: "gemini-openrouter", provider: "openrouter", model, usage, invalid: true });
           if (attempt >= INVALID_RESPONSE_RETRIES) {
@@ -221,10 +252,14 @@ export async function readImageWithGemini(
   imageBase64: string,
   mimeType: string,
   model = process.env.GEMINI_READER_MODEL ?? "gemini-4-argon",
-  apiKey = process.env.GEMINI_API_KEY
+  apiKey = process.env.GEMINI_API_KEY,
+  compat?: ReaderCompat
 ): Promise<SimpleReading> {
+  const legacy = compat === "legacy";
+  const readingSchema = legacy ? legacyReadingSchema : simpleReadingSchema;
+  const readerInstructions = simpleReaderInstructionsFor(legacy);
   const openRouterKey = process.env.OPENROUTER_API_KEY;
-  if (openRouterKey) return readImageWithGeminiViaOpenRouter(imageBase64, mimeType, openRouterKey);
+  if (openRouterKey) return readImageWithGeminiViaOpenRouter(imageBase64, mimeType, openRouterKey, legacy);
   if (!apiKey) throw new Error("GEMINI_API_KEY is required (define it in .env)");
   const ai = new GoogleGenAI({ apiKey });
   const request = {
@@ -232,13 +267,13 @@ export async function readImageWithGemini(
     contents: [{
       role: "user",
       parts: [
-        { text: simpleReaderInstructions },
+        { text: readerInstructions },
         { inlineData: { mimeType, data: imageBase64 } }
       ]
     }],
     config: {
       responseMimeType: "application/json",
-      responseJsonSchema: z.toJSONSchema(simpleReadingSchema)
+      responseJsonSchema: z.toJSONSchema(readingSchema)
     }
   };
 
@@ -247,12 +282,12 @@ export async function readImageWithGemini(
     provider: "google-ai-studio",
     model,
     imageBase64,
-    config: { prompt: simpleReaderInstructions, mimeType, requestConfig: request.config },
-    parse: (raw) => simpleReadingSchema.parse(raw),
+    config: { prompt: readerInstructions, mimeType, requestConfig: request.config },
+    parse: (raw) => readingSchema.parse(raw),
     call: async () => {
       const response = await withUnavailableRetry(() => ai.models.generateContent(request));
       return {
-        value: simpleReadingSchema.parse(JSON.parse(response.text ?? "{}")),
+        value: readingSchema.parse(JSON.parse(response.text ?? "{}")),
         usage: usageFromGemini(response.usageMetadata)
       };
     }
@@ -264,11 +299,15 @@ export async function readImageWithOpenAI(
   imageBase64: string,
   mimeType: string,
   model = process.env.OPENAI_READER_MODEL ?? "gpt-6.1-sol",
-  apiKey = process.env.OPENAI_API_KEY
+  apiKey = process.env.OPENAI_API_KEY,
+  compat?: ReaderCompat
 ): Promise<SimpleReading> {
+  const legacy = compat === "legacy";
+  const readingSchema = legacy ? legacyReadingSchema : simpleReadingSchema;
+  const readerInstructions = simpleReaderInstructionsFor(legacy);
   if (!apiKey) throw new Error("OPENAI_API_KEY is required (define it in .env)");
   const client = new OpenAI({ apiKey });
-  const { $schema: _ignored, ...schema } = z.toJSONSchema(simpleReadingSchema);
+  const { $schema: _ignored, ...schema } = z.toJSONSchema(readingSchema);
   const params = {
     model,
     reasoning: { effort: (process.env.OPENAI_READER_REASONING ?? "high") as "low" | "medium" | "high" | "xhigh" | "max" },
@@ -286,21 +325,21 @@ export async function readImageWithOpenAI(
     provider: "openai",
     model,
     imageBase64,
-    config: { prompt: simpleReaderInstructions, mimeType, imageDetail: "original", params },
-    parse: (raw) => simpleReadingSchema.parse(raw),
+    config: { prompt: readerInstructions, mimeType, imageDetail: "original", params },
+    parse: (raw) => readingSchema.parse(raw),
     call: async () => {
       const response = await client.responses.create({
         ...params,
         input: [{
           role: "user",
           content: [
-            { type: "input_text", text: simpleReaderInstructions },
+            { type: "input_text", text: readerInstructions },
             { type: "input_image", image_url: `data:${mimeType};base64,${imageBase64}`, detail: "original" }
           ]
         }]
       });
       return {
-        value: simpleReadingSchema.parse(JSON.parse(response.output_text)),
+        value: readingSchema.parse(JSON.parse(response.output_text)),
         usage: usageFromResponses(response.usage)
       };
     }

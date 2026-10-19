@@ -80,14 +80,27 @@ describe("capa estricta: ninguna llamada a modelos aunque la guarda de gasto sea
     expect(call).toHaveBeenCalledTimes(1);
   });
 
-  it("PLUSMEDIK_OFFLINE=1 bloquea la llamada y la guarda permisiva ni se consulta (el caso del incidente)", async () => {
+  it("PLUSMEDIK_OFFLINE=1 (fuera de vitest) bloquea la llamada y la guarda permisiva ni se consulta (el caso del incidente)", async () => {
     const permissiveGate = vi.fn(async () => undefined);
     setRealCallGate(permissiveGate);
     process.env.PLUSMEDIK_OFFLINE = "1";
-    const call = vi.fn(async () => ({ value: "no debe llamarse" }));
-    await expect(cachedAiCall(baseCall(call))).rejects.toBeInstanceOf(OfflineViolation);
-    expect(call).not.toHaveBeenCalled();
-    expect(permissiveGate).not.toHaveBeenCalled();
+    const savedVitest = process.env.VITEST;
+    delete process.env.VITEST; // simula un script: dentro de vitest la variable solo bloquea la red
+    try {
+      const call = vi.fn(async () => ({ value: "no debe llamarse" }));
+      await expect(cachedAiCall(baseCall(call))).rejects.toBeInstanceOf(OfflineViolation);
+      expect(call).not.toHaveBeenCalled();
+      expect(permissiveGate).not.toHaveBeenCalled();
+    } finally {
+      process.env.VITEST = savedVitest;
+    }
+  });
+
+  it("dentro de vitest PLUSMEDIK_OFFLINE=1 NO impide las simulaciones locales (la red sigue bloqueada)", async () => {
+    process.env.PLUSMEDIK_OFFLINE = "1";
+    const call = vi.fn(async () => ({ value: "simulado" }));
+    await expect(cachedAiCall(baseCall(call))).resolves.toBe("simulado");
+    await expect(fetch("https://api.openai.com/v1/responses")).rejects.toBeInstanceOf(OfflineViolation);
   });
 
   it("enforceOffline({ strict }) bloquea igual y es PEGAJOSO: borrar la variable no lo desactiva", async () => {
@@ -103,9 +116,10 @@ describe("capa estricta: ninguna llamada a modelos aunque la guarda de gasto sea
   });
 
   for (const value of ["1", "true", "TRUE", "on", "yes", " 1 "]) {
-    it(`PLUSMEDIK_OFFLINE=${JSON.stringify(value)} activa el modo estricto`, () => {
+    it(`PLUSMEDIK_OFFLINE=${JSON.stringify(value)} activa el modo estricto (fuera de vitest)`, () => {
       process.env.PLUSMEDIK_OFFLINE = value;
-      expect(isOfflineStrict()).toBe(true);
+      expect(isOfflineStrict({ ...process.env, VITEST: undefined })).toBe(true);
+      expect(isOfflineStrict()).toBe(false); // dentro de vitest solo la red
     });
   }
   for (const value of ["0", "false", "off", "", "no"]) {

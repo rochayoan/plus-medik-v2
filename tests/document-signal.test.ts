@@ -33,6 +33,8 @@ const raw = (documentType: string, overrides: Partial<RawSignal> = {}): RawSigna
   erasedOrIllegible: false,
   irrelevantCrops: [],
   printedContext: [],
+  documentFunction: "MEDICAL_REQUEST",
+  functionEvidence: ["firma y sello del médico que ordena estudios"],
   reason: `es ${documentType}`,
   ...overrides
 });

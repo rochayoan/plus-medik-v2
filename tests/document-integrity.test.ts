@@ -44,6 +44,8 @@ const raw = (overrides: Partial<RawSignal> = {}): RawSignal => ({
   erasedOrIllegible: false,
   irrelevantCrops: [],
   printedContext: [],
+  documentFunction: "MEDICAL_REQUEST",
+  functionEvidence: ["firma y sello del médico que ordena estudios"],
   reason: "formulario",
   ...overrides
 });

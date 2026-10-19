@@ -109,7 +109,7 @@ describe("readDocumentSignal: la función decide el tipo efectivo del documento"
     model: "m",
     reasoning: "medium"
   });
-  const run = (d: ReturnType<typeof deps>) => readDocumentSignal({ imageBase64: "aW1n", mimeType: "image/jpeg", deps: d });
+  const run = (d: ReturnType<typeof deps>) => readDocumentSignal({ imageBase64: "aW1n", mimeType: "image/jpeg", deps: d, compat: "legacy" });
   // La frase de derivación la ve SOLO UNA de las dos lecturas (como en el caso real que originó esta corrección).
   const oneReadSeesIt = (type: RawSignal["documentType"] = "HANDWRITTEN_REQUEST", text = "DERIVACION DE MUESTRA") => (variant: "A" | "B") => raw({ documentType: type, printedContext: variant === "B" ? [ctx(text)] : [] });
   const answers = (kind: FunctionKind) => async () => ({ value: check(kind) });
@@ -232,6 +232,7 @@ describe("de la función del documento a la cotización (extremo a extremo)", ()
     readDocument: (args) =>
       readDocumentSignal({
         ...args,
+        compat: "legacy",
         deps: { complete: async (request) => ({ value: raw(request.variant) }), verifyFunction: async () => ({ value: check(kind) }), model: "m", reasoning: "medium" }
       }),
     resolveSemantic: vi.fn(async () => { throw new Error("no debe llamarse"); }),
@@ -299,7 +300,7 @@ describe("señales por OBJETOS de muestra descritos en las lecturas existentes (
     model: "m",
     reasoning: "medium"
   });
-  const run = (d: ReturnType<typeof deps>) => readDocumentSignal({ imageBase64: "aW1n", mimeType: "image/jpeg", deps: d });
+  const run = (d: ReturnType<typeof deps>) => readDocumentSignal({ imageBase64: "aW1n", mimeType: "image/jpeg", deps: d, compat: "legacy" });
 
   it("un objeto descrito SOLO como recorte irrelevante en UNA lectura activa la comprobación; sin impresos de derivación", async () => {
     const d = deps((variant) => raw(variant === "A" ? { irrelevantCrops: ["Una jeringa oculta parte del encabezado, sin tapar los estudios"] } : {}), "SAMPLE_DERIVATION");

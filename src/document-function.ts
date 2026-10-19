@@ -38,6 +38,8 @@ export interface DocumentFunctionInfo {
   // Función que dijo cada lectura (vacío si no se comprobó o no estuvo disponible).
   kinds: FunctionKind[];
   notes: string[];
+  // De dónde sale el veredicto: las dos lecturas de la señal de documento ("readings") o la comprobación enfocada que las confirma o corrige ("verification").
+  source?: "readings" | "verification" | "cues";
 }
 
 const fold = (text: string): string =>
@@ -62,23 +64,29 @@ const CUE_PATTERNS: RegExp[] = [
 ];
 
 // Líneas (ya extraídas por las lecturas) que indican que el documento puede acompañar una muestra y no ser una solicitud.
-export function derivationCues(texts: string[]): string[] {
+// Las 4 primeras patrones son frases de derivación/rótulo (fuertes); el resto son objetos físicos de muestra.
+const TEXT_PATTERN_COUNT = 4;
+export function derivationCues(texts: string[], options: { objects?: boolean } = {}): string[] {
+  const patterns = options.objects === false ? CUE_PATTERNS.slice(0, TEXT_PATTERN_COUNT) : CUE_PATTERNS;
   const out: string[] = [];
   for (const text of texts) {
     const folded = fold(text);
-    if (folded !== "" && CUE_PATTERNS.some((pattern) => pattern.test(folded)) && !out.includes(text.trim())) out.push(text.trim());
+    if (folded !== "" && patterns.some((pattern) => pattern.test(folded)) && !out.includes(text.trim())) out.push(text.trim());
   }
   return out;
 }
 
-export function functionInstructions(variant: "A" | "B", cues: string[]): string {
-  const definitions = [
+// Definiciones compartidas: las usa la comprobación enfocada y la señal de documento (documentFunction), para que ambas clasifiquen igual.
+export const FUNCTION_DEFINITIONS: string[] = [
     "- MEDICAL_REQUEST: una solicitud, orden o receta emitida por un médico o centro para que se realicen estudios de laboratorio a un paciente (puede estar escrita a mano, impresa o en un formulario con casillas). Una orden de un paciente 'derivado a laboratorio', con los estudios por realizar, es MEDICAL_REQUEST.",
     "- SAMPLE_DERIVATION: tarjeta o formulario de DERIVACIÓN o ENVÍO de una muestra YA TOMADA, de un laboratorio u hospital de origen a otro laboratorio. Suele nombrar el origen y el destino, traer un código y la prueba escrita, y a menudo el tubo o la jeringa con la muestra delante.",
     "- SAMPLE_LABEL: la etiqueta o rótulo de un tubo o contenedor de muestra.",
     "- OTHER_NON_REQUEST: cualquier otro documento que no pide estudios a cotizar (resultados, informes, facturas, trámites administrativos).",
     "- UNCLEAR: no puedes decidir con lo que se ve."
-  ];
+];
+
+export function functionInstructions(variant: "A" | "B", cues: string[]): string {
+  const definitions = FUNCTION_DEFINITIONS;
   const rules = [
     "- Clasifica por la FUNCIÓN del documento, no por su formato: escrito a mano o impreso no decide nada.",
     "- Una palabra suelta como 'derivación' no basta. Decide por lo que el documento ES: ¿pide estudios a un paciente, o acompaña una muestra que ya fue tomada y enviada a otro laboratorio?",
@@ -101,6 +109,13 @@ En reason explica en una frase qué es el documento.
 }
 
 const NON_REQUEST: ReadonlySet<FunctionKind> = new Set(["SAMPLE_DERIVATION", "SAMPLE_LABEL", "OTHER_NON_REQUEST"]);
+
+// Fusión de dos funciones ya decididas (fallo cerrado): ambas solicitud -> REQUEST; ambas "no es solicitud" -> NON_QUOTABLE; cualquier otra combinación -> UNCLEAR.
+export function fuseKinds(a: FunctionKind, b: FunctionKind): FunctionVerdict {
+  if (a === "MEDICAL_REQUEST" && b === "MEDICAL_REQUEST") return "REQUEST";
+  if (NON_REQUEST.has(a) && NON_REQUEST.has(b)) return "NON_QUOTABLE";
+  return "UNCLEAR";
+}
 
 // Fusiona las dos lecturas (fallo cerrado):
 //  - ambas MEDICAL_REQUEST        -> REQUEST (el formato visual decide el tipo, como siempre)

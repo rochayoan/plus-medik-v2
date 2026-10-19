@@ -449,7 +449,7 @@ export function uncoveredPlusItems(text: string, study: CatalogStudy): string[] 
 }
 
 // Clave de analito de un texto suelto: sin calificadores, conectores ni plurales (igual que baseKey para estudios).
-function itemKey(item: string): string {
+export function itemKey(item: string): string {
   const all = new Set(DIMS.flatMap((dim) => [...DIM_TOKENS[dim]]));
   return identityTokens(item).filter((token) => !all.has(token) && !CONNECTORS.has(token)).map(stem).sort().join(" ");
 }
