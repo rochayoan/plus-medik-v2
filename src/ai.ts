@@ -180,19 +180,41 @@ async function withUnavailableRetry<T>(call: () => Promise<T>): Promise<T> {
   }
 }
 
-// Tope de tokens de SALIDA de Gemini vía OpenRouter. En ese tope entran el razonamiento Y el JSON: con 6144 el razonamiento consumía casi todo y el JSON
-// salía truncado (finish_reason=length). OpenRouter reserva crédito por el máximo pedido (sin tope pide 65536 y falla con saldo bajo), así que se parte de un
-// valor holgado y solo se sube UNA vez, al doble, si de verdad se trunca. Configurable con OPENROUTER_GEMINI_MAX_TOKENS.
-export const OPENROUTER_DEFAULT_MAX_TOKENS = 16384;
-export const OPENROUTER_HARD_MAX_TOKENS = 32768;
+// Tope de tokens de SALIDA de Gemini vía OpenRouter. En ese tope entran el razonamiento Y el JSON (el JSON ocupa unos cientos de tokens; casi todo lo demás es
+// razonamiento): con 6144 el razonamiento consumía casi todo y el JSON salía truncado (finish_reason=length). OpenRouter reserva crédito por el máximo pedido
+// (sin tope pide 65536 y falla con saldo bajo), así que el tope inicial es holgado pero acotado.
+// Si de verdad se trunca, hay UN solo reintento: el razonamiento se agotó, así que repetir lo mismo con más tope paga el doble por el mismo exceso. El reintento
+// usa un razonamiento menor (por defecto "low") y un tope 1,5 veces mayor. Es seguro: la lectura de Gemini solo cuenta si el otro lector coincide en el consenso;
+// una lectura distinta queda como disputa y nunca se cotiza sola.
+// Configurable: OPENROUTER_GEMINI_MAX_TOKENS, OPENROUTER_GEMINI_RETRY_MAX_TOKENS, OPENROUTER_GEMINI_RETRY_REASONING.
+export const OPENROUTER_DEFAULT_MAX_TOKENS = 8192;
+export const OPENROUTER_RETRY_GROWTH = 1.5;
+export const OPENROUTER_ABSOLUTE_MAX_TOKENS = 65536;
 const LEGACY_OPENROUTER_MAX_TOKENS = 6144;
+const REASONING_EFFORTS = ["low", "medium", "high"] as const;
+type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
+function tokenLimit(env: NodeJS.ProcessEnv, name: string): number | undefined {
+  const raw = env[name]?.trim();
+  if (!raw) return undefined;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1024 || value > OPENROUTER_ABSOLUTE_MAX_TOKENS) throw new Error(`${name} inválido: "${raw}" (entero entre 1024 y ${OPENROUTER_ABSOLUTE_MAX_TOKENS})`);
+  return value;
+}
 
 export function openRouterMaxTokens(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = env.OPENROUTER_GEMINI_MAX_TOKENS?.trim();
-  if (!raw) return OPENROUTER_DEFAULT_MAX_TOKENS;
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value < 1024 || value > 65536) throw new Error(`OPENROUTER_GEMINI_MAX_TOKENS inválido: "${raw}" (entero entre 1024 y 65536)`);
-  return value;
+  return tokenLimit(env, "OPENROUTER_GEMINI_MAX_TOKENS") ?? OPENROUTER_DEFAULT_MAX_TOKENS;
+}
+
+// Tope del reintento por truncamiento. Si no es mayor que el inicial no hay reintento (fallaría igual y se pagaría otra vez).
+export function openRouterRetryMaxTokens(initial: number, env: NodeJS.ProcessEnv = process.env): number {
+  return tokenLimit(env, "OPENROUTER_GEMINI_RETRY_MAX_TOKENS") ?? Math.min(Math.ceil(initial * OPENROUTER_RETRY_GROWTH), OPENROUTER_ABSOLUTE_MAX_TOKENS);
+}
+
+export function openRouterRetryReasoning(env: NodeJS.ProcessEnv = process.env): ReasoningEffort {
+  const raw = env.OPENROUTER_GEMINI_RETRY_REASONING?.trim() || "low";
+  if (!(REASONING_EFFORTS as readonly string[]).includes(raw)) throw new Error(`OPENROUTER_GEMINI_RETRY_REASONING inválido: "${raw}" (usa low, medium o high)`);
+  return raw as ReasoningEffort;
 }
 
 // Mismo prompt, schema e imagen completa, pero Gemini vía OpenRouter (API compatible con OpenAI).
@@ -212,6 +234,8 @@ export async function readImageWithGeminiViaOpenRouter(
   }
   const { $schema: _ignored, ...schema } = z.toJSONSchema(readingSchema);
   const initialMaxTokens = openRouterMaxTokens();
+  const retryMaxTokens = openRouterRetryMaxTokens(initialMaxTokens);
+  const retryReasoning = openRouterRetryReasoning();
   const request = {
     model,
     max_tokens: initialMaxTokens,
@@ -241,31 +265,35 @@ export async function readImageWithGeminiViaOpenRouter(
     config: { prompt: readerInstructions, mimeType, params },
     parse: (raw) => readingSchema.parse(raw),
     // Contenido que no se puede parsear/validar. Dos causas distintas:
-    //  - TRUNCADO (finish_reason=length): repetir la misma petición con el mismo tope vuelve a truncar y se paga otra vez. Se reintenta UNA vez con el
-    //    doble de tope (hasta OPENROUTER_HARD_MAX_TOKENS); si ya está en el tope o vuelve a truncar, se falla sin más reintentos.
+    //  - TRUNCADO (finish_reason=length): repetir la misma petición con el mismo tope vuelve a truncar y se paga otra vez. Se reintenta UNA vez con menos
+    //    razonamiento y un tope mayor; si el tope del reintento no supera al actual o vuelve a truncar, se falla sin más reintentos.
     //  - Otro contenido inválido: se reintenta una vez la misma petición (misma imagen, prompt y modelo).
     call: async () => {
       let maxTokens = initialMaxTokens;
+      let effort: ReasoningEffort = reasoningEffort as ReasoningEffort;
       let invalidRetries = 0;
       let truncationRetried = false;
       for (let attempt = 1; ; attempt++) {
-        const response = await withUnavailableRetry(() => client.chat.completions.create({ ...request, max_tokens: maxTokens }));
+        const response = await withUnavailableRetry(() => {
+          const attemptRequest = { ...request, max_tokens: maxTokens, reasoning: { effort } };
+          return client.chat.completions.create(attemptRequest);
+        });
         const choice = response.choices[0];
         const usage = usageFromChatCompletions(response.usage);
         try {
           return { value: readingSchema.parse(JSON.parse(choice?.message.content ?? "{}")), usage };
         } catch (error) {
           await recordAiUsage({ label: "gemini-openrouter", provider: "openrouter", model, usage, invalid: true });
-          const detail = `finish_reason=${choice?.finish_reason}, completion_tokens=${response.usage?.completion_tokens}, max_tokens=${maxTokens}`;
+          const detail = `finish_reason=${choice?.finish_reason}, completion_tokens=${response.usage?.completion_tokens}, max_tokens=${maxTokens}, reasoning=${effort}`;
           const tail = `Final del contenido: ${JSON.stringify((choice?.message.content ?? "").slice(-200))}`;
           if (choice?.finish_reason === "length") {
-            const next = Math.min(maxTokens * 2, Math.max(OPENROUTER_HARD_MAX_TOKENS, initialMaxTokens));
-            if (truncationRetried || next <= maxTokens) {
+            if (truncationRetried || retryMaxTokens <= maxTokens) {
               throw new Error(`Respuesta de OpenRouter TRUNCADA por el tope de salida (${detail}). No se reintenta: sube OPENROUTER_GEMINI_MAX_TOKENS o baja OPENROUTER_GEMINI_REASONING.\n${tail}`);
             }
             truncationRetried = true;
-            console.error(`Respuesta de OpenRouter truncada (${detail}); un reintento con max_tokens=${next}...`);
-            maxTokens = next;
+            console.error(`Respuesta de OpenRouter truncada (${detail}); un reintento con max_tokens=${retryMaxTokens}, reasoning=${retryReasoning}...`);
+            maxTokens = retryMaxTokens;
+            effort = retryReasoning;
             continue;
           }
           if (invalidRetries >= INVALID_RESPONSE_RETRIES) {
