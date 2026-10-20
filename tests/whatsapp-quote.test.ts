@@ -311,14 +311,13 @@ describe("diagnóstico en el registro del servidor", () => {
     expect(log.studies.every((s: any) => s.certaintyResolvedByJudge === true)).toBe(true);
     expect(log.studies[0].lineGroup).toBeTypeOf("number");
   });
-  it("con includeStudyText solo agrega el nombre del estudio recortado y sin caracteres de control; nunca lineText ni texto libre", async () => {
-    const { deps, logs } = makeDeps({ analysis: sensitiveAnalysis(), includeStudyText: true });
+  it("los logs de depuración tampoco permiten texto de estudios", async () => {
+    const { deps, logs } = makeDeps({ analysis: sensitiveAnalysis() });
     await handleImageMessage(incoming, deps);
     const log = logs.find((entry) => entry.event === "analysis")!.data as Record<string, any>;
-    expect(log.studies[1].text).toBe("Estudio que no existe en el catalogo");
-    expect(log.studies[0].text.length).toBeLessThanOrEqual(LOG_TEXT_MAX);
+    expect(log.studies.every((s: any) => !("text" in s))).toBe(true);
     const dump = JSON.stringify(logs);
-    for (const sentinel of ["LINEA_SENTINELA_DIAGNOSTICO", "RAZON_LIBRE_DEL_JUEZ", "59171234567"]) expect(dump).not.toContain(sentinel);
+    for (const sentinel of [...SENTINELS, "59171234567", "Estudio que no existe", "Hemograma completo"]) expect(dump).not.toContain(sentinel);
     expect(clipForLog("a\nb\u0000c" + "x".repeat(100))).toHaveLength(LOG_TEXT_MAX);
     expect(clipForLog("a\nb\u0000c")).toBe("a b c");
   });

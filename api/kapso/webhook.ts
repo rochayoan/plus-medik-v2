@@ -1,6 +1,7 @@
 import { WhatsAppClient } from "@kapso/whatsapp-cloud-api";
 import { waitUntil } from "@vercel/functions";
 import { analyzeImage } from "../../src/analyze.js";
+import { createSupabaseAuditRepository, type AuditRepository } from "../../src/audit.js";
 import { loadActiveCatalog } from "../../src/supabase-catalog.js";
 import { extractIncomingImages, handleImageMessage, isAllowedPhone, verifyWebhookSignature, type IncomingImage, type QuoteDeps } from "../../src/whatsapp-quote.js";
 
@@ -23,6 +24,11 @@ function phoneNumberId(): string {
   return id;
 }
 
+let auditRepository: AuditRepository | undefined;
+function audit(): AuditRepository {
+  return auditRepository ??= createSupabaseAuditRepository();
+}
+
 const realDeps: QuoteDeps = {
   async downloadImage(image: IncomingImage) {
     const client = kapsoClient();
@@ -41,11 +47,18 @@ const realDeps: QuoteDeps = {
   analyze: ({ imageBase64, mimeType, catalog }) =>
     analyzeImage({ imageBase64, mimeType, catalog, semanticPrimary: true, semanticAuto: true, partialAuto: true, handwrittenAuto: "on" }),
   async sendText(to, body) {
-    await kapsoClient().messages.sendText({ phoneNumberId: phoneNumberId(), to, body });
+    const response = await kapsoClient().messages.sendText({ phoneNumberId: phoneNumberId(), to, body });
+    return { providerMessageId: response.messages[0]?.id };
   },
-  log: (event, data) => console.log(JSON.stringify({ app: "plusmedik", event, ...data })),
-  // Depuración de un caso: PILOT_LOG_STUDY_TEXT=on agrega el nombre (recortado) de cada estudio leído al log. Apagado por defecto.
-  includeStudyText: process.env.PILOT_LOG_STUDY_TEXT?.trim().toLowerCase() === "on"
+  audit: {
+    claim: (...args) => audit().claim(...args),
+    recordIgnored: (...args) => audit().recordIgnored(...args),
+    recordAnalysis: (...args) => audit().recordAnalysis(...args),
+    recordAiCalls: (...args) => audit().recordAiCalls(...args),
+    recordFailure: (...args) => audit().recordFailure(...args),
+    recordReply: (...args) => audit().recordReply(...args)
+  },
+  log: (event, data) => console.log(JSON.stringify({ app: "plusmedik", event, ...data }))
 };
 
 export async function POST(request: Request): Promise<Response> {

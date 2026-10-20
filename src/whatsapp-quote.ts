@@ -1,5 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { AnalysisResult } from "./analyze.js";
+import { categorizeProcessingError, type AuditRepository } from "./audit.js";
+import { withAiCallObserver, type AiCallEvent } from "./cache.js";
 import type { PublicQuote } from "./partial-auto.js";
 import type { CatalogStudy } from "./types.js";
 
@@ -116,10 +118,9 @@ export interface QuoteDeps {
   downloadImage(image: IncomingImage): Promise<{ bytes: Uint8Array; contentType?: string }>;
   loadCatalog(): Promise<CatalogStudy[]>;
   analyze(args: { imageBase64: string; mimeType: string; catalog: CatalogStudy[] }): Promise<AnalysisResult>;
-  sendText(to: string, body: string): Promise<void>;
+  sendText(to: string, body: string): Promise<void | { providerMessageId?: string }>;
   log(event: string, data: Record<string, unknown>): void;
-  // Agrega el nombre (recortado) de lo leído en cada estudio al log de diagnóstico. Apagado por defecto.
-  includeStudyText?: boolean;
+  audit?: AuditRepository;
 }
 
 export type QuoteResult = "quoted" | "no_quote" | "technical_issue" | "ignored";
@@ -127,12 +128,11 @@ export type QuoteResult = "quoted" | "no_quote" | "technical_issue" | "ignored";
 // ───────────────────────────── registro de diagnóstico (minimizado) ─────────────────────────────
 // El log del servidor explica por qué cada estudio se cotizó o quedó pendiente SIN datos personales ni clínicos innecesarios. Por defecto solo viajan códigos y
 // enumeraciones: la decisión, los bloqueos, el riesgo visual, la certeza, códigos del catálogo y contadores. NUNCA se registran el teléfono completo, el
-// texto de las líneas (lineText), ni texto libre de los modelos (razones del juez, notas de la verificación, evidencias de la función, avisos). El nombre de
-// lo leído en cada estudio solo se agrega con `includeStudyText` (PILOT_LOG_STUDY_TEXT=on, para depurar un caso) y recortado.
+// texto de las líneas (lineText), ni texto libre de los modelos (razones del juez, notas de la verificación, evidencias de la función, avisos).
 export const LOG_TEXT_MAX = 60;
 export const clipForLog = (text: string): string => text.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, LOG_TEXT_MAX);
 
-export function buildAnalysisLog(analysis: AnalysisResult, options: { includeStudyText?: boolean } = {}): Record<string, unknown> {
+export function buildAnalysisLog(analysis: AnalysisResult): Record<string, unknown> {
   const internal = analysis.internal;
   const read = analysis.finalVisualStudies;
   const codeOfId = new Map((internal?.quoted.lines ?? []).map((line) => [line.id, line.code]));
@@ -147,7 +147,6 @@ export function buildAnalysisLog(analysis: AnalysisResult, options: { includeStu
     const source = read[index];
     return {
       i: index,
-      ...(options.includeStudyText ? { text: clipForLog(study.text) } : {}),
       decision: study.decision,
       blockers: study.blockers,
       risk: study.risk?.class,
@@ -169,8 +168,7 @@ export function buildAnalysisLog(analysis: AnalysisResult, options: { includeStu
       kind: p.kind,
       // Los bloqueos de una disputa son texto libre del juez: no se registran.
       blockers: p.kind === "DISPUTE" ? undefined : p.blockers,
-      candidates: p.candidates?.map((c) => c.code),
-      ...(options.includeStudyText && p.text ? { text: clipForLog(p.text) } : {})
+      candidates: p.candidates?.map((c) => c.code)
     })),
     recipeStops: internal?.recipeStops,
     documentType: internal?.document.type,
@@ -185,24 +183,54 @@ export function buildAnalysisLog(analysis: AnalysisResult, options: { includeStu
 
 export async function handleImageMessage(image: IncomingImage, deps: QuoteDeps): Promise<QuoteResult> {
   const who = maskPhone(image.from);
+  let auditRunId: string | undefined;
+  if (deps.audit) {
+    try {
+      const claim = await deps.audit.claim({ messageId: image.messageId, mediaId: image.mediaId });
+      if (claim.kind === "duplicate") {
+        deps.log("duplicate_ignored", { processingStatus: claim.processingStatus });
+        return "ignored";
+      }
+      auditRunId = claim.runId;
+    } catch {
+      deps.log("audit_unavailable", { stage: "claim" });
+    }
+  }
+  const persist = async (stage: string, action: () => Promise<void>): Promise<void> => {
+    if (!auditRunId) return;
+    try {
+      await action();
+    } catch {
+      deps.log("audit_unavailable", { stage });
+    }
+  };
   let reply: string;
   let result: QuoteResult;
+  let processingStatus: "COMPLETED" | "FAILED" = "COMPLETED";
+  const aiCalls: AiCallEvent[] = [];
   try {
     const { bytes } = await deps.downloadImage(image);
     if (bytes.length === 0 || bytes.length > MAX_IMAGE_BYTES) {
       deps.log("image_rejected_size", { messageId: image.messageId, phone: who, bytes: bytes.length });
+      await persist("image", () => deps.audit!.recordIgnored(auditRunId!, "IMAGE_SIZE"));
       return "ignored";
     }
     const mimeType = detectImageMime(bytes);
     if (!mimeType) {
       deps.log("image_rejected_type", { messageId: image.messageId, phone: who });
+      await persist("image", () => deps.audit!.recordIgnored(auditRunId!, "IMAGE_TYPE"));
       reply = NO_QUOTE_MESSAGE;
       result = "no_quote";
     } else {
       const catalog = await deps.loadCatalog();
-      const analysis = await deps.analyze({ imageBase64: Buffer.from(bytes).toString("base64"), mimeType, catalog });
+      const analysis = await withAiCallObserver(
+        (event) => aiCalls.push(event),
+        () => deps.analyze({ imageBase64: Buffer.from(bytes).toString("base64"), mimeType, catalog })
+      );
       // Registro INTERNO (solo en el log del servidor, minimizado): lo pendiente y por qué. Nunca va al paciente.
-      deps.log("analysis", { messageId: image.messageId, phone: who, ...buildAnalysisLog(analysis, { includeStudyText: deps.includeStudyText }) });
+      deps.log("analysis", { messageId: image.messageId, phone: who, ...buildAnalysisLog(analysis) });
+      await persist("analysis", () => deps.audit!.recordAnalysis(auditRunId!, analysis));
+      await persist("model_calls", () => deps.audit!.recordAiCalls(auditRunId!, aiCalls));
       if (analysis.publicQuote && analysis.outcome !== "HUMAN_REVIEW") {
         reply = formatQuoteMessage(analysis.publicQuote);
         result = "quoted";
@@ -212,15 +240,22 @@ export async function handleImageMessage(image: IncomingImage, deps: QuoteDeps):
       }
     }
   } catch (error) {
-    deps.log("processing_failed", { messageId: image.messageId, phone: who, error: error instanceof Error ? error.message : String(error) });
+    const errorCode = categorizeProcessingError(error);
+    deps.log("processing_failed", { messageId: image.messageId, phone: who, errorCode });
+    await persist("model_calls", () => deps.audit!.recordAiCalls(auditRunId!, aiCalls));
+    await persist("failure", () => deps.audit!.recordFailure(auditRunId!, errorCode));
     reply = TECHNICAL_ISSUE_MESSAGE;
     result = "technical_issue";
+    processingStatus = "FAILED";
   }
   try {
-    await deps.sendText(image.from, reply);
+    const sent = await deps.sendText(image.from, reply);
     deps.log("reply_sent", { messageId: image.messageId, phone: who, result });
+    await persist("reply", () => deps.audit!.recordReply(auditRunId!, { state: "ACCEPTED", result, processingStatus, providerMessageId: sent?.providerMessageId }));
   } catch (error) {
-    deps.log("send_failed", { messageId: image.messageId, phone: who, error: error instanceof Error ? error.message : String(error) });
+    deps.log("send_failed", { messageId: image.messageId, phone: who, errorCode: "KAPSO_SEND_UNCERTAIN" });
+    // No se reintenta: un error de transporte no demuestra que Kapso no aceptó el mensaje.
+    await persist("reply", () => deps.audit!.recordReply(auditRunId!, { state: "UNKNOWN", result, processingStatus }));
   }
   return result;
 }

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +14,33 @@ export interface AiUsage {
   reasoningTokens?: number;
   // Solo si el proveedor lo reporta (OpenRouter). No hay tabla de precios propia.
   costUsd?: number;
+}
+
+// Observabilidad por procesamiento: recibe resultados ya parseados y nunca altera la llamada ni su salida.
+// El consumidor debe reducir cualquier dato antes de persistirlo.
+export interface AiCallEvent {
+  label: string;
+  provider: string;
+  model: string;
+  cacheHit: boolean;
+  outcome: "OK" | "FAILED" | "INVALID" | "CACHE_HIT";
+  usage?: AiUsage;
+  value?: unknown;
+}
+
+export type AiCallObserver = (event: AiCallEvent) => void;
+const aiCallScope = new AsyncLocalStorage<AiCallObserver>();
+
+export function withAiCallObserver<T>(observer: AiCallObserver, operation: () => Promise<T>): Promise<T> {
+  return aiCallScope.run(observer, operation);
+}
+
+function observeAiCall(event: AiCallEvent): void {
+  try {
+    aiCallScope.getStore()?.(event);
+  } catch {
+    // La auditoría nunca interrumpe el motor ni un proveedor.
+  }
 }
 
 type CacheMode = "on" | "off" | "refresh";
@@ -55,6 +83,14 @@ async function appendUsageLine(line: Record<string, unknown>): Promise<void> {
 
 // Registra una llamada real al proveedor (también las respuestas inválidas que se reintentan).
 export function recordAiUsage(record: UsageRecord): Promise<void> {
+  observeAiCall({
+    label: record.label,
+    provider: record.provider,
+    model: record.model,
+    cacheHit: false,
+    outcome: record.invalid ? "INVALID" : "OK",
+    usage: record.usage
+  });
   return appendUsageLine({
     timestamp: new Date().toISOString(),
     ...record,
@@ -128,6 +164,7 @@ export async function cachedAiCall<T>(options: {
         key,
         savedUsage: hit.usage
       });
+      observeAiCall({ label, provider, model, cacheHit: true, outcome: "CACHE_HIT", usage: hit.usage, value: hit.value });
       return hit.value;
     }
   }
@@ -135,7 +172,14 @@ export async function cachedAiCall<T>(options: {
   // Modo offline: ANTES de la guarda de gasto, para que ninguna guarda permisiva pueda dejar pasar una llamada real.
   assertModelCallsAllowed(label, provider, model);
   await realCallGate?.({ label, provider, model });
-  const { value, usage } = await options.call();
+  let value: T;
+  let usage: AiUsage | undefined;
+  try {
+    ({ value, usage } = await options.call());
+  } catch (error) {
+    observeAiCall({ label, provider, model, cacheHit: false, outcome: "FAILED" });
+    throw error;
+  }
   await appendUsageLine({
     timestamp: new Date().toISOString(),
     label,
@@ -146,6 +190,7 @@ export async function cachedAiCall<T>(options: {
     key,
     usage
   });
+  observeAiCall({ label, provider, model, cacheHit: false, outcome: "OK", usage, value });
 
   if (mode !== "off") {
     try {
