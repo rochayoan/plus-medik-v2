@@ -47,22 +47,48 @@ function rowsCoverPackage(pkg: CatalogStudy, rows: FinalVisualStudy[]): boolean 
   return unused.size === 0;
 }
 
-// Una fila cuyo texto es SOLO una variante ("IgG", "libre") no identifica un estudio. Si comparte línea (lineText fiable) con filas que sí nombran el
-// analito y todas nombran el MISMO analito, hereda ese analito ("Anticardiolipina IgM" + "IgG" -> "Anticardiolipina IgG"). Nunca entre líneas distintas, nunca si
-// hay analitos distintos en la línea y nunca si el resultado repetiría el texto de otra fila (ahí la duda queda como estaba). El matching y la verificación de
-// identidad siguen aplicando igual al texto resultante.
+// Una fila cuyo texto es SOLO una variante ("IgG", "libre") no identifica un estudio. Hereda el analito de las filas DONANTES de su misma línea
+// ("Anticardiolipina IgM" + "IgG" -> "Anticardiolipina IgG") solo si TODO esto es cierto; ante cualquier duda la fila queda como estaba (sin identificar,
+// pendiente de revisión humana) y nunca se cotiza:
+//  1. La línea es fiable (las dos lecturas coinciden en ella) y la comparten la fila suelta y los donantes.
+//  2. Los donantes nombran todos el MISMO analito, y la línea nombra exactamente UN analito que coincide con el del donante. Una línea con dos analitos
+//     ("Zetaina, Gamaina IgG") no permite saber a cuál pertenece la variante suelta.
+//  3. La línea es texto llano: sin marcas o signos (tachados, casillas, interrogaciones) que puedan significar que la variante fue rechazada, anulada o
+//     está en duda. Las palabras de negación o condición ya impiden el punto 2 porque no son parte del analito.
+//  4. La variante de la fila aparece en la línea y el resultado no repite el texto de otra fila.
+// Sin donante NO se hereda de la propia línea: una variante suelta sin ninguna fila que nombre el analito sigue sin identificar. El matching y la verificación
+// de identidad se aplican igual al texto resultante: heredar solo reconstruye el texto de la fila, no decide qué estudio es.
+// Separadores de una enumeración: comas, punto y coma, "/", saltos de línea y conjunciones (cualquier otra palabra se queda dentro del mismo trozo).
+const LIST_SPLIT = /\s*[,;/\n]\s*|\s+(?:y|e|o|u|and|con|más|mas)\s+/i;
+// Texto llano: letras, números, espacios y solo "," ";" ":" "/" "." y apóstrofos; el guion solo DENTRO de una palabra ("Anti-lambda"). Cualquier otro signo
+// (✓ ✗ ☐ ~ * ? [ ] ( ) + - · ...) puede ser una marca de aceptado, rechazado o duda que la herencia no interpreta: la línea deja de ser fiable para heredar.
+const WORD_HYPHEN = /(?<=[\p{L}\p{N}])-(?=[\p{L}\p{N}])/gu;
+const PLAIN_LINE = /^[\p{L}\p{N}\s,;:/.'’]*$/u;
+const isPlainLine = (text: string): boolean => PLAIN_LINE.test(text.replace(WORD_HYPHEN, ""));
+
+// El analito de una línea si nombra exactamente UNO: separando la enumeración (comas, ";", "/", "y", "o"...), un solo trozo conserva palabras que no son variantes.
+export function lineAnalyte(lineText: string): string | undefined {
+  if (!isPlainLine(lineText)) return undefined;
+  const parts = lineText.split(LIST_SPLIT).map((part) => headWords(part)).filter((part) => part !== "");
+  return parts.length === 1 ? parts[0] : undefined;
+}
+
+const variantsIn = (text: string): Set<string> => new Set(identityTokens(text));
+
 export function inheritAnalyteFromLine(studies: FinalVisualStudy[]): FinalVisualStudy[] {
   const groups = new Map<string, FinalVisualStudy[]>();
   for (const study of studies) if (study.lineText) groups.set(lineKeyOf(study.lineText), [...(groups.get(lineKeyOf(study.lineText)) ?? []), study]);
   const replaced = new Map<FinalVisualStudy, FinalVisualStudy>();
   for (const rows of groups.values()) {
-    if (rows.length < 2) continue;
-    const donors = rows.filter((row) => !isQualifierOnly(row.literalText) && headWords(row.literalText) !== "");
-    const heads = new Set(donors.map((row) => headWords(row.literalText)));
+    if (!rows.some((row) => isQualifierOnly(row.literalText))) continue;
+    const heads = new Set(rows.filter((row) => !isQualifierOnly(row.literalText) && headWords(row.literalText) !== "").map((row) => headWords(row.literalText)));
     if (heads.size !== 1) continue;
     const head = [...heads][0]!;
+    if (lineAnalyte(rows[0]!.lineText!) !== head) continue;
+    const inLine = variantsIn(rows[0]!.lineText!);
     for (const row of rows) {
       if (!isQualifierOnly(row.literalText)) continue;
+      if (!identityTokens(row.literalText).every((token) => inLine.has(token))) continue;
       const literalText = `${head} ${row.literalText}`.trim();
       const clash = studies.some((other) => other !== row && sameVisibleText(other.literalText, literalText));
       if (clash) continue;
