@@ -24,7 +24,7 @@ describe("herencia de analito: adversarial", () => {
   }
 
   it("el generador no es trivial: las estructuras de regresión existen y hay lectura con una fila donante que sí se cotiza completa", () => {
-    for (const required of ["S4_donor_of_other_analyte", "S4b_donor_with_variant_of_other_analyte", "S10_marks_donor", "S10c_symbol_marks_donor", "S10d_symbol_marks_two_analytes", "S10b_marks_bare", "S11_negation_donor", "S11b_negation_bare"]) expect(STRUCTURES).toHaveProperty(required);
+    for (const required of ["S4_donor_of_other_analyte", "S4b_donor_with_variant_of_other_analyte", "S10_marks_donor", "S10c_symbol_marks_donor", "S10d_symbol_marks_two_analytes", "S14_x_marks_donor", "S15_factor_x_with_marks", "S16_x_marks_two_analytes", "S17_x_marks_no_donor", "S10b_marks_bare", "S11_negation_donor", "S11b_negation_bare"]) expect(STRUCTURES).toHaveProperty(required);
     const positive = evaluateStructure("S2_donor_single_analyte", 50);
     expect(positive.correct).toBeGreaterThan(50);
     expect(positive.wrong + positive.missed).toBe(0);

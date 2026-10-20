@@ -28,7 +28,9 @@ export const BATTERY_CATALOG: CatalogStudy[] = [
   study("c1", "CULTIVO DE ALFA", "BACTERIOLOGIA - MICROBIOLOGIA"),
   study("c2", "CULTIVO DE ALFA CON ANTIBIOGRAMA", "BACTERIOLOGIA - MICROBIOLOGIA"),
   study("u", "UPSILONA", "QUIMICA SANGUINEA", ["Upsilona basal"]),
-  study("z24", "ZETAINA EN ORINA DE 24 HORAS", "URIANALISIS")
+  study("z24", "ZETAINA EN ORINA DE 24 HORAS", "URIANALISIS"),
+  study("fx1", "FACTOR X TOTAL", "HEMOSTASIA"),
+  study("fx2", "FACTOR X LIBRE", "HEMOSTASIA")
 ];
 
 const DOC: DocumentGate = { documentType: "MARK_DEPENDENT_FORM", completeDocumentVisible: true, agreement: true, integrityProblems: [], integrityKinds: [] };
@@ -111,6 +113,8 @@ export const BATTERY: BatteryCase[] = [
   { id: "P18", principle: "Lo que ya viene completo no depende de la línea: una línea con marcas no afecta a filas con su analito", kind: "positive", a: reading([row("Anti-lambda IgG", "Anti-lambda IgG ✓  IgM ✗")]), expectQuoted: ["l1"] },
   { id: "P19", principle: "Los signos y marcas de la línea (cruces, subrayados) no impiden reconstruir la variante suelta: sigue el flujo normal", kind: "positive", a: reading([row("Anti-lambda IgG", "Anti-lambda IgG ✓  IgM ✓"), row("IgM", "Anti-lambda IgG ✓  IgM ✓")]), expectQuoted: ["l1", "l2"] },
   { id: "P20", principle: "Un guion o un signo más entre variantes de una línea de un solo analito no impide la reconstrucción", kind: "positive", a: reading([row("Anti-lambda IgG", "Anti-lambda: IgG - IgM + IgA"), row("IgM", "Anti-lambda: IgG - IgM + IgA"), row("IgA", "Anti-lambda: IgG - IgM + IgA")]), expectQuoted: ["l1", "l2", "l3"] },
+  { id: "P21", principle: "La X de selección (X, (x), [x]) es una marca y no parte del analito: la variante suelta se reconstruye", kind: "positive", a: reading([row("Anti-lambda IgG", "Anti-lambda IgG X, IgM X"), row("IgM X", "Anti-lambda IgG X, IgM X")]), expectQuoted: ["l1", "l2"] },
+  { id: "P22", principle: "La X de \"Factor X\" es parte del nombre y se conserva aunque la línea lleve marcas X", kind: "positive", a: reading([row("Factor X total", "(x) Factor X total y libre"), row("libre", "(x) Factor X total y libre")]), expectQuoted: ["fx1", "fx2"] },
   // ───────────── negativos: ante evidencia insuficiente o contradictoria no se cotiza ─────────────
   { id: "N01", principle: "Variante sola sin línea no identifica el estudio", kind: "negative", a: reading([row("IgG")]), expectQuoted: [], mustHold: ["IgG"] },
   { id: "N02", principle: "Variante sola con una línea que nombra dos analitos distintos no hereda", kind: "negative", a: reading([row("IgG", "Anti-lambda y Zetaina IgG")]), expectQuoted: [], mustHold: ["IgG"] },
@@ -133,5 +137,7 @@ export const BATTERY: BatteryCase[] = [
   { id: "N20", principle: "Una sola variante suelta, sin donante: no hereda", kind: "negative", a: reading([row("IgG", "Anti-lambda IgG")]), expectQuoted: [], mustHold: ["IgG"] },
   { id: "N21", principle: "Una negación escrita con palabras en la línea impide completar la variante suelta", kind: "negative", a: reading([row("Anti-lambda IgG", "Anti-lambda IgG, sin IgM"), row("IgM", "Anti-lambda IgG, sin IgM")]), expectQuoted: ["l1"], mustHold: ["IgM"] },
   { id: "N22", principle: "La variante suelta de la otra mitad de una línea con dos analitos no se asigna al analito de la fila nombrada", kind: "negative", a: reading([row("Zetaina", "Zetaina, Anti-lambda IgG"), row("IgG", "Zetaina, Anti-lambda IgG")]), expectQuoted: ["z"], mustHold: ["IgG"] },
+  { id: "N23", principle: "Con marcas X y dos analitos en la línea, la variante suelta no se asigna al analito de la fila nombrada", kind: "negative", a: reading([row("Zetaina", "Zetaina X, Anti-lambda IgG X"), row("IgG", "Zetaina X, Anti-lambda IgG X")]), expectQuoted: ["z"], mustHold: ["IgG"] },
+  { id: "N24", principle: "Sin fila donante, las marcas X no hacen que la variante suelta herede de la línea", kind: "negative", a: reading([row("IgG X", "Anti-lambda: X IgG X IgM"), row("IgM", "Anti-lambda: X IgG X IgM")]), expectQuoted: [], mustHold: ["IgG X", "IgM"] },
   { id: "N12",principle: "Un componente de paquete sin el otro componente no se cotiza como el paquete", kind: "negative", a: reading([row("Zetaina", "ZETAINA + KAPPAINA")]), expectQuoted: [], mustHold: ["Zetaina"], note: "la línea pide dos estudios; cotizar solo uno ocultaría el otro" }
 ];

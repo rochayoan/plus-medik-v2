@@ -1,7 +1,7 @@
 import { readImageWithGemini, readImageWithOpenAI, type SimpleReading } from "./ai.js";
 import { ExactAliasCatalogResolver, uniqueMatchedStudies } from "./catalog.js";
 import { buildSimpleConsensus, isTruncationOf, normalizeStudyKey, normalizeVisibleKey, sameVisibleText, type SimpleConsensus, type SimpleStudy } from "./consensus.js";
-import { collapseExplicitPackages, droppedLineItemDetails, inheritAnalyteFromLine, heldPackageGroups, lineServiceGap, reliableLineText } from "./line-groups.js";
+import { collapseExplicitPackages, droppedLineItemDetails, inheritAnalyteFromLine, heldPackageGroups, lineServiceGap, reliableLineText, withoutSelectionX } from "./line-groups.js";
 import { activeCatalog, GENERIC_PROFILE_WORDS, identityTokens, isPackageComponent, qualifiersOf, shadowMatch, type Outcome, type ShadowBatch, type Support } from "./catalog-shadow.js";
 import type { AiUsage } from "./cache.js";
 import { readDocumentSignal, type DocumentSignal } from "./document-signal.js";
@@ -46,7 +46,7 @@ export function readersDisagree(study: FinalVisualStudy): boolean {
   if (study.inheritedFrom !== undefined || study.collapsedFrom !== undefined) {
     const expected = study.collapsedFrom?.length ?? 1;
     if (pairs.length !== expected) return true;
-    return pairs.some((pair) => !sameVisibleText(pair.a, pair.b) || !sameVariants(pair.a, pair.b));
+    return pairs.some((pair) => !sameVisibleText(withoutSelectionX(pair.a), withoutSelectionX(pair.b)) || !sameVariants(pair.a, pair.b));
   }
   return study.source === "agreed" && pairs.some((pair) => !sameVariants(pair.a, pair.b));
 }

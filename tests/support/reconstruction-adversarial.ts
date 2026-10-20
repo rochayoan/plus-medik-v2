@@ -57,6 +57,14 @@ export const MODES: Record<string, { description: string; expectQuoted: "readByB
     description: "POSITIVO: ambos leen la misma variante con distintas mayúsculas o puntuación (\"IgM\" / \"IGM.\"): es el mismo texto visible", expectQuoted: "readByBoth",
     make: () => { const analyte = pick(ANALYTES); const line = `${analyte} IgG, IgM`; const donor = row(`${analyte} IgG`, `${analyte} IgG`, line); return { a: [donor, row("IgM", analyte, line)], b: [donor, row("IGM.", analyte, line)], readByBoth: [key(analyte, "IgG"), key(analyte, "IgM")] }; }
   },
+  bare_X_mark_only_in_one_reader: {
+    description: "POSITIVO: la fila suelta es la misma para los dos y solo uno incluyó la X de selección en el texto de la fila: es la misma lectura y se cotiza", expectQuoted: "readByBoth",
+    make: () => { const analyte = pick(ANALYTES); const [v1, v2] = shuffle(VARIANTS) as [string, string]; const line = `${analyte} ${v1} X, ${v2} X`; const donor = row(`${analyte} ${v1}`, `${analyte} ${v1}`, line); const name = pick([analyte, `${analyte} ${v2}`]); return { a: [donor, row(`${v2} X`, name, line)], b: [donor, row(v2, name, line)], readByBoth: [key(analyte, v1), key(analyte, v2)] }; }
+  },
+  bare_X_mark_B_reads_other_variant: {
+    description: "REGRESIÓN OBLIGATORIA: con la X de selección en el texto de la fila, si los lectores leen variantes distintas no se cotiza la reconstruida", expectQuoted: "readByBoth",
+    make: () => { const analyte = pick(ANALYTES); const [v1, v2, v3] = shuffle(VARIANTS) as [string, string, string]; const line = `${analyte} ${v1} X, ${v2} X, ${v3} X`; const donor = row(`${analyte} ${v1}`, `${analyte} ${v1}`, line); return { a: [donor, row(`${v2} X`, analyte, line)], b: [donor, row(`${v3} X`, analyte, line)], readByBoth: [key(analyte, v1)] }; }
+  },
   package_B_component_differs: {
     description: "paquete reunido: B leyó un componente con otro texto visible (se emparejan por nombre): no se reúne ni se cotiza el paquete", expectQuoted: "readByBoth",
     make: () => { const line = "ZETAINA + KAPPAINA"; return { a: [row("Zetaina", "Zetaina", line), row("Kappaina en sangre", "Kappaina", line)], b: [row("Zetaina", "Zetaina", line), row("Kappaina", "Kappaina", line)], readByBoth: [], catalog: BATTERY_CATALOG }; }

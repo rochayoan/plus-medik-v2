@@ -11,7 +11,7 @@ const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 2 
 const pick = <T,>(list: T[]): T => list[Math.floor(rnd() * list.length)]!;
 const shuffle = <T,>(list: T[]): T[] => { const copy = [...list]; for (let i = copy.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [copy[i], copy[j]] = [copy[j]!, copy[i]!]; } return copy; };
 
-const ANALYTES = ["Zetaina", "Anti-lambda", "Gamaina", "Proteina Qu", "Factor Omega", "Kappaina", "Sigmaina", "Anti-rho", "Nuclear Tau", "Ovalbumina Xi", "Zeta B", "Zeta", "Fibrona", "Lumina", "Epsilona", "Trombina Pi"];
+const ANALYTES = ["Zetaina", "Anti-lambda", "Gamaina", "Proteina Qu", "Factor Omega", "Kappaina", "Sigmaina", "Anti-rho", "Nuclear Tau", "Ovalbumina Xi", "Zeta B", "Zeta", "Fibrona", "Lumina", "Epsilona", "Trombina Pi", "Factor X"];
 interface Analyte { name: string; variants: string[] }
 const ANALYTE_LIST: Analyte[] = ANALYTES.map((name, i) => ({ name, variants: i % 3 === 2 ? ["total", "libre"] : ["IgG", "IgM", "IgA"].slice(0, 2 + (i % 2)) }));
 
@@ -24,12 +24,24 @@ const DOC: DocumentGate = { documentType: "MARK_DEPENDENT_FORM", completeDocumen
 const row = (literalText: string, lineText: string): SimpleStudy => ({ literalText, normalizedName: literalText, evidence: "check", confidence: "high", lineText });
 const key = (analyte: string, variant: string) => normalizeStudyKey(`${analyte} ${variant}`);
 const SEPARATORS = [", ", " / ", " y ", " + ", " | ", " ; ", " - ", " – ", "  ", " · ", " con ", " o ", " e ", " & ", ": ", " (", "\n", " más "];
-// Marcas escritas con PALABRAS, letras o dígitos: cuentan como palabras de la línea, no son parte del analito y la herencia no se hace.
-const WORD_MARKS: Array<[string, string]> = [["(x)", "( )"], ["[x]", "[ ]"], ["si", "no"], ["SI", "NO"], ["1", "0"], ["ok", "no"]];
+// Marcas escritas con PALABRAS o dígitos: cuentan como palabras de la línea, no son parte del analito y la herencia no se hace. (La X, "(x)" y "[x]" son marcas de selección: ver S14.)
+const WORD_MARKS: Array<[string, string]> = [["si", "no"], ["SI", "NO"], ["1", "0"], ["ok", "no"]];
 // Marcas y signos puros (X, cruces, rayas, subrayados...): son la forma habitual de pedir un estudio. No impiden por sí solos la herencia (se retiró la restricción
 // de símbolos): lo que los lectores devuelven como filas se reconstruye y sigue el flujo normal.
 const SYMBOL_MARKS: Array<[string, string]> = [["✓", "✗"], ["☑", "☐"], ["+", "-"], ["(+)", "(-)"], ["√", "×"], ["✔", "✘"], ["*", ""], ["", "?"], ["___", ""], ["", "~~"]];
 const MARKS: Array<[string, string]> = [...WORD_MARKS, ...SYMBOL_MARKS];
+// Formas habituales de marcar con X los estudios pedidos de una línea con un solo analito.
+const X_LAYOUTS: Array<(analyte: string, v1: string, v2: string) => string> = [
+  (a, v1, v2) => `${a} ${v1} X, ${v2} X`,
+  (a, v1, v2) => `X ${a} ${v1}, ${v2}`,
+  (a, v1, v2) => `${a} ${v1}, ${v2}  X`,
+  (a, v1, v2) => `${a}: X ${v1} X ${v2}`,
+  (a, v1, v2) => `${a} ${v1} (x) ${v2} (x)`,
+  (a, v1, v2) => `${a} (x) ${v1}, (x) ${v2}`,
+  (a, v1, v2) => `${a} [x] ${v1} [ ] ${v2}`,
+  (a, v1, v2) => `${a} [X] ${v1}, [X] ${v2}`
+];
+
 const NEGATIONS = (keep: string, drop: string, analyte: string): string[] => [
   `${analyte} ${keep}, ${drop} tachado`, `${analyte} ${keep}, ${drop} (anulado)`, `${analyte} ${keep}, ${drop} opcional`, `${analyte} ${keep} / ${drop} pendiente de autorización`,
   `${analyte} ${keep}, ${drop} solo si el médico lo confirma`, `${analyte} ${keep} sin ${drop}`, `${analyte} ${keep} (${drop} no)`, `${analyte} ${keep} excepto ${drop}`,
@@ -67,7 +79,7 @@ export const STRUCTURES: Record<string, { description: string; make: () => Insta
     make: () => { const [a, b] = pair(); const va = pick(a.variants), vb = pick(b.variants); const line = `${a.name} ${va}${pick(SEPARATORS)}${b.name} ${vb}`; return { rows: [row(`${a.name} ${va}`, line), row(vb, line)], requested: [key(a.name, va), key(b.name, vb)] }; }
   },
   S10_marks_donor: {
-    description: "REGRESIÓN OBLIGATORIA: marcas de aceptado/rechazado escritas con palabras, letras o dígitos; el lector devolvió también la opción rechazada como variante suelta (con fila donante)",
+    description: "REGRESIÓN OBLIGATORIA: marcas de aceptado/rechazado escritas con palabras o dígitos; el lector devolvió también la opción rechazada como variante suelta (con fila donante)",
     make: () => { const a = pick(ANALYTE_LIST); const keep = pick(a.variants); const drop = other(a, keep); const [ok, no] = pick(WORD_MARKS); const line = `${a.name}: ${keep} ${ok}  ${drop} ${no}`.replace(/ {3,}/g, "  "); return { rows: layoutRows(a.name, keep, [drop], line, "donor"), requested: [key(a.name, keep)], notRequested: [key(a.name, drop)] }; }
   },
   S10c_symbol_marks_donor: {
@@ -93,6 +105,22 @@ export const STRUCTURES: Record<string, { description: string; make: () => Insta
   S12_same_variant_two_analytes: {
     description: "la misma variante en dos analitos de una línea: una fila suelta no se asigna a ninguno",
     make: () => { const [a, b] = pair(); const shared = a.variants.find((v) => b.variants.includes(v)) ?? a.variants[0]!; const line = `${a.name} ${shared}${pick(SEPARATORS)}${b.name} ${shared}`; return { rows: [row(`${a.name} ${shared}`, line), row(shared, line)], requested: [key(a.name, shared), key(b.name, shared)] }; }
+  },
+  S14_x_marks_donor: {
+    description: "X, (x) y [x] son marcas de un estudio pedido: no cuentan como parte del analito y lo que los lectores devolvieron como filas se reconstruye y se cotiza", mustQuoteAll: true,
+    make: () => { const a = pick(ANALYTE_LIST); const v = shuffle(a.variants).slice(0, 2); const line = pick(X_LAYOUTS)(a.name, v[0]!, v[1]!); return { rows: layoutRows(a.name, v[0]!, [v[1]!], line, "donor"), requested: v.map((x) => key(a.name, x)) }; }
+  },
+  S15_factor_x_with_marks: {
+    description: "REGRESIÓN OBLIGATORIA: la X de \"Factor X\" es parte del nombre y se conserva aunque la línea lleve marcas X: se cotiza Factor X, nunca \"Factor\" a secas ni otro factor", mustQuoteAll: true,
+    make: () => { const a = ANALYTE_LIST.find((x) => x.name === "Factor X")!; const v = shuffle(a.variants).slice(0, 2); const line = pick(X_LAYOUTS)(a.name, v[0]!, v[1]!); return { rows: layoutRows(a.name, v[0]!, [v[1]!], line, "donor"), requested: v.map((x) => key(a.name, x)) }; }
+  },
+  S16_x_marks_two_analytes: {
+    description: "REGRESIÓN OBLIGATORIA: con marcas X y DOS analitos en la línea, la variante suelta no se asigna al analito de la fila nombrada",
+    make: () => { const [a, b] = pair(); const va = pick(a.variants), vb = pick(b.variants); const line = pick([(): string => `${a.name} ${va} X${pick(SEPARATORS)}${b.name} ${vb} X`, (): string => `X ${a.name} ${va}${pick(SEPARATORS)}X ${b.name} ${vb}`, (): string => `${a.name} ${va} (x)${pick(SEPARATORS)}${b.name} ${vb} (x)`, (): string => `${a.name} [x] ${va}${pick(SEPARATORS)}${b.name} [x] ${vb}`])(); return { rows: [row(`${a.name} ${va}`, line), row(vb, line)], requested: [key(a.name, va), key(b.name, vb)] }; }
+  },
+  S17_x_marks_no_donor: {
+    description: "sin ninguna fila que nombre el analito, las marcas X no hacen que la variante suelta herede de la línea", mustHoldAll: true,
+    make: () => { const a = pick(ANALYTE_LIST); const v = shuffle(a.variants).slice(0, 2); const line = pick(X_LAYOUTS)(a.name, v[0]!, v[1]!); return { rows: layoutRows(a.name, v[0]!, [v[1]!], line, "bare"), requested: v.map((x) => key(a.name, x)) }; }
   },
   S13_shared_words_donor: {
     description: "analitos que comparten palabras (\"Zeta\" y \"Zeta B\") con fila donante: se respeta el analito completo de la línea", mustQuoteAll: true,

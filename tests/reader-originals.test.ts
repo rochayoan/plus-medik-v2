@@ -68,3 +68,22 @@ describe("generador adversarial de lecturas originales (analitos inventados, sem
     });
   }
 });
+
+describe("la X de selección no cuenta como diferencia entre las lecturas originales", () => {
+  it("dos lecturas que difieren solo en la marca X del texto de la fila son la misma lectura; una variante distinta o un nombre distinto siguen bloqueando", () => {
+    expect(readersDisagree(study({ inheritedFrom: "IgM X", readerPairs: [{ a: "IgM X", b: "IgM" }] }))).toBe(false);
+    expect(readersDisagree(study({ inheritedFrom: "IgM", readerPairs: [{ a: "IgM", b: "IgM (x)" }] }))).toBe(false);
+    expect(readersDisagree(study({ inheritedFrom: "IgM X", readerPairs: [{ a: "IgM X", b: "IgA X" }] }))).toBe(true);
+    expect(readersDisagree(study({ inheritedFrom: "IgM X", readerPairs: [{ a: "IgM X", b: "IgM cuantitativo" }] }))).toBe(true);
+  });
+  it("la X que es parte del nombre no se ignora: «Factor X» frente a «Factor» sigue siendo una diferencia", () => {
+    expect(readersDisagree(study({ collapsedFrom: ["Factor X total"], readerPairs: [{ a: "Factor X total", b: "Factor total" }] }))).toBe(true);
+    expect(readersDisagree(study({ collapsedFrom: ["Factor X total"], readerPairs: [{ a: "Factor X total", b: "Factor X total" }] }))).toBe(false);
+  });
+  it("de extremo a extremo: la marca X en un solo lector no bloquea; las variantes distintas con marca sí", () => {
+    const line = "Anti-lambda IgG X, IgM X";
+    const donor = row("Anti-lambda IgG", "Anti-lambda IgG", line);
+    expect(analyze([donor, row("IgM X", "Anti-lambda", line)], [donor, row("IgM", "Anti-lambda", line)], RECONSTRUCTION_CATALOG).codes.sort()).toEqual(["ANTI-LAMBDA IGG", "ANTI-LAMBDA IGM"]);
+    expect(analyze([donor, row("IgM X", "Anti-lambda", line)], [donor, row("IgA X", "Anti-lambda", line)], RECONSTRUCTION_CATALOG).codes).toEqual(["ANTI-LAMBDA IGG"]);
+  });
+});
