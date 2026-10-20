@@ -74,6 +74,8 @@ export interface SimpleDispute {
 
 export interface SimpleConsensus {
   agreedStudies: SimpleStudy[];
+  // Las dos lecturas (A = Gemini, B = OpenAI) de cada estudio acordado, en el mismo orden que agreedStudies.
+  agreedPairs?: Array<{ a: SimpleStudy; b: SimpleStudy }>;
   disputes: SimpleDispute[];
   hasDisputes: boolean;
 }
@@ -198,6 +200,7 @@ export function buildSimpleConsensus(a: SimpleReading, b: SimpleReading): Simple
   const uncertainB = b.uncertainStudies.map((text) => ({ text, key: normalizeVisibleKey(text), used: false }));
 
   const agreedStudies: SimpleStudy[] = [];
+  const agreedPairs: Array<{ a: SimpleStudy; b: SimpleStudy }> = [];
   const disputes: SimpleDispute[] = [];
 
   for (const pair of pairStudies(keyStudies(a.requestedStudies), keyStudies(b.requestedStudies))) {
@@ -224,6 +227,7 @@ export function buildSimpleConsensus(a: SimpleReading, b: SimpleReading): Simple
     } else if (studyA && studyB) {
       if (studyA.confidence === "high" && studyB.confidence === "high" && !hasUncertainty) {
         agreedStudies.push(studyA);
+        agreedPairs.push({ a: studyA, b: studyB });
       } else {
         disputes.push({ key, reason: "not_high_confidence_in_both", readerA, readerB });
       }
@@ -253,5 +257,5 @@ export function buildSimpleConsensus(a: SimpleReading, b: SimpleReading): Simple
   }
   disputes.push(...leftovers.values());
 
-  return { agreedStudies, disputes, hasDisputes: disputes.length > 0 };
+  return { agreedStudies, agreedPairs, disputes, hasDisputes: disputes.length > 0 };
 }

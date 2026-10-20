@@ -4,6 +4,7 @@ import { strictJsonSchema } from "./ai.js";
 import { cachedAiCall, usageFromResponses, type AiUsage } from "./cache.js";
 import { identityTokens, type ShadowContext } from "./catalog-shadow.js";
 import { normalizeStudyKey } from "./consensus.js";
+import { derivationCues, FUNCTION_DEFINITIONS, FUNCTION_KINDS, functionCheckSchema, functionInstructions, fuseFunction, fuseKinds, type DocumentFunctionInfo, type FunctionKind, type FunctionRequest } from "./document-function.js";
 import type { DocumentType } from "./types.js";
 
 // Señal de TIPO e INTEGRIDAD del documento. Conserva el enum DocumentType, el campo completeDocumentVisible y las reglas de
@@ -44,9 +45,18 @@ const signalSchema = z.object({
   erasedOrIllegible: z.boolean(),
   irrelevantCrops: z.array(z.string()),
   printedContext: z.array(contextLineSchema).default([]),
+  // Para QUÉ sirve el documento (función), no cómo se escribe (formato). Ver FUNCTION_DEFINITIONS.
+  documentFunction: z.enum(FUNCTION_KINDS),
+  functionEvidence: z.array(z.string()),
   reason: z.string()
 });
-export type RawSignal = z.infer<typeof signalSchema>;
+// Esquema y prompt ANTERIORES a documentFunction. Solo para repetir sin gasto lecturas ya guardadas con ese contrato (la clave de caché incluye prompt y
+// esquema): `compat: "legacy"`. En producción nunca se usa.
+const legacySignalSchema = signalSchema.omit({ documentFunction: true, functionEvidence: true });
+type ModelSignal = z.infer<typeof signalSchema>;
+// documentFunction y functionEvidence son obligatorios en lo que devuelve el modelo, pero opcionales en el tipo: las lecturas guardadas antes de existir
+// el campo y las simulaciones de prueba no los traen, y en ese caso se usa la comprobación por señales (derivationCues).
+export type RawSignal = Omit<ModelSignal, "documentFunction" | "functionEvidence"> & { documentFunction?: FunctionKind; functionEvidence?: string[] };
 
 // La zona de estudios no puede acercarse al borde de la imagen sin verificación: 15/1000 = 1.5 %.
 export const EDGE_MARGIN = 15;
@@ -62,7 +72,12 @@ const definitions: Record<(typeof DOCUMENT_TYPES)[number], string> = {
   UNKNOWN: "UNKNOWN: no se puede determinar el tipo de documento."
 };
 
-export function documentInstructions(variant: "A" | "B"): string {
+export function documentInstructions(variant: "A" | "B", options: { legacy?: boolean } = {}): string {
+  const functionBlock = options.legacy ? "" : `documentFunction: para QUÉ sirve el documento, decidido por su FUNCIÓN y no por su formato (escrito a mano, impreso o con casillas no decide nada):
+${(variant === "A" ? FUNCTION_DEFINITIONS : [...FUNCTION_DEFINITIONS].reverse()).join("\n")}
+- Una palabra suelta como 'derivación' no basta: decide por lo que el documento ES. Una muestra física visible (tubo, jeringa, frasco) junto al papel, o un texto que dice que la muestra ya se tomó y se envía a otro laboratorio, indican derivación de muestra. Una firma y sello de un médico que ordena estudios para un paciente indican solicitud médica.
+- functionEvidence: hasta 5 textos literales u objetos visibles que justifican tu clasificación.
+`;
   const order = variant === "A" ? [...DOCUMENT_TYPES] : [...DOCUMENT_TYPES].reverse();
   return `
 Clasifica el documento de la imagen (una solicitud de estudios de laboratorio) y evalúa si la ZONA RELEVANTE está completa, sin leer ni listar los estudios.
@@ -92,7 +107,7 @@ paciente o del médico, fechas, números de registro, direcciones, firmas ni sel
   "Laboratorio") NO es una declaración de muestra.
 - declaresCollection: H24 u OCCASIONAL solo si la línea declara cómo se recolecta (orina de 24 horas / ocasional); NONE en otro caso.
 Si no hay líneas útiles, devuelve [].
-En reason explica en una frase qué ves (qué documento es, cómo se piden los estudios y qué recortes hay).
+${functionBlock}En reason explica en una frase qué ves (qué documento es, cómo se piden los estudios y qué recortes hay).
 `;
 }
 
@@ -113,21 +128,42 @@ export function touchedEdges(region: Region): Edge[] {
 }
 
 // Problemas que NUNCA se relajan: lo que el modelo no confirma, lo que enumera como cortado/oculto/ilegible y una caja inválida.
-export function hardProblems(raw: RawSignal): string[] {
+// Única excepción: lo oculto por objetos que la verificación enfocada (dos lecturas) confirmó que solo tapa un guion, viñeta, margen o espacio
+// vacío. En ese caso la duda del modelo sobre la zona (studyRegionComplete=false) solo se perdona si él mismo la explicó con esos objetos.
+export function hardProblems(raw: RawSignal, hiddenVerified = false): string[] {
   const problems: string[] = [];
-  if (!raw.studyRegionComplete) problems.push("el modelo no confirma que la zona de estudios esté completa");
+  const explainedByHidden = hiddenVerified && raw.rowsHiddenByObjects.length > 0;
+  if (!raw.studyRegionComplete && !explainedByHidden) problems.push("el modelo no confirma que la zona de estudios esté completa");
   for (const row of raw.rowsCutByImageEdge) problems.push(`cortado por el borde: ${row}`);
-  for (const row of raw.rowsHiddenByObjects) problems.push(`oculto por un objeto: ${row}`);
+  if (!hiddenVerified) for (const row of raw.rowsHiddenByObjects) problems.push(`oculto por un objeto: ${row}`);
   if (raw.erasedOrIllegible) problems.push("hay trazos borrados o escritura ilegible en la zona de estudios");
   if (!validRegion(raw.studyRegion)) problems.push("la caja de la zona de estudios es inválida");
   return problems;
 }
 
+// Tipo de cada problema de integridad. Permiten decidir (cotización parcial) qué problemas solo dejan estudios sin ver y cuáles invalidan
+// toda la lectura:
+//  - CUT_EDGE / HIDDEN / EDGE_UNVERIFIED: hay zonas que no se ven (pueden contener MÁS estudios o afectar a los visibles).
+//  - ERASED / INVALID_BOX / UNEXPLAINED_DOUBT: la lectura misma no es confiable (tachaduras, caja inválida, duda del modelo sin causa).
+export type IntegrityKind = "CUT_EDGE" | "HIDDEN" | "EDGE_UNVERIFIED" | "ERASED" | "INVALID_BOX" | "UNEXPLAINED_DOUBT";
+
+export function integrityKinds(raw: RawSignal, verifiedEdges: ReadonlySet<Edge> = new Set(), hiddenVerified = false): IntegrityKind[] {
+  const kinds: IntegrityKind[] = [];
+  if (raw.rowsCutByImageEdge.length > 0) kinds.push("CUT_EDGE");
+  if (!hiddenVerified && raw.rowsHiddenByObjects.length > 0) kinds.push("HIDDEN");
+  if (touchedEdges(raw.studyRegion).some((edge) => !verifiedEdges.has(edge))) kinds.push("EDGE_UNVERIFIED");
+  if (raw.erasedOrIllegible) kinds.push("ERASED");
+  if (!validRegion(raw.studyRegion)) kinds.push("INVALID_BOX");
+  const explained = raw.rowsCutByImageEdge.length > 0 || raw.rowsHiddenByObjects.length > 0 || raw.erasedOrIllegible;
+  if (!raw.studyRegionComplete && !explained) kinds.push("UNEXPLAINED_DOUBT");
+  return kinds;
+}
+
 const proximityProblem = (edges: Edge[]) => `la zona de estudios toca el borde ${edges.map((edge) => EDGE_NAMES[edge]).join(" y ")} de la imagen`;
 
 // La decisión de integridad es del código: no basta con que el modelo diga "completo". Los bordes verificados no cuentan como problema.
-export function evaluateIntegrity(raw: RawSignal, verifiedEdges: ReadonlySet<Edge> = new Set()): IntegrityEvaluation {
-  const problems = hardProblems(raw);
+export function evaluateIntegrity(raw: RawSignal, verifiedEdges: ReadonlySet<Edge> = new Set(), hiddenVerified = false): IntegrityEvaluation {
+  const problems = hardProblems(raw, hiddenVerified);
   const unverified = touchedEdges(raw.studyRegion).filter((edge) => !verifiedEdges.has(edge));
   if (unverified.length > 0) problems.push(proximityProblem(unverified));
   return { complete: problems.length === 0, problems };
@@ -187,6 +223,79 @@ export function edgeCheckPassed(value: EdgeCheck, edges: Edge[]): { ok: boolean;
     else if (check.elementsNearEdge.length === 0 || check.elementsNearEdge.some((element) => element.text.trim() === "")) notes.push(`${EDGE_NAMES[edge]}: no se identificó lo que hay junto al borde`);
     else if (check.elementsNearEdge.some((element) => !element.fullyVisible)) notes.push(`${EDGE_NAMES[edge]}: hay un elemento que no se ve entero`);
   }
+  return { ok: notes.length === 0, notes };
+}
+
+// ───────────────────────────── verificación enfocada de ocultamientos ─────────────────────────────
+// Un dedo, sello o doblez que tapa el margen o el guion que antecede a una línea ya legible no debería impedir una cotización; uno que podría
+// tapar letras de un estudio pedido o una marca de selección sí. En vez de interpretar el texto libre de la primera lectura, se vuelve a mirar la
+// imagen con una pregunta concreta por objeto, en dos lecturas independientes. Solo se acepta si AMBAS dicen, para TODOS los objetos, que
+// lo oculto no puede ser un estudio pedido ni su marca (guion/viñeta/margen/espacio vacío, o el rótulo de filas con su casilla visible y vacía
+// en un formulario de casillas), nombran el texto visible contiguo y no tienen otras dudas sobre la zona. Nunca se supone lo que hay debajo.
+
+const hiddenCheckSchema = z.object({
+  items: z.array(z.object({
+    index: z.number().int(),
+    couldHide: z.enum(["STUDY_TEXT", "MARK_OR_SELECTION", "ONLY_BULLET_MARGIN_OR_BLANK", "UNSELECTED_ROW_LABEL_ONLY"]),
+    visibleNeighbor: z.string()
+  })),
+  otherDoubts: z.boolean(),
+  reason: z.string()
+});
+export type HiddenCheck = z.infer<typeof hiddenCheckSchema>;
+
+export interface HiddenRequest {
+  instructions: string;
+  variant: "A" | "B";
+  hidden: string[];
+  imageBase64: string;
+  mimeType: string;
+}
+
+export function hiddenInstructions(variant: "A" | "B", hidden: string[]): string {
+  // Las definiciones son las mismas en las dos lecturas; lo que cambia es el método (qué se mira primero) y el orden de presentación.
+  // Se invierte solo el orden de las definiciones de couldHide: la regla general y las de cierre quedan fijas para no sesgar a una de las lecturas.
+  const general = [
+    "- Primero distingue QUÉ podría estar debajo: (a) letras o continuación del texto de un estudio PEDIDO, (b) la marca de selección o su casilla, (c) solo el rótulo de filas que NO están pedidas, (d) solo guion, viñeta, margen o vacío. Nunca supongas lo que hay debajo de un objeto: solo cuenta lo que puedes ver junto a él."
+  ];
+  const definitions = [
+    "- couldHide = STUDY_TEXT si lo oculto podría contener letras, palabras o la continuación del nombre de un estudio que está pedido o cuya selección NO puedes comprobar, un pedido escrito a mano (no hay casillas), una cantidad o cualquier texto de la solicitud que podría ser un estudio.",
+    "- couldHide = MARK_OR_SELECTION si podría contener una casilla, un óvalo, una marca de selección (X, check, círculo, subrayado, tachado, raya sobre el texto) o parte de ella, sin ver entera.",
+    "- couldHide = UNSELECTED_ROW_LABEL_ONLY SOLO si se cumplen las TRES condiciones: (1) es un formulario impreso donde un estudio se pide con una marca DENTRO de su casilla, óvalo o círculo, y NO subrayando, rayando ni tachando el texto del rótulo; (2) lo oculto es únicamente texto del rótulo de filas cuya casilla u óvalo se ve ENTERO y VACÍO; (3) ninguna de esas filas muestra señal alguna de selección. Si un estudio puede pedirse subrayando, rayando o tachando el texto, o el pedido es manuscrito, NO uses este valor: elige STUDY_TEXT.",
+    "- couldHide = ONLY_BULLET_MARGIN_OR_BLANK SOLO si lo único que podría haber debajo es el guion o la viñeta que antecede a una línea ya legible, un margen o espacio vacío, y el texto de esa línea se ve COMPLETO a su lado."
+  ];
+  const closing = [
+    "- Ante la duda razonable sobre lo que hay debajo, elige STUDY_TEXT.",
+    "- visibleNeighbor: el texto de la solicitud que SÍ se ve junto a lo oculto (la palabra o línea contigua), literal. Con UNSELECTED_ROW_LABEL_ONLY nombra el rótulo visible de la fila cuya casilla vacía ves. Si no hay ninguno, deja la cadena vacía.",
+    "- otherDoubts: true si, SIN contar los objetos de la lista, aún hay algún motivo para dudar de que toda la lista de estudios esté completa y legible (filas cortadas por el borde, trazos borrados o ilegibles, texto que continúa fuera de la foto)."
+  ];
+  const method = variant === "A"
+    ? "Método: recorre los objetos en orden y, para cada uno, mira qué filas, casillas y marcas toca."
+    : "Método: primero mira las casillas y marcas de selección que quedan junto a cada objeto y después el texto que tapa; responde por cada objeto en orden.";
+  return `
+Una lectura previa indicó que estos objetos (dedos, sellos, dobleces, otras hojas) ocultan partes de la solicitud de estudios:
+${hidden.map((item, index) => `${index}. ${item}`).join("\n")}
+Mira la imagen y, para CADA objeto (con su índice), decide qué podría haber debajo de lo que tapa.
+${method}
+${[...general, ...(variant === "A" ? definitions : [...definitions].reverse()), ...closing].join("\n")}
+Ignora el encabezado, los datos del paciente, las firmas y los sellos: solo importa la lista de estudios y sus marcas.
+En reason explica en una frase qué ves junto a cada objeto.
+`;
+}
+
+// Acepta solo si TODOS los objetos están respondidos como "no pueden ocultar un estudio pedido ni su marca" (guion/margen/vacío o, solo en un
+// formulario de casillas, rótulo de filas con casilla vacía visible), con texto contiguo nombrado, y sin otras dudas.
+export function hiddenCheckPassed(value: HiddenCheck, count: number, options: { allowUnselectedLabels?: boolean } = {}): { ok: boolean; notes: string[] } {
+  const notes: string[] = [];
+  for (let index = 0; index < count; index++) {
+    const item = value.items.find((candidate) => candidate.index === index);
+    if (!item) notes.push(`objeto ${index}: sin respuesta`);
+    else if (item.couldHide === "STUDY_TEXT") notes.push(`objeto ${index}: podría ocultar texto de un estudio`);
+    else if (item.couldHide === "MARK_OR_SELECTION") notes.push(`objeto ${index}: podría ocultar una marca de selección`);
+    else if (item.couldHide === "UNSELECTED_ROW_LABEL_ONLY" && !options.allowUnselectedLabels) notes.push(`objeto ${index}: solo se acepta que tape rótulos sin marcar en un formulario de casillas`);
+    else if (item.visibleNeighbor.trim() === "") notes.push(`objeto ${index}: no se nombró el texto visible contiguo`);
+  }
+  if (value.otherDoubts) notes.push("hay otras dudas sobre la zona de estudios");
   return { ok: notes.length === 0, notes };
 }
 
@@ -259,18 +368,25 @@ export interface DocumentSignal {
     // Bordes a los que se acercaba la zona y que la verificación enfocada confirmó completos.
     verifiedEdges?: string[];
     edgeNotes?: string[];
+    // Objetos que ocultaban partes de la hoja y que la verificación enfocada confirmó que solo tapaban guiones, márgenes o espacio vacío.
+    hiddenVerified?: boolean;
+    hiddenNotes?: string[];
+    // Tipos de los problemas que siguen vigentes (unión de las dos lecturas). Vacío si el documento está completo.
+    kinds?: IntegrityKind[];
   };
   reasons: [string, string];
   context?: DocumentContext;
+  // Función del documento (solicitud médica, derivación de muestra...). Ausente si nada la puso en duda.
+  function?: DocumentFunctionInfo;
 }
 
 const union = (a: Region, b: Region): Region => ({ left: Math.min(a.left, b.left), top: Math.min(a.top, b.top), right: Math.max(a.right, b.right), bottom: Math.max(a.bottom, b.bottom) });
 
 // Misma semántica que fuseIndependentReadings: tipo distinto -> UNKNOWN; completo solo si ambas lecturas lo ven completo.
-export function fuseSignals(a: RawSignal, b: RawSignal, verifiedEdges: ReadonlySet<Edge> = new Set()): DocumentSignal {
+export function fuseSignals(a: RawSignal, b: RawSignal, verifiedEdges: ReadonlySet<Edge> = new Set(), hiddenVerified = false): DocumentSignal {
   const agreement = a.documentType === b.documentType;
-  const evalA = evaluateIntegrity(a, verifiedEdges);
-  const evalB = evaluateIntegrity(b, verifiedEdges);
+  const evalA = evaluateIntegrity(a, verifiedEdges, hiddenVerified);
+  const evalB = evaluateIntegrity(b, verifiedEdges, hiddenVerified);
   const problems = [...evalA.problems.map((p) => `lectura A: ${p}`), ...evalB.problems.map((p) => `lectura B: ${p}`)];
   return {
     documentType: agreement ? a.documentType : "UNKNOWN",
@@ -280,7 +396,9 @@ export function fuseSignals(a: RawSignal, b: RawSignal, verifiedEdges: ReadonlyS
       problems,
       irrelevantCrops: [...new Set([...a.irrelevantCrops, ...b.irrelevantCrops])],
       studyRegion: validRegion(a.studyRegion) && validRegion(b.studyRegion) ? union(a.studyRegion, b.studyRegion) : undefined,
-      verifiedEdges: [...verifiedEdges].map((edge) => EDGE_NAMES[edge])
+      verifiedEdges: [...verifiedEdges].map((edge) => EDGE_NAMES[edge]),
+      hiddenVerified,
+      kinds: [...new Set([...integrityKinds(a, verifiedEdges, hiddenVerified), ...integrityKinds(b, verifiedEdges, hiddenVerified)])]
     },
     reasons: [a.reason, b.reason],
     context: fuseContext(a.printedContext, b.printedContext)
@@ -289,6 +407,8 @@ export function fuseSignals(a: RawSignal, b: RawSignal, verifiedEdges: ReadonlyS
 
 export interface SignalRequest {
   instructions: string;
+  // Contrato anterior a documentFunction (solo repeticiones sin gasto de lecturas ya guardadas).
+  legacy?: boolean;
   variant: "A" | "B";
   imageBase64: string;
   mimeType: string;
@@ -298,6 +418,10 @@ export interface SignalDeps {
   complete: (request: SignalRequest) => Promise<{ value: unknown; usage?: AiUsage }>;
   // Verificación enfocada de bordes (solo se llama si la zona se acerca a un borde y no hay problemas duros).
   verifyEdges?: (request: EdgeRequest) => Promise<{ value: unknown; usage?: AiUsage }>;
+  // Verificación enfocada de ocultamientos (solo si la única objeción son objetos que tapan partes de la hoja).
+  verifyHidden?: (request: HiddenRequest) => Promise<{ value: unknown; usage?: AiUsage }>;
+  // Comprobación enfocada de la FUNCIÓN del documento (solo si las lecturas vieron frases de derivación o rótulo de muestra).
+  verifyFunction?: (request: FunctionRequest) => Promise<{ value: unknown; usage?: AiUsage }>;
   model: string;
   reasoning: string;
 }
@@ -309,8 +433,10 @@ function params(model: string, reasoning: string, name: string, schema: Record<s
     text: { format: { type: "json_schema" as const, name, strict: true, schema } }
   };
 }
-const signalParams = (model: string, reasoning: string) => params(model, reasoning, "document_integrity_signal", strictJsonSchema(signalSchema));
+const signalParams = (model: string, reasoning: string, legacy = false) => params(model, reasoning, "document_integrity_signal", strictJsonSchema(legacy ? legacySignalSchema : signalSchema));
 const edgeParams = (model: string, reasoning: string) => params(model, reasoning, "document_edge_verification", strictJsonSchema(edgeCheckSchema));
+const hiddenParams = (model: string, reasoning: string) => params(model, reasoning, "document_hidden_verification", strictJsonSchema(hiddenCheckSchema));
+const functionParams = (model: string, reasoning: string) => params(model, reasoning, "document_function_verification", strictJsonSchema(functionCheckSchema));
 
 function defaultDeps(): SignalDeps {
   const model = process.env.OPENAI_READER_MODEL ?? "gpt-6.1-sol";
@@ -334,38 +460,43 @@ function defaultDeps(): SignalDeps {
   return {
     model,
     reasoning,
-    complete: (request) => call(signalParams(model, reasoning), request.instructions, request.imageBase64, request.mimeType),
-    verifyEdges: (request) => call(edgeParams(model, reasoning), request.instructions, request.imageBase64, request.mimeType)
+    complete: (request) => call(signalParams(model, reasoning, request.legacy), request.instructions, request.imageBase64, request.mimeType),
+    verifyEdges: (request) => call(edgeParams(model, reasoning), request.instructions, request.imageBase64, request.mimeType),
+    verifyHidden: (request) => call(hiddenParams(model, reasoning), request.instructions, request.imageBase64, request.mimeType),
+    verifyFunction: (request) => call(functionParams(model, reasoning), request.instructions, request.imageBase64, request.mimeType)
   };
 }
 
 export interface DocumentSignalResult {
   signal: DocumentSignal;
+  // Las dos lecturas de primera pasada, tal como las devolvió el modelo (auditoría y simulaciones sin llamadas).
+  raw?: [RawSignal, RawSignal];
   usage: AiUsage[];
   calls: number;
   cacheHits: number;
 }
 
-export async function readDocumentSignal(args: { imageBase64: string; mimeType: string; deps?: Partial<SignalDeps> }): Promise<DocumentSignalResult> {
+export async function readDocumentSignal(args: { imageBase64: string; mimeType: string; deps?: Partial<SignalDeps>; compat?: "legacy" }): Promise<DocumentSignalResult> {
+  const legacy = args.compat === "legacy";
   const resolved = { ...defaultDeps(), ...args.deps };
   const usage: AiUsage[] = [];
   let calls = 0;
   let cacheHits = 0;
   const one = async (variant: "A" | "B"): Promise<RawSignal> => {
-    const instructions = documentInstructions(variant);
+    const instructions = documentInstructions(variant, { legacy });
     let called = false;
     const value = await cachedAiCall({
       label: "openai-document-signal",
       provider: "openai",
       model: resolved.model,
       imageBase64: args.imageBase64,
-      config: { prompt: instructions, mimeType: args.mimeType, params: signalParams(resolved.model, resolved.reasoning) },
-      parse: (raw) => signalSchema.parse(raw),
+      config: { prompt: instructions, mimeType: args.mimeType, params: signalParams(resolved.model, resolved.reasoning, legacy) },
+      parse: (raw) => (legacy ? legacySignalSchema : signalSchema).parse(raw) as RawSignal,
       call: async () => {
         called = true;
-        const response = await resolved.complete({ instructions, variant, imageBase64: args.imageBase64, mimeType: args.mimeType });
+        const response = await resolved.complete({ instructions, variant, imageBase64: args.imageBase64, mimeType: args.mimeType, legacy });
         if (response.usage) usage.push(response.usage);
-        return { value: signalSchema.parse(response.value), usage: response.usage };
+        return { value: (legacy ? legacySignalSchema : signalSchema).parse(response.value) as RawSignal, usage: response.usage };
       }
     });
     if (called) calls++;
@@ -374,11 +505,117 @@ export async function readDocumentSignal(args: { imageBase64: string; mimeType: 
   };
   const [a, b] = await Promise.all([one("A"), one("B")]);
 
+  const baseRelevantType = a.documentType === b.documentType && (a.documentType === "TEXT_EXPLICIT_REQUEST" || a.documentType === "MARK_DEPENDENT_FORM" || a.documentType === "HANDWRITTEN_REQUEST");
+
+  // FUNCIÓN del documento. El formato (manuscrito, casillas) dice cómo se escribe, no para qué sirve: una tarjeta de derivación de una muestra
+  // ya tomada puede estar escrita igual que una receta. Si CUALQUIERA de las lecturas extrajo frases de derivación o rótulo de muestra, se
+  // comprueba la imagen con dos lecturas independientes; sin verificador, con error o con discrepancia falla cerrado.
+  //  1. Las dos lecturas ya clasifican la función (documentFunction): ambas solicitud -> sigue; ambas "no es solicitud" -> NON_QUOTABLE; cualquier
+  //     otra combinación (una dice solicitud y la otra no, o dudan) -> UNCLEAR, sin más llamadas. No depende de palabras clave.
+  //  2. Si las lecturas son anteriores al campo (no lo traen), o si ambas dicen "solicitud" pero extrajeron una frase explícita de derivación o rótulo,
+  //     se comprueba la imagen con dos lecturas más (señales por palabras clave y objetos). Cualquier fallo de esa comprobación bloquea.
+  const textSources = [...a.printedContext, ...b.printedContext].map((line) => line.text).concat(a.irrelevantCrops, b.irrelevantCrops, a.rowsHiddenByObjects, b.rowsHiddenByObjects, [a.reason, b.reason]);
+  const hasReadings = a.documentFunction !== undefined && b.documentFunction !== undefined;
+  const readingsVerdict = hasReadings ? fuseKinds(a.documentFunction!, b.documentFunction!) : undefined;
+  const cues = derivationCues(textSources, { objects: !hasReadings });
+  let functionInfo: DocumentFunctionInfo | undefined;
+  if (baseRelevantType && hasReadings) {
+    functionInfo = {
+      cues,
+      verdict: readingsVerdict!,
+      kinds: [a.documentFunction!, b.documentFunction!],
+      notes: [`lectura A: ${a.documentFunction} (${(a.functionEvidence ?? []).join("; ")})`, `lectura B: ${b.documentFunction} (${(b.functionEvidence ?? []).join("; ")})`],
+      source: "readings"
+    };
+  }
+  const needsVerification = baseRelevantType && cues.length > 0 && (!hasReadings || readingsVerdict === "REQUEST");
+  if (needsVerification) {
+    const readingNotes = functionInfo?.notes ?? [];
+    functionInfo = { cues, verdict: "UNAVAILABLE", kinds: [], notes: [...readingNotes], source: "verification" };
+    if (!resolved.verifyFunction) functionInfo.notes.push("no hay verificador de la función del documento");
+    else {
+      const verifyFunction = resolved.verifyFunction;
+      const verifyOne = async (variant: "A" | "B") => {
+        const instructions = functionInstructions(variant, cues);
+        let called = false;
+        const value = await cachedAiCall({
+          label: "openai-document-function",
+          provider: "openai",
+          model: resolved.model,
+          imageBase64: args.imageBase64,
+          config: { prompt: instructions, mimeType: args.mimeType, params: functionParams(resolved.model, resolved.reasoning) },
+          parse: (raw) => functionCheckSchema.parse(raw),
+          call: async () => {
+            called = true;
+            const response = await verifyFunction({ instructions, variant, imageBase64: args.imageBase64, mimeType: args.mimeType });
+            if (response.usage) usage.push(response.usage);
+            return { value: functionCheckSchema.parse(response.value), usage: response.usage };
+          }
+        });
+        if (called) calls++;
+        else cacheHits++;
+        return value;
+      };
+      try {
+        const [fa, fb] = await Promise.all([verifyOne("A"), verifyOne("B")]);
+        const fused = fuseFunction(fa, fb);
+        functionInfo = { cues, verdict: fused.verdict, kinds: fused.kinds, notes: [...readingNotes, ...fused.notes], source: "verification" };
+      } catch (error) {
+        functionInfo.notes.push(`verificación de la función no disponible: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+  const functionBlocked = functionInfo !== undefined && functionInfo.verdict !== "REQUEST";
+  // Lo que ya se sabe que no es una solicitud cotizable no gasta verificaciones visuales posteriores.
+  const relevantType = baseRelevantType && !functionBlocked;
+
+  // Verificación de ocultamientos: solo si la ÚNICA objeción son objetos que tapan partes de la hoja (sin cortes por el borde, trazos
+  // borrados ni caja inválida) y la duda de cada lectura sobre la zona está explicada por esos objetos. Cualquier fallo o duda mantiene el bloqueo.
+  const hiddenList = [...new Map([...a.rowsHiddenByObjects, ...b.rowsHiddenByObjects].map((item) => [normalizeStudyKey(item), item])).values()];
+  const explainable = (raw: RawSignal) =>
+    raw.rowsCutByImageEdge.length === 0 && !raw.erasedOrIllegible && validRegion(raw.studyRegion) && (raw.studyRegionComplete || raw.rowsHiddenByObjects.length > 0);
+  let hiddenVerified = false;
+  const hiddenNotes: string[] = [];
+  if (hiddenList.length > 0 && relevantType && explainable(a) && explainable(b) && resolved.verifyHidden) {
+    const verifyHidden = resolved.verifyHidden;
+    const verifyOne = async (variant: "A" | "B") => {
+      const instructions = hiddenInstructions(variant, hiddenList);
+      let called = false;
+      const value = await cachedAiCall({
+        label: "openai-document-hidden",
+        provider: "openai",
+        model: resolved.model,
+        imageBase64: args.imageBase64,
+        config: { prompt: instructions, mimeType: args.mimeType, params: hiddenParams(resolved.model, resolved.reasoning) },
+        parse: (raw) => hiddenCheckSchema.parse(raw),
+        call: async () => {
+          called = true;
+          const response = await verifyHidden({ instructions, variant, hidden: hiddenList, imageBase64: args.imageBase64, mimeType: args.mimeType });
+          if (response.usage) usage.push(response.usage);
+          return { value: hiddenCheckSchema.parse(response.value), usage: response.usage };
+        }
+      });
+      if (called) calls++;
+      else cacheHits++;
+      return value;
+    };
+    try {
+      const [ha, hb] = await Promise.all([verifyOne("A"), verifyOne("B")]);
+      // Rótulos sin marcar solo se aceptan en formularios de casillas; un pedido manuscrito o impreso en texto no tiene casillas que comprobar.
+      const options = { allowUnselectedLabels: a.documentType === "MARK_DEPENDENT_FORM" && b.documentType === "MARK_DEPENDENT_FORM" };
+      const resultA = hiddenCheckPassed(ha, hiddenList.length, options);
+      const resultB = hiddenCheckPassed(hb, hiddenList.length, options);
+      hiddenNotes.push(...resultA.notes.map((note) => `verificación A: ${note}`), ...resultB.notes.map((note) => `verificación B: ${note}`));
+      hiddenVerified = resultA.ok && resultB.ok;
+    } catch (error) {
+      hiddenNotes.push(`verificación de ocultamientos no disponible: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   // Verificación de bordes: solo si la ÚNICA objeción es la proximidad al borde (sin cortes, ocultamientos ni dudas del modelo) y es una
   // solicitud que podría llegar a AUTO. Cualquier fallo o duda deja el borde sin verificar, y entonces bloquea.
   const touched = [...new Set([...touchedEdges(a.studyRegion), ...touchedEdges(b.studyRegion)])];
-  const relevantType = a.documentType === b.documentType && (a.documentType === "TEXT_EXPLICIT_REQUEST" || a.documentType === "MARK_DEPENDENT_FORM");
-  const onlyProximity = hardProblems(a).length === 0 && hardProblems(b).length === 0;
+  const onlyProximity = hardProblems(a, hiddenVerified).length === 0 && hardProblems(b, hiddenVerified).length === 0;
   let verified = new Set<Edge>();
   const edgeNotes: string[] = [];
   if (touched.length > 0 && relevantType && onlyProximity && resolved.verifyEdges) {
@@ -414,7 +651,14 @@ export async function readDocumentSignal(args: { imageBase64: string; mimeType: 
       edgeNotes.push(`verificación de borde no disponible: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  const signal = fuseSignals(a, b, verified);
+  const signal = fuseSignals(a, b, verified, hiddenVerified);
+  if (functionInfo) {
+    signal.function = functionInfo;
+    // NON_QUOTABLE -> NOT_A_REQUEST; discrepancia, duda o sin verificación -> UNKNOWN (ambos detienen toda la receta en el flujo existente).
+    if (functionInfo.verdict === "NON_QUOTABLE") signal.documentType = "NOT_A_REQUEST";
+    else if (functionInfo.verdict !== "REQUEST") signal.documentType = "UNKNOWN";
+  }
   signal.integrity.edgeNotes = edgeNotes;
-  return { signal, usage, calls, cacheHits };
+  signal.integrity.hiddenNotes = hiddenNotes;
+  return { signal, raw: [a, b], usage, calls, cacheHits };
 }
