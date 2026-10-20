@@ -5,7 +5,7 @@ import { buildSimpleConsensus, normalizeStudyKey, type SimpleStudy } from "../sr
 import type { SimpleReading } from "../src/ai.js";
 import type { CatalogStudy } from "../src/types.js";
 import {
-  detectImageMime, emojiFor, extractIncomingImages, formatBs, formatQuoteMessage, handleImageMessage, isAllowedPhone, maskPhone, MAX_IMAGE_BYTES, NO_QUOTE_MESSAGE,
+  clipForLog, detectImageMime, emojiFor, extractIncomingImages, formatBs, formatQuoteMessage, handleImageMessage, isAllowedPhone, maskPhone, LOG_TEXT_MAX, MAX_IMAGE_BYTES, NO_QUOTE_MESSAGE,
   TECHNICAL_ISSUE_MESSAGE, verifyWebhookSignature, type IncomingImage, type QuoteDeps
 } from "../src/whatsapp-quote.js";
 import { GET, POST } from "../api/kapso/webhook.js";
@@ -169,7 +169,8 @@ describe("handleImageMessage", () => {
     expect(body).toContain("Bs 125");
     expect(body).not.toMatch(/Estudio que no existe|pendiente|revisi[oó]n|HUMAN|\bAUTO\b|no pudimos|falta|incompleta/i);
     const log = logs.find((entry) => entry.event === "analysis")!;
-    expect(JSON.stringify(log.data.pending)).toContain("Estudio que no existe en el catalogo");
+    expect(log.data.pending).toEqual([expect.objectContaining({ kind: "STUDY" })]);
+    expect(JSON.stringify(log.data)).not.toContain("Estudio que no existe");
     expect(log.data.outcome).toBe("AUTO_PARTIAL");
     expect(log.data.quotedCodes).toEqual(["108", "384", "423", "397"]);
     expect(log.data.phone).toBe("591****4567");
@@ -276,5 +277,49 @@ describe("api/kapso/webhook (sin procesar nada real)", () => {
     const text = await response.text();
     expect(text).toContain("ok");
     expect(text).not.toMatch(/secret|key|token/i);
+  });
+});
+
+describe("diagnóstico en el registro del servidor", () => {
+  it("el log de análisis explica por estudio la decisión y los bloqueos con códigos, sin teléfono completo ni nada en el mensaje al paciente", async () => {
+    const { deps, sent, logs } = makeDeps({ analysis: analysisOf("Hemograma completo", "Estudio que no existe en el catalogo") });
+    await handleImageMessage(incoming, deps);
+    const log = logs.find((entry) => entry.event === "analysis")!.data as Record<string, any>;
+    expect(log.studies.map((s: any) => [s.i, s.decision, s.codes])).toEqual([[0, "AUTO", ["108"]], [1, "HUMAN_REVIEW", []]]);
+    expect(log.studies[1].blockers).toEqual(["catalog_unmatched"]);
+    expect(log.studies.map((s: any) => s.confidence)).toEqual(["high", "high"]);
+    expect(log).toHaveProperty("disputes");
+    expect(log.judge).toEqual({ confirmed: 0, rejected: 0, unresolved: 0 });
+    expect(JSON.stringify(logs)).not.toContain("59171234567");
+    expect(sent[0]?.body).not.toMatch(/catalog_unmatched|HUMAN_REVIEW|Estudio que no existe/);
+  });
+
+  // Datos que nunca deben llegar al log: el nombre/identificación que un lector pudo transcribir dentro de una línea, el texto completo de la línea y el texto libre de los modelos.
+  const SENTINELS = ["PACIENTE_SENTINELA_JUAN_PEREZ", "CI_9876543", "LINEA_SENTINELA_DIAGNOSTICO", "RAZON_LIBRE_DEL_JUEZ"];
+  const sensitiveAnalysis = (): AnalysisResult => {
+    const base = analysisOf("Hemograma completo", "Estudio que no existe en el catalogo");
+    const withLines = { ...base, finalVisualStudies: base.finalVisualStudies.map((s, i) => ({ ...s, literalText: i === 0 ? "Hemograma PACIENTE_SENTINELA_JUAN_PEREZ CI_9876543" : s.literalText, lineText: "LINEA_SENTINELA_DIAGNOSTICO " + s.literalText, confidenceNote: "RAZON_LIBRE_DEL_JUEZ" })) };
+    return { ...withLines, judgeResolved: [{ ...(base.judgeResolved[0] ?? {}), verdict: "confirmed", reason: "RAZON_LIBRE_DEL_JUEZ" } as any], unresolvedDisputes: [] };
+  };
+  it("por defecto el log no contiene nombres de estudios, lineText, texto libre de los modelos ni identificación del paciente", async () => {
+    const { deps, logs } = makeDeps({ analysis: sensitiveAnalysis() });
+    await handleImageMessage(incoming, deps);
+    const dump = JSON.stringify(logs);
+    for (const sentinel of [...SENTINELS, "59171234567", "Estudio que no existe", "Hemograma completo"]) expect(dump).not.toContain(sentinel);
+    const log = logs.find((entry) => entry.event === "analysis")!.data as Record<string, any>;
+    expect(log.studies.every((s: any) => !("text" in s))).toBe(true);
+    expect(log.studies.every((s: any) => s.certaintyResolvedByJudge === true)).toBe(true);
+    expect(log.studies[0].lineGroup).toBeTypeOf("number");
+  });
+  it("con includeStudyText solo agrega el nombre del estudio recortado y sin caracteres de control; nunca lineText ni texto libre", async () => {
+    const { deps, logs } = makeDeps({ analysis: sensitiveAnalysis(), includeStudyText: true });
+    await handleImageMessage(incoming, deps);
+    const log = logs.find((entry) => entry.event === "analysis")!.data as Record<string, any>;
+    expect(log.studies[1].text).toBe("Estudio que no existe en el catalogo");
+    expect(log.studies[0].text.length).toBeLessThanOrEqual(LOG_TEXT_MAX);
+    const dump = JSON.stringify(logs);
+    for (const sentinel of ["LINEA_SENTINELA_DIAGNOSTICO", "RAZON_LIBRE_DEL_JUEZ", "59171234567"]) expect(dump).not.toContain(sentinel);
+    expect(clipForLog("a\nb\u0000c" + "x".repeat(100))).toHaveLength(LOG_TEXT_MAX);
+    expect(clipForLog("a\nb\u0000c")).toBe("a b c");
   });
 });

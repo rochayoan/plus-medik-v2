@@ -234,3 +234,50 @@ describe("un elemento de la línea no leído impide el AUTO completo", () => {
     expect(result.outcome).toBe("AUTO_COMPLETE");
   });
 });
+
+describe("fila que es solo una variante: hereda el analito de su MISMA línea (nunca de otra)", () => {
+  const og = study("og", "OMEGAINA IgG", 80, "INMUNOSEROLOGIA");
+  const om = study("om", "OMEGAINA IgM", 85, "INMUNOSEROLOGIA");
+  const kg = study("kg", "KAPPAINA IgG", 70, "INMUNOSEROLOGIA");
+  const cat = [...catalog, og, om, kg];
+  const line = "Omegaina IgM  IgG";
+  const both = (...pairs: Array<[string, string | undefined]>) => reading(...pairs.map(([text, l]) => row(text, l)));
+
+  it("'Omegaina IgM' + 'IgG' en la misma línea: la segunda se resuelve como 'Omegaina IgG' y se cotiza; sin lineText quedaba sin identificar", () => {
+    const withLine = analyze(both(["Omegaina IgM", line], ["IgG", line]), undefined, cat);
+    expect(withLine.finalVisualStudies.map((s) => s.literalText)).toEqual(["Omegaina IgM", "omegaina IgG"]);
+    expect(withLine.finalVisualStudies[1]).toMatchObject({ inheritedFrom: "IgG" });
+    expect(withLine.internal?.quoted.lines.map((l) => l.code)).toEqual(["om", "og"]);
+    const withoutLine = analyze(both(["Omegaina IgM", undefined], ["IgG", undefined]), undefined, cat);
+    expect(withoutLine.internal?.quoted.lines.map((l) => l.code)).toEqual(["om"]);
+    expect(withoutLine.internal?.pending.some((p) => p.text === "IgG")).toBe(true);
+  });
+
+  it("funciona en cualquier orden y con variantes de otra dimensión", () => {
+    const reversed = analyze(both(["IgG", line], ["Omegaina IgM", line]), undefined, cat);
+    expect(reversed.internal?.quoted.lines.map((l) => l.code).sort()).toEqual(["og", "om"]);
+  });
+
+  it("no hereda entre líneas distintas ni si la línea no es fiable (las lecturas discrepan)", () => {
+    const other = analyze(both(["Omegaina IgM", "Omegaina IgM"], ["IgG", "IgG"]), undefined, cat);
+    expect(other.internal?.quoted.lines.map((l) => l.code)).toEqual(["om"]);
+    const a = both(["Omegaina IgM", line], ["IgG", line]);
+    const b = both(["Omegaina IgM", line], ["IgG", "otra línea"]);
+    expect(analyze(a, b, cat).internal?.quoted.lines.map((l) => l.code)).toEqual(["om"]);
+  });
+
+  it("no hereda si la línea nombra analitos distintos (ambiguo) ni si el resultado repetiría otra fila", () => {
+    const two = analyze(both(["Omegaina IgM", line], ["Kappaina IgG", line], ["IgG", line]), undefined, cat);
+    expect(two.finalVisualStudies.map((s) => s.literalText)).toEqual(["Omegaina IgM", "Kappaina IgG", "IgG"]);
+    expect(two.internal?.pending.some((p) => p.text === "IgG")).toBe(true);
+    const repeat = analyze(both(["Omegaina IgG", line], ["IgG", line]), undefined, cat);
+    expect(repeat.finalVisualStudies.map((s) => s.literalText)).toEqual(["Omegaina IgG", "IgG"]);
+  });
+
+  it("una fila con analito propio no se toca, y la identidad se sigue verificando (variante contradictoria no pasa)", () => {
+    const own = analyze(both(["Omegaina IgM", line], ["Omegaina IgG", line]), undefined, cat);
+    expect(own.finalVisualStudies.every((s) => s.inheritedFrom === undefined)).toBe(true);
+    const wrong = analyze(both(["Omegaina IgM", "Omegaina IgM IgM"], ["IgM", "Omegaina IgM IgM"]), undefined, cat);
+    expect(wrong.internal?.quoted.lines.map((l) => l.code)).toEqual(["om"]);
+  });
+});

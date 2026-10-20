@@ -530,11 +530,11 @@ export function verifyPackageComposition(pkg: CatalogStudy, components: CatalogS
 // Evaluado solo, "libre" parecería pedir cualquier estudio "libre" (T4, PSA, proteína S...). Un fragmento que trae SOLO calificadores hereda el
 // analito de otro fragmento únicamente si ambos estudios son variantes del MISMO analito (misma clave base): nunca mezcla familias distintas.
 const ALL_DIM_TOKENS = new Set(DIMS.flatMap((dim) => [...DIM_TOKENS[dim]]));
-const isQualifierOnly = (fragment: string): boolean => {
+export const isQualifierOnly = (fragment: string): boolean => {
   const tokens = identityTokens(fragment).filter((token) => !CONNECTORS.has(token));
   return tokens.length > 0 && tokens.every((token) => ALL_DIM_TOKENS.has(token));
 };
-const headWords = (fragment: string): string => identityTokens(fragment).filter((token) => !CONNECTORS.has(token) && !ALL_DIM_TOKENS.has(token)).join(" ");
+export const headWords = (fragment: string): string => identityTokens(fragment).filter((token) => !CONNECTORS.has(token) && !ALL_DIM_TOKENS.has(token)).join(" ");
 
 export function effectiveFragments(fragments: string[], studies: CatalogStudy[]): string[] {
   return fragments.map((fragment, index) => {

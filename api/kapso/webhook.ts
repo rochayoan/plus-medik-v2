@@ -43,7 +43,9 @@ const realDeps: QuoteDeps = {
   async sendText(to, body) {
     await kapsoClient().messages.sendText({ phoneNumberId: phoneNumberId(), to, body });
   },
-  log: (event, data) => console.log(JSON.stringify({ app: "plusmedik", event, ...data }))
+  log: (event, data) => console.log(JSON.stringify({ app: "plusmedik", event, ...data })),
+  // Depuración de un caso: PILOT_LOG_STUDY_TEXT=on agrega el nombre (recortado) de cada estudio leído al log. Apagado por defecto.
+  includeStudyText: process.env.PILOT_LOG_STUDY_TEXT?.trim().toLowerCase() === "on"
 };
 
 export async function POST(request: Request): Promise<Response> {

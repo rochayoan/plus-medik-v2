@@ -118,9 +118,70 @@ export interface QuoteDeps {
   analyze(args: { imageBase64: string; mimeType: string; catalog: CatalogStudy[] }): Promise<AnalysisResult>;
   sendText(to: string, body: string): Promise<void>;
   log(event: string, data: Record<string, unknown>): void;
+  // Agrega el nombre (recortado) de lo leído en cada estudio al log de diagnóstico. Apagado por defecto.
+  includeStudyText?: boolean;
 }
 
 export type QuoteResult = "quoted" | "no_quote" | "technical_issue" | "ignored";
+
+// ───────────────────────────── registro de diagnóstico (minimizado) ─────────────────────────────
+// El log del servidor explica por qué cada estudio se cotizó o quedó pendiente SIN datos personales ni clínicos innecesarios. Por defecto solo viajan códigos y
+// enumeraciones: la decisión, los bloqueos, el riesgo visual, la certeza, códigos del catálogo y contadores. NUNCA se registran el teléfono completo, el
+// texto de las líneas (lineText), ni texto libre de los modelos (razones del juez, notas de la verificación, evidencias de la función, avisos). El nombre de
+// lo leído en cada estudio solo se agrega con `includeStudyText` (PILOT_LOG_STUDY_TEXT=on, para depurar un caso) y recortado.
+export const LOG_TEXT_MAX = 60;
+export const clipForLog = (text: string): string => text.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, LOG_TEXT_MAX);
+
+export function buildAnalysisLog(analysis: AnalysisResult, options: { includeStudyText?: boolean } = {}): Record<string, unknown> {
+  const internal = analysis.internal;
+  const read = analysis.finalVisualStudies;
+  const codeOfId = new Map((internal?.quoted.lines ?? []).map((line) => [line.id, line.code]));
+  const lineGroups = new Map<string, number>();
+  const groupOf = (lineText?: string): number | undefined => {
+    if (!lineText) return undefined;
+    const key = lineText.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    if (!lineGroups.has(key)) lineGroups.set(key, lineGroups.size + 1);
+    return lineGroups.get(key);
+  };
+  const studies = (internal?.studies ?? []).map((study, index) => {
+    const source = read[index];
+    return {
+      i: index,
+      ...(options.includeStudyText ? { text: clipForLog(study.text) } : {}),
+      decision: study.decision,
+      blockers: study.blockers,
+      risk: study.risk?.class,
+      codes: study.lineIds.map((id) => codeOfId.get(id)).filter(Boolean),
+      confidence: source?.confidence,
+      readBy: source?.source,
+      certaintyResolvedByJudge: Boolean(source?.confidenceNote),
+      lineGroup: groupOf(source?.lineText),
+      inheritedAnalyte: Boolean(source?.inheritedFrom),
+      collapsedRows: source?.collapsedFrom?.length,
+      lineProblem: Boolean(source?.lineProblem)
+    };
+  });
+  return {
+    outcome: analysis.outcome,
+    quotedCodes: internal?.quoted.lines.map((line) => line.code),
+    studies,
+    pending: internal?.pending.map((p) => ({
+      kind: p.kind,
+      // Los bloqueos de una disputa son texto libre del juez: no se registran.
+      blockers: p.kind === "DISPUTE" ? undefined : p.blockers,
+      candidates: p.candidates?.map((c) => c.code),
+      ...(options.includeStudyText && p.text ? { text: clipForLog(p.text) } : {})
+    })),
+    recipeStops: internal?.recipeStops,
+    documentType: internal?.document.type,
+    documentFunction: internal?.document.function?.verdict,
+    zones: internal?.document.zones.map((zone) => zone.kind),
+    impact: internal?.document.impact && { available: internal.document.impact.available, qualifierRisk: internal.document.impact.qualifierRisk },
+    disputes: analysis.disputes.map((dispute) => dispute.reason),
+    judge: { confirmed: analysis.judgeResolved.filter((j) => j.verdict === "confirmed").length, rejected: analysis.judgeResolved.filter((j) => j.verdict === "rejected").length, unresolved: analysis.unresolvedDisputes.length },
+    advisoryCount: internal?.advisories.length ?? 0
+  };
+}
 
 export async function handleImageMessage(image: IncomingImage, deps: QuoteDeps): Promise<QuoteResult> {
   const who = maskPhone(image.from);
@@ -140,18 +201,8 @@ export async function handleImageMessage(image: IncomingImage, deps: QuoteDeps):
     } else {
       const catalog = await deps.loadCatalog();
       const analysis = await deps.analyze({ imageBase64: Buffer.from(bytes).toString("base64"), mimeType, catalog });
-      const internal = analysis.internal;
-      // Registro INTERNO (solo en el log del servidor): lo pendiente y por qué. Nunca va al paciente.
-      deps.log("analysis", {
-        messageId: image.messageId,
-        phone: who,
-        outcome: analysis.outcome,
-        quotedCodes: internal?.quoted.lines.map((line) => line.code),
-        pending: internal?.pending.map((p) => ({ kind: p.kind, text: p.text, blockers: p.blockers })),
-        recipeStops: internal?.recipeStops,
-        documentFunction: internal?.document.function?.verdict,
-        advisories: internal?.advisories
-      });
+      // Registro INTERNO (solo en el log del servidor, minimizado): lo pendiente y por qué. Nunca va al paciente.
+      deps.log("analysis", { messageId: image.messageId, phone: who, ...buildAnalysisLog(analysis, { includeStudyText: deps.includeStudyText }) });
       if (analysis.publicQuote && analysis.outcome !== "HUMAN_REVIEW") {
         reply = formatQuoteMessage(analysis.publicQuote);
         result = "quoted";

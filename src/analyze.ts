@@ -1,7 +1,7 @@
 import { readImageWithGemini, readImageWithOpenAI, type SimpleReading } from "./ai.js";
 import { ExactAliasCatalogResolver, uniqueMatchedStudies } from "./catalog.js";
 import { buildSimpleConsensus, isTruncationOf, normalizeStudyKey, normalizeVisibleKey, sameVisibleText, type SimpleConsensus, type SimpleStudy } from "./consensus.js";
-import { collapseExplicitPackages, droppedLineItemDetails, heldPackageGroups, lineServiceGap, reliableLineText } from "./line-groups.js";
+import { collapseExplicitPackages, droppedLineItemDetails, inheritAnalyteFromLine, heldPackageGroups, lineServiceGap, reliableLineText } from "./line-groups.js";
 import { activeCatalog, GENERIC_PROFILE_WORDS, identityTokens, isPackageComponent, qualifiersOf, shadowMatch, type Outcome, type ShadowBatch, type Support } from "./catalog-shadow.js";
 import type { AiUsage } from "./cache.js";
 import { readDocumentSignal, type DocumentSignal } from "./document-signal.js";
@@ -30,6 +30,8 @@ export interface FinalVisualStudy extends SimpleStudy {
   lineProblem?: string;
   // Si varias filas de una línea se reunieron en el paquete aprobado que la línea nombra: los textos originales.
   collapsedFrom?: string[];
+  // Si el texto era solo una variante ("IgG") y heredó el analito de otra fila de su misma línea: el texto original.
+  inheritedFrom?: string;
 }
 
 export interface CatalogCandidate {
@@ -436,7 +438,7 @@ export function finalVisualStudiesOf(consensus: SimpleConsensus, judgement: Simp
   ];
   // Una selección visual, un estudio: el mismo texto (ignorando espaciado y puntuación) no se cuenta dos veces.
   const kept: FinalVisualStudy[] = [];
-  for (const study of all) if (!kept.some((other) => sameVisibleText(other.literalText, study.literalText))) kept.push(study);
+  for (const study of catalog ? inheritAnalyteFromLine(all) : all) if (!kept.some((other) => sameVisibleText(other.literalText, study.literalText))) kept.push(study);
   // Con el catálogo, las líneas que son un paquete aprobado se reconstruyen (o quedan pendientes si no se puede sin ambigüedad).
   return catalog ? collapseExplicitPackages(kept, catalog) : kept;
 }
