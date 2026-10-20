@@ -53,22 +53,16 @@ function rowsCoverPackage(pkg: CatalogStudy, rows: FinalVisualStudy[]): boolean 
 //  1. La línea es fiable (las dos lecturas coinciden en ella) y la comparten la fila suelta y los donantes.
 //  2. Los donantes nombran todos el MISMO analito, y la línea nombra exactamente UN analito que coincide con el del donante. Una línea con dos analitos
 //     ("Zetaina, Gamaina IgG") no permite saber a cuál pertenece la variante suelta.
-//  3. La línea es texto llano: sin marcas o signos (tachados, casillas, interrogaciones) que puedan significar que la variante fue rechazada, anulada o
-//     está en duda. Las palabras de negación o condición ya impiden el punto 2 porque no son parte del analito.
-//  4. La variante de la fila aparece en la línea y el resultado no repite el texto de otra fila.
+//  3. La variante de la fila aparece en la línea y el resultado no repite el texto de otra fila.
+// Las marcas y signos de la línea (X, cruces, rayas, subrayados...) no se interpretan ni impiden por sí solos heredar: son la forma habitual de pedir un estudio.
+// Las palabras de negación o condición ("sin", "no", "excepto", "tachado"...) sí impiden el punto 2 porque no son parte del analito.
 // Sin donante NO se hereda de la propia línea: una variante suelta sin ninguna fila que nombre el analito sigue sin identificar. El matching y la verificación
 // de identidad se aplican igual al texto resultante: heredar solo reconstruye el texto de la fila, no decide qué estudio es.
 // Separadores de una enumeración: comas, punto y coma, "/", saltos de línea y conjunciones (cualquier otra palabra se queda dentro del mismo trozo).
 const LIST_SPLIT = /\s*[,;/\n]\s*|\s+(?:y|e|o|u|and|con|más|mas)\s+/i;
-// Texto llano: letras, números, espacios y solo "," ";" ":" "/" "." y apóstrofos; el guion solo DENTRO de una palabra ("Anti-lambda"). Cualquier otro signo
-// (✓ ✗ ☐ ~ * ? [ ] ( ) + - · ...) puede ser una marca de aceptado, rechazado o duda que la herencia no interpreta: la línea deja de ser fiable para heredar.
-const WORD_HYPHEN = /(?<=[\p{L}\p{N}])-(?=[\p{L}\p{N}])/gu;
-const PLAIN_LINE = /^[\p{L}\p{N}\s,;:/.'’]*$/u;
-const isPlainLine = (text: string): boolean => PLAIN_LINE.test(text.replace(WORD_HYPHEN, ""));
 
 // El analito de una línea si nombra exactamente UNO: separando la enumeración (comas, ";", "/", "y", "o"...), un solo trozo conserva palabras que no son variantes.
 export function lineAnalyte(lineText: string): string | undefined {
-  if (!isPlainLine(lineText)) return undefined;
   const parts = lineText.split(LIST_SPLIT).map((part) => headWords(part)).filter((part) => part !== "");
   return parts.length === 1 ? parts[0] : undefined;
 }

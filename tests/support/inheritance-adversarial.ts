@@ -24,7 +24,12 @@ const DOC: DocumentGate = { documentType: "MARK_DEPENDENT_FORM", completeDocumen
 const row = (literalText: string, lineText: string): SimpleStudy => ({ literalText, normalizedName: literalText, evidence: "check", confidence: "high", lineText });
 const key = (analyte: string, variant: string) => normalizeStudyKey(`${analyte} ${variant}`);
 const SEPARATORS = [", ", " / ", " y ", " + ", " | ", " ; ", " - ", " – ", "  ", " · ", " con ", " o ", " e ", " & ", ": ", " (", "\n", " más "];
-const MARKS: Array<[string, string]> = [["✓", "✗"], ["(x)", "( )"], ["[x]", "[ ]"], ["☑", "☐"], ["si", "no"], ["SI", "NO"], ["+", "-"], ["(+)", "(-)"], ["1", "0"], ["√", "×"], ["ok", "no"], ["✔", "✘"], ["*", ""], ["", "?"]];
+// Marcas escritas con PALABRAS, letras o dígitos: cuentan como palabras de la línea, no son parte del analito y la herencia no se hace.
+const WORD_MARKS: Array<[string, string]> = [["(x)", "( )"], ["[x]", "[ ]"], ["si", "no"], ["SI", "NO"], ["1", "0"], ["ok", "no"]];
+// Marcas y signos puros (X, cruces, rayas, subrayados...): son la forma habitual de pedir un estudio. No impiden por sí solos la herencia (se retiró la restricción
+// de símbolos): lo que los lectores devuelven como filas se reconstruye y sigue el flujo normal.
+const SYMBOL_MARKS: Array<[string, string]> = [["✓", "✗"], ["☑", "☐"], ["+", "-"], ["(+)", "(-)"], ["√", "×"], ["✔", "✘"], ["*", ""], ["", "?"], ["___", ""], ["", "~~"]];
+const MARKS: Array<[string, string]> = [...WORD_MARKS, ...SYMBOL_MARKS];
 const NEGATIONS = (keep: string, drop: string, analyte: string): string[] => [
   `${analyte} ${keep}, ${drop} tachado`, `${analyte} ${keep}, ${drop} (anulado)`, `${analyte} ${keep}, ${drop} opcional`, `${analyte} ${keep} / ${drop} pendiente de autorización`,
   `${analyte} ${keep}, ${drop} solo si el médico lo confirma`, `${analyte} ${keep} sin ${drop}`, `${analyte} ${keep} (${drop} no)`, `${analyte} ${keep} excepto ${drop}`,
@@ -62,8 +67,16 @@ export const STRUCTURES: Record<string, { description: string; make: () => Insta
     make: () => { const [a, b] = pair(); const va = pick(a.variants), vb = pick(b.variants); const line = `${a.name} ${va}${pick(SEPARATORS)}${b.name} ${vb}`; return { rows: [row(`${a.name} ${va}`, line), row(vb, line)], requested: [key(a.name, va), key(b.name, vb)] }; }
   },
   S10_marks_donor: {
-    description: "REGRESIÓN OBLIGATORIA: marcas de aceptado/rechazado en la línea; el lector devolvió también la opción rechazada como variante suelta (con fila donante)",
-    make: () => { const a = pick(ANALYTE_LIST); const keep = pick(a.variants); const drop = other(a, keep); const [ok, no] = pick(MARKS); const line = `${a.name}: ${keep} ${ok}  ${drop} ${no}`.replace(/ {3,}/g, "  "); return { rows: layoutRows(a.name, keep, [drop], line, "donor"), requested: [key(a.name, keep)], notRequested: [key(a.name, drop)] }; }
+    description: "REGRESIÓN OBLIGATORIA: marcas de aceptado/rechazado escritas con palabras, letras o dígitos; el lector devolvió también la opción rechazada como variante suelta (con fila donante)",
+    make: () => { const a = pick(ANALYTE_LIST); const keep = pick(a.variants); const drop = other(a, keep); const [ok, no] = pick(WORD_MARKS); const line = `${a.name}: ${keep} ${ok}  ${drop} ${no}`.replace(/ {3,}/g, "  "); return { rows: layoutRows(a.name, keep, [drop], line, "donor"), requested: [key(a.name, keep)], notRequested: [key(a.name, drop)] }; }
+  },
+  S10c_symbol_marks_donor: {
+    description: "los signos puros (X, cruces, rayas, subrayados) no impiden la herencia: lo que los lectores devolvieron como filas se reconstruye y se cotiza con el analito de la línea", mustQuoteAll: true,
+    make: () => { const a = pick(ANALYTE_LIST); const keep = pick(a.variants); const drop = other(a, keep); const [ok, no] = pick(SYMBOL_MARKS); const line = `${a.name}: ${keep} ${ok}  ${drop} ${no}`; return { rows: layoutRows(a.name, keep, [drop], line, "donor"), requested: [key(a.name, keep), key(a.name, drop)] }; }
+  },
+  S10d_symbol_marks_two_analytes: {
+    description: "REGRESIÓN OBLIGATORIA: con signos puros y DOS analitos en la línea, la variante suelta sigue sin asignarse al analito de la fila nombrada",
+    make: () => { const [a, b] = pair(); const va = pick(a.variants), vb = pick(b.variants); const [ok] = pick(SYMBOL_MARKS); const line = `${a.name} ${va} ${ok}${pick(SEPARATORS)}${b.name} ${vb} ${ok}`; return { rows: [row(`${a.name} ${va}`, line), row(vb, line)], requested: [key(a.name, va), key(b.name, vb)] }; }
   },
   S10b_marks_bare: {
     description: "REGRESIÓN OBLIGATORIA: las mismas marcas, sin ninguna fila donante",
