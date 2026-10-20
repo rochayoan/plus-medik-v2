@@ -1,5 +1,5 @@
-import { approvedPackage, identityTokens, itemKey, packageItems, qualifiersOf, studyQualifiers, unresolvedPackageGroups } from "./catalog-shadow.js";
-import { normalizeVisibleKey, type SimpleStudy } from "./consensus.js";
+import { approvedPackage, headWords, identityTokens, isQualifierOnly, itemKey, packageItems, qualifiersOf, studyQualifiers, unresolvedPackageGroups } from "./catalog-shadow.js";
+import { normalizeVisibleKey, sameVisibleText, type SimpleStudy } from "./consensus.js";
 import type { FinalVisualStudy } from "./analyze.js";
 import type { CatalogStudy } from "./types.js";
 
@@ -45,6 +45,31 @@ function rowsCoverPackage(pkg: CatalogStudy, rows: FinalVisualStudy[]): boolean 
     unused.delete(hit);
   }
   return unused.size === 0;
+}
+
+// Una fila cuyo texto es SOLO una variante ("IgG", "libre") no identifica un estudio. Si comparte línea (lineText fiable) con filas que sí nombran el
+// analito y todas nombran el MISMO analito, hereda ese analito ("Anticardiolipina IgM" + "IgG" -> "Anticardiolipina IgG"). Nunca entre líneas distintas, nunca si
+// hay analitos distintos en la línea y nunca si el resultado repetiría el texto de otra fila (ahí la duda queda como estaba). El matching y la verificación de
+// identidad siguen aplicando igual al texto resultante.
+export function inheritAnalyteFromLine(studies: FinalVisualStudy[]): FinalVisualStudy[] {
+  const groups = new Map<string, FinalVisualStudy[]>();
+  for (const study of studies) if (study.lineText) groups.set(lineKeyOf(study.lineText), [...(groups.get(lineKeyOf(study.lineText)) ?? []), study]);
+  const replaced = new Map<FinalVisualStudy, FinalVisualStudy>();
+  for (const rows of groups.values()) {
+    if (rows.length < 2) continue;
+    const donors = rows.filter((row) => !isQualifierOnly(row.literalText) && headWords(row.literalText) !== "");
+    const heads = new Set(donors.map((row) => headWords(row.literalText)));
+    if (heads.size !== 1) continue;
+    const head = [...heads][0]!;
+    for (const row of rows) {
+      if (!isQualifierOnly(row.literalText)) continue;
+      const literalText = `${head} ${row.literalText}`.trim();
+      const clash = studies.some((other) => other !== row && sameVisibleText(other.literalText, literalText));
+      if (clash) continue;
+      replaced.set(row, { ...row, literalText, normalizedName: `${head} ${row.normalizedName}`.trim(), inheritedFrom: row.literalText });
+    }
+  }
+  return studies.map((study) => replaced.get(study) ?? study);
 }
 
 export function collapseExplicitPackages(studies: FinalVisualStudy[], catalog: CatalogStudy[]): FinalVisualStudy[] {
