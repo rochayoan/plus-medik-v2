@@ -1,0 +1,12 @@
+# Nunca subir datos de pacientes, cachés ni secretos a Vercel.
+private-data
+benchmark-private
+.cache
+.env
+.env.*
+!.env.example
+node_modules
+dist
+tests
+scripts
+*.md

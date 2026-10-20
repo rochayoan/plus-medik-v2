@@ -178,3 +178,23 @@ Luego se migrará **solo** el catálogo/resolver/policies probados del repo ante
 6. Solo si el resultado justifica la arquitectura, integrar el flujo real.
 
 No se reescribe WhatsApp ni infraestructura antes de demostrar el core.
+
+## WhatsApp (Kapso) en Vercel — piloto mínimo
+
+`api/kapso/webhook.ts` (`POST /api/kapso/webhook`; `GET` devuelve el estado):
+
+1. Verifica la firma HMAC-SHA256 del cuerpo crudo (`x-webhook-signature`, secreto `WEBHOOK_SECRET`). Sin firma válida o sin secreto: 401.
+2. Toma solo mensajes ENTRANTES de tipo imagen (texto, audio, reacciones y mensajes salientes se ignoran). Si `ALLOWED_PHONES` está definida, solo responde a esos números.
+3. Responde 200 de inmediato y sigue en segundo plano (`waitUntil`), así Kapso no reintenta mientras el motor trabaja.
+4. Descarga la imagen, carga el catálogo activo (Supabase, solo lectura) y llama a `analyzeImage` con las banderas ya validadas por argumento (semántico, AUTO parcial, manuscrito); el AUTO MATCH no cambia.
+5. Envía por Kapso UNA respuesta con cada estudio verificado, su precio, el total ("Total de los estudios cotizados") y emojis (`src/whatsapp-quote.ts`). Con una cotización parcial solo van los estudios seguros; los pendientes, bloqueos y la función del documento se registran en el log del servidor (JSON, teléfono enmascarado) y nunca se mencionan al paciente.
+6. Si no hay cotización (ningún estudio verificable, no es una solicitud, imagen ilegible) se pide una foto más clara; si algo falla, un mensaje técnico neutro. Nunca se envía el detalle de un error.
+
+Sin CRM, pedidos, tablas ni sistema propio de duplicados: la única defensa es responder 200 enseguida. Un reintento de Kapso (si el 200 no llegara a tiempo) podría generar una segunda respuesta.
+
+### Pasos mínimos para desplegar
+1. En Vercel (proyecto con este repositorio, rama `feat/kapso-pilot` o `main` tras el merge), define: `WEBHOOK_SECRET`, `KAPSO_API_KEY`, `KAPSO_PHONE_NUMBER_ID`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `OPENROUTER_GEMINI_MODEL`, `OPENAI_READER_MODEL`, `OPENAI_READER_REASONING`, `OPENAI_JUDGE_REASONING`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (y `ALLOWED_PHONES` para el piloto). No definas `CATALOG_*`.
+2. `vercel.json` ya fija `maxDuration: 300` para la función (el motor tarda ~1–2 min); `.vercelignore` excluye `private-data`, `.cache`, `.env`, pruebas y scripts.
+3. Despliega y comprueba `GET https://<dominio>/api/kapso/webhook` → `{"ok":true}`.
+4. En Kapso, registra el webhook `https://<dominio>/api/kapso/webhook` para mensajes entrantes de WhatsApp, con el mismo secreto que `WEBHOOK_SECRET`.
+5. Envía una foto desde un número de `ALLOWED_PHONES` y revisa los registros de Vercel (`event: analysis`, `reply_sent`).
