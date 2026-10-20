@@ -8,7 +8,7 @@ import { readDocumentSignal, type DocumentSignal } from "./document-signal.js";
 import type { DocumentFunctionInfo } from "./document-function.js";
 import { judgeDisputesWithOpenAI, type ResolvedStudy, type SimpleJudgement } from "./judge.js";
 import { evaluatePartial, linesOf, studyKeyOf, type InternalRecord, type PublicQuote, type QuoteOutcome } from "./partial-auto.js";
-import { verifyStudyImpact, type StudyImpactResult } from "./study-impact.js";
+import { verifyStudyImpact, type ImpactStudy, type StudyImpactResult } from "./study-impact.js";
 import {
   resolveCatalogSemantically,
   type SemanticBatchResult,
@@ -767,7 +767,7 @@ export interface AnalyzeDeps {
   readDocument: (args: { imageBase64: string; mimeType: string }) => Promise<{ signal: DocumentSignal }>;
   shadowMatch: typeof shadowMatch;
   // Verificación de impacto de las zonas que no se ven sobre cada estudio visible (AUTO parcial). Si falta o falla, ningún estudio se cotiza.
-  verifyImpact?: (args: { imageBase64: string; mimeType: string; studies: Array<{ key: string; text: string }>; problems: string[] }) => Promise<StudyImpactResult>;
+  verifyImpact?: (args: { imageBase64: string; mimeType: string; studies: ImpactStudy[]; problems: string[] }) => Promise<StudyImpactResult>;
 }
 
 export const defaultAnalyzeDeps: AnalyzeDeps = {

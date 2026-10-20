@@ -3,7 +3,7 @@ import { isPackageComponent } from "./catalog-shadow.js";
 import { droppedLineItemDetails, heldPackageGroups, lineServiceGap } from "./line-groups.js";
 import { normalizeStudyKey } from "./consensus.js";
 import type { DocumentFunctionInfo } from "./document-function.js";
-import type { StudyImpactResult } from "./study-impact.js";
+import type { ImpactStudy, StudyImpactResult } from "./study-impact.js";
 import { classifyStudyRisk, contextSensitive, zonesOf, type StudyRisk, type UnknownZone } from "./visual-risk.js";
 import type { AnalysisReason, CatalogCandidate, FinalVisualStudy, QuoteBasis, StudyMatch } from "./analyze.js";
 import type { CatalogStudy } from "./types.js";
@@ -84,7 +84,7 @@ export interface InternalRecord {
     zones: UnknownZone[];
     impact?: { available: boolean; qualifierRisk: boolean; notes: string[] };
     // Si hay zonas que no se ven, qué estudios (sin otros bloqueos) necesitan la verificación de impacto.
-    impactCheck: { needed: boolean; candidates: Array<{ key: string; text: string }> };
+    impactCheck: { needed: boolean; candidates: ImpactStudy[] };
   };
   // Avisos para el laboratorio (no cambian la cotización): p. ej. un paquete del catálogo cubre varios estudios cotizados por separado.
   advisories: string[];
@@ -154,10 +154,21 @@ function baseBlockers(input: PartialInput): AnalysisReason[][] {
 }
 
 // Estudios que, sin otros bloqueos, dependen de comprobar que las zonas que no se ven no los afectan.
-export function impactCandidates(input: PartialInput): Array<{ key: string; text: string }> {
+// Lo que se le muestra al verificador de impacto para UN estudio. El verificador trabaja sobre la IMAGEN, así que recibe lo que está ESCRITO en la fila
+// (el texto literal de los lectores) y, si el estudio fue reconstruido (variante suelta que heredó el analito, filas reunidas en un paquete), la línea
+// completa donde está escrito. El texto reconstruido nunca se le presenta como si estuviera en la imagen. La clave sigue siendo la del estudio final.
+export function impactStudyOf(study: FinalVisualStudy): ImpactStudy {
+  const key = studyKeyOf(study.literalText);
+  const reconstructed = study.inheritedFrom !== undefined || study.collapsedFrom !== undefined;
+  if (!reconstructed) return { key, text: study.literalText };
+  const written = study.readerPairs?.length ? study.readerPairs.map((pair) => pair.a) : (study.collapsedFrom ?? [study.inheritedFrom!]);
+  return { key, text: written.join(" | "), ...(study.lineText ? { line: study.lineText } : {}) };
+}
+
+export function impactCandidates(input: PartialInput): ImpactStudy[] {
   if (!input.unseenRegion || input.recipeStops.length > 0) return [];
   const base = baseBlockers(input);
-  return input.studies.flatMap((study, index) => (base[index]!.length === 0 ? [{ key: studyKeyOf(study.literalText), text: study.literalText }] : []));
+  return input.studies.flatMap((study, index) => (base[index]!.length === 0 ? [impactStudyOf(study)] : []));
 }
 
 export function evaluatePartial(input: PartialInput): { outcome: QuoteOutcome; record: InternalRecord; publicQuote?: PublicQuote } {
