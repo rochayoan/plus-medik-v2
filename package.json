@@ -18,7 +18,7 @@
     "analyze-image": "tsx scripts/analyze-image.ts",
     "catalog-match": "tsx scripts/catalog-match.ts",
     "inspect-catalog": "tsx scripts/inspect-catalog.ts",
-    "judge":"tsx scripts/judge.ts",
+    "judge": "tsx scripts/judge.ts",
     "consensus": "tsx scripts/consensus.ts",
     "read-image:openai": "tsx scripts/read-image.ts --openai private-data/receta.jpeg",
     "check": "npm run typecheck && npm run test"
@@ -28,6 +28,8 @@
   },
   "dependencies": {
     "@google/genai": "^2.29.1",
+    "@kapso/whatsapp-cloud-api": "^0.2.3",
+    "@vercel/functions": "^3.10.1",
     "openai": "^6.0.0",
     "zod": "^4.0.0",
     "zod-to-json-schema": "^3.24.6"
