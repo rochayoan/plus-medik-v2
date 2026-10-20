@@ -12,7 +12,10 @@ import { cachedAiCall, usageFromResponses, type AiUsage } from "./cache.js";
 
 export interface ImpactStudy {
   key: string;
+  // Lo que está ESCRITO en la fila (texto literal de los lectores). Nunca el texto que el sistema reconstruyó: el verificador trabaja sobre la imagen.
   text: string;
+  // Solo en estudios reconstruidos (variante suelta que heredó el analito, filas reunidas en un paquete): la línea completa donde está escrito `text`.
+  line?: string;
 }
 
 // Qué concluyó la verificación sobre UN estudio (la peor de las dos lecturas):
@@ -82,7 +85,7 @@ export function impactInstructions(variant: "A" | "B", studies: ImpactStudy[], p
 Esta solicitud de estudios de laboratorio tiene zonas que no se ven completas:
 ${problems.map((problem) => `- ${problem}`).join("\n")}
 Los estudios que ya se identificaron como solicitados son:
-${studies.map((study, index) => `${index}. ${study.text}`).join("\n")}
+${studies.map((study, index) => `${index}. ${study.text}${study.line ? ` (escrito en la línea «${study.line}»)` : ""}`).join("\n")}${studies.some((study) => study.line) ? "\nCuando se indica la línea, el estudio es exactamente ese texto tal como está escrito dentro de esa línea. Localiza la fila por lo que se ve escrito en la imagen: no completes, no infieras ni agregues el nombre del estudio, y no uses la línea para suponer lo que hay en una zona que no se ve." : ""}
 Mira la imagen y, para CADA estudio (con su índice), responde por separado dos preguntas: (1) el riesgo LOCAL sobre ese estudio y (2) la información general oculta.
 ${method}
 ${[...local, ...general].join("\n")}

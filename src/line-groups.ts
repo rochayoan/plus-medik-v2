@@ -53,23 +53,36 @@ function rowsCoverPackage(pkg: CatalogStudy, rows: FinalVisualStudy[]): boolean 
 //  1. La línea es fiable (las dos lecturas coinciden en ella) y la comparten la fila suelta y los donantes.
 //  2. Los donantes nombran todos el MISMO analito, y la línea nombra exactamente UN analito que coincide con el del donante. Una línea con dos analitos
 //     ("Zetaina, Gamaina IgG") no permite saber a cuál pertenece la variante suelta.
-//  3. La línea es texto llano: sin marcas o signos (tachados, casillas, interrogaciones) que puedan significar que la variante fue rechazada, anulada o
-//     está en duda. Las palabras de negación o condición ya impiden el punto 2 porque no son parte del analito.
-//  4. La variante de la fila aparece en la línea y el resultado no repite el texto de otra fila.
+//  3. La variante de la fila aparece en la línea y el resultado no repite el texto de otra fila.
+// Las marcas y signos de la línea (cruces, rayas, subrayados...) no se interpretan ni impiden por sí solos heredar: son la forma habitual de pedir un estudio.
+// Las palabras de negación o condición ("sin", "no", "excepto", "tachado"...) sí impiden el punto 2 porque no son parte del analito.
+// La X de selección ("X", "(x)", "[x]") es una marca y no una palabra del analito: ver withoutSelectionX.
 // Sin donante NO se hereda de la propia línea: una variante suelta sin ninguna fila que nombre el analito sigue sin identificar. El matching y la verificación
 // de identidad se aplican igual al texto resultante: heredar solo reconstruye el texto de la fila, no decide qué estudio es.
 // Separadores de una enumeración: comas, punto y coma, "/", saltos de línea y conjunciones (cualquier otra palabra se queda dentro del mismo trozo).
 const LIST_SPLIT = /\s*[,;/\n]\s*|\s+(?:y|e|o|u|and|con|más|mas)\s+/i;
-// Texto llano: letras, números, espacios y solo "," ";" ":" "/" "." y apóstrofos; el guion solo DENTRO de una palabra ("Anti-lambda"). Cualquier otro signo
-// (✓ ✗ ☐ ~ * ? [ ] ( ) + - · ...) puede ser una marca de aceptado, rechazado o duda que la herencia no interpreta: la línea deja de ser fiable para heredar.
-const WORD_HYPHEN = /(?<=[\p{L}\p{N}])-(?=[\p{L}\p{N}])/gu;
-const PLAIN_LINE = /^[\p{L}\p{N}\s,;:/.'’]*$/u;
-const isPlainLine = (text: string): boolean => PLAIN_LINE.test(text.replace(WORD_HYPHEN, ""));
+
+// La X de selección: una X suelta, "(x)" o "[x]" es la marca habitual de un estudio pedido, no una palabra del analito. Se ignora al decidir qué analito nombra
+// una línea o una fila. Entre paréntesis o corchetes siempre es una marca. Una X suelta es parte del nombre cuando sigue directamente a una palabra del analito
+// ("Factor X", "Rayos X"): ahí se conserva, y también ante la duda ("Anti-lambda X IgG" no se reconoce y queda en revisión). Es una marca al comienzo de la
+// línea, tras un signo (",", ":", "/"...) o tras una variante ("IgG X"). No interpreta nada más: solo evita que la marca cuente como parte del analito.
+const SELECTION_X = /[(\[{]\s*[xX]\s*[)\]}]|(?<![\p{L}\p{N}-])[xX](?![\p{L}\p{N}-])/gu;
+export function withoutSelectionX(text: string): string {
+  let changed = false;
+  const result = text.replace(SELECTION_X, (match, offset: number, whole: string) => {
+    if (match.length === 1) {
+      const word = /[\p{L}\p{N}]+$/u.exec(whole.slice(0, offset).trimEnd())?.[0];
+      if (word && !isQualifierOnly(word)) return match;
+    }
+    changed = true;
+    return " ";
+  });
+  return changed ? result.replace(/\s+/g, " ").trim() : text;
+}
 
 // El analito de una línea si nombra exactamente UNO: separando la enumeración (comas, ";", "/", "y", "o"...), un solo trozo conserva palabras que no son variantes.
 export function lineAnalyte(lineText: string): string | undefined {
-  if (!isPlainLine(lineText)) return undefined;
-  const parts = lineText.split(LIST_SPLIT).map((part) => headWords(part)).filter((part) => part !== "");
+  const parts = withoutSelectionX(lineText).split(LIST_SPLIT).map((part) => headWords(part)).filter((part) => part !== "");
   return parts.length === 1 ? parts[0] : undefined;
 }
 
@@ -80,19 +93,20 @@ export function inheritAnalyteFromLine(studies: FinalVisualStudy[]): FinalVisual
   for (const study of studies) if (study.lineText) groups.set(lineKeyOf(study.lineText), [...(groups.get(lineKeyOf(study.lineText)) ?? []), study]);
   const replaced = new Map<FinalVisualStudy, FinalVisualStudy>();
   for (const rows of groups.values()) {
-    if (!rows.some((row) => isQualifierOnly(row.literalText))) continue;
-    const heads = new Set(rows.filter((row) => !isQualifierOnly(row.literalText) && headWords(row.literalText) !== "").map((row) => headWords(row.literalText)));
+    if (!rows.some((row) => isQualifierOnly(withoutSelectionX(row.literalText)))) continue;
+    const heads = new Set(rows.filter((row) => !isQualifierOnly(withoutSelectionX(row.literalText)) && headWords(withoutSelectionX(row.literalText)) !== "").map((row) => headWords(withoutSelectionX(row.literalText))));
     if (heads.size !== 1) continue;
     const head = [...heads][0]!;
     if (lineAnalyte(rows[0]!.lineText!) !== head) continue;
     const inLine = variantsIn(rows[0]!.lineText!);
     for (const row of rows) {
-      if (!isQualifierOnly(row.literalText)) continue;
-      if (!identityTokens(row.literalText).every((token) => inLine.has(token))) continue;
-      const literalText = `${head} ${row.literalText}`.trim();
+      const written = withoutSelectionX(row.literalText);
+      if (!isQualifierOnly(written)) continue;
+      if (!identityTokens(written).every((token) => inLine.has(token))) continue;
+      const literalText = `${head} ${written}`.trim();
       const clash = studies.some((other) => other !== row && sameVisibleText(other.literalText, literalText));
       if (clash) continue;
-      replaced.set(row, { ...row, literalText, normalizedName: `${head} ${row.normalizedName}`.trim(), inheritedFrom: row.literalText });
+      replaced.set(row, { ...row, literalText, normalizedName: `${head} ${withoutSelectionX(row.normalizedName)}`.trim(), inheritedFrom: row.literalText });
     }
   }
   return studies.map((study) => replaced.get(study) ?? study);
@@ -122,7 +136,9 @@ export function collapseExplicitPackages(studies: FinalVisualStudy[], catalog: C
         literalText: lineText,
         normalizedName: lineText,
         confidence: weakest.confidence,
-        collapsedFrom: rows.map((row) => row.literalText)
+        collapsedFrom: rows.map((row) => row.literalText),
+        // Las lecturas originales de TODAS las filas que se reunieron: si alguna no consta, la reconstrucción no puede verificarse (ver readersDisagree).
+        readerPairs: rows.flatMap((row) => row.readerPairs ?? [])
       };
       rows.forEach((row, index) => replaced.set(row, index === 0 ? collapsed : null));
     } else {

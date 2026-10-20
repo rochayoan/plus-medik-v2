@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { assembleAnalysis, finalVisualStudiesOf, type DocumentGate } from "../src/analyze.js";
 import { legacyReadingSchema, simpleReaderInstructionsFor, simpleReadingSchema, type SimpleReading } from "../src/ai.js";
 import { buildSimpleConsensus, normalizeStudyKey, type SimpleStudy } from "../src/consensus.js";
-import { collapseExplicitPackages, droppedLineItems, heldPackageGroups, lineAnalyte, lineServiceGap, reliableLineText, separatelyRequested } from "../src/line-groups.js";
+import { collapseExplicitPackages, droppedLineItems, heldPackageGroups, lineAnalyte, lineServiceGap, reliableLineText, separatelyRequested, withoutSelectionX } from "../src/line-groups.js";
 import type { CatalogStudy } from "../src/types.js";
 
 // lineText: el texto completo de la línea conserva la agrupación original de los estudios (también con "+", "/" o combinaciones). Analitos inventados.
@@ -282,19 +282,26 @@ describe("fila que es solo una variante: hereda el analito de su MISMA línea (n
   });
 });
 
-describe("herencia del analito: solo con fila donante y una línea fiable de texto llano que nombra ese único analito", () => {
+describe("herencia del analito: solo con fila donante y una línea fiable que nombra ese único analito", () => {
   const texts = (a: SimpleReading, b: SimpleReading = a) => finals(a, b, []).map((s) => s.literalText);
   const line = (text: string, ...rows: string[]) => reading(...rows.map((r) => row(r, text)));
 
-  it("lineAnalyte: el analito solo si la línea es texto llano y nombra exactamente uno", () => {
+  it("lineAnalyte: el analito solo si la línea nombra exactamente uno; los signos y marcas no cuentan como motivo para negarlo", () => {
     expect(lineAnalyte("Gamaina: IgG, IgM, IgA")).toBe("gamaina");
     expect(lineAnalyte("Gamaina IgG, IgM")).toBe("gamaina");
     expect(lineAnalyte("Deltaina total y libre")).toBe("deltaina");
     expect(lineAnalyte("Anti-lambda IgG / IgM")).toBe("anti lambda");
-    // dos analitos, o separadores/marcas que no se saben interpretar, o sin analito: ninguno
-    for (const bad of ["Zetaina + Kappaina", "Zetaina y Gamaina IgG", "Zetaina - Gamaina IgG", "Gamaina IgG - IgM", "Gamaina (IgG) IgM", "Gamaina IgG + IgM",
-      "Gamaina IgG ✓ IgM ✗", "Gamaina [x] IgG [ ] IgM", "Gamaina IgG, IgM?", "Gamaina IgG ~~IgM~~", "Gamaina IgG, no IgM", "Gamaina IgG, IgM tachado", "Zetaina\nGamaina IgG", "IgG, IgM", ""]) {
+    // X, cruces, rayas, subrayados y otros signos son la forma habitual de pedir un estudio: por sí solos no impiden reconocer el analito
+    for (const symbols of ["Gamaina IgG ✓ IgM ✗", "Gamaina: IgG ☑ IgM ☐", "Gamaina IgG, IgM?", "Gamaina IgG + IgM", "Gamaina IgG - IgM", "Gamaina (IgG) IgM", "Gamaina IgG ~~IgM~~"]) {
+      expect(lineAnalyte(symbols), symbols).toBe("gamaina");
+    }
+    // sin analito, o con palabras de negación o condición (no son parte del analito): ninguno
+    for (const bad of ["Gamaina IgG, no IgM", "Gamaina IgG, IgM tachado", "Zetaina\nGamaina IgG", "IgG, IgM", ""]) {
       expect(lineAnalyte(bad), bad).toBeUndefined();
+    }
+    // dos analitos, aunque los una un signo: el resultado nunca es uno solo de ellos (por eso no coincide con el analito del donante)
+    for (const two of ["Zetaina + Gamaina IgG", "Zetaina - Gamaina IgG", "Zetaina & Gamaina IgG", "Zetaina | Gamaina IgG", "Zetaina y Gamaina IgG", "Zetaina, Gamaina IgG"]) {
+      expect(["zetaina", "gamaina"], two).not.toContain(lineAnalyte(two));
     }
   });
   it("la fila suelta hereda el analito del donante cuando la línea nombra ese único analito, conservando de dónde vino", () => {
@@ -318,10 +325,20 @@ describe("herencia del analito: solo con fila donante y una línea fiable de tex
     expect(texts(line("Gamaina IgG, IgM", "Gamaina B IgG", "IgM"))).toEqual(["Gamaina B IgG", "IgM"]);
     expect(texts(line("Gamaina IgG, IgM", "Zetaina IgG", "IgM"))).toEqual(["Zetaina IgG", "IgM"]);
   });
-  it("marcas, rechazos, negaciones y condiciones en la línea impiden heredar: la opción rechazada nunca se completa", () => {
-    for (const text of ["Gamaina: IgG ✓ IgM ✗", "Gamaina: IgG [x] IgM [ ]", "Gamaina IgG (x) IgM ( )", "Gamaina IgG +  IgM -", "Gamaina IgG, IgM tachado", "Gamaina IgG, IgM (anulado)", "Gamaina IgG sin IgM",
-      "Gamaina IgG, no IgM", "Gamaina IgG excepto IgM", "Gamaina IgG; IgM si IgG positivo", "Gamaina IgG, IgM opcional", "Gamaina IgG, IgM?", "Gamaina IgG ~~IgM~~"]) {
+  it("las marcas y signos de la línea (X, cruces, rayas, subrayados...) no impiden por sí solos heredar: se reconstruye y sigue el flujo normal", () => {
+    for (const text of ["Gamaina: IgG ✓ IgM ✗", "Gamaina: IgG ☑ IgM ☐", "Gamaina IgG +  IgM -", "Gamaina IgG, IgM?", "Gamaina IgG ~~IgM~~", "Gamaina IgG - IgM", "Gamaina (IgG) IgM", "Gamaina IgG, IgM ___"]) {
+      expect(texts(line(text, "Gamaina IgG", "IgM")), text).toEqual(["Gamaina IgG", "gamaina IgM"]);
+    }
+  });
+  it("las negaciones y condiciones escritas como PALABRAS siguen impidiendo heredar: no son parte del analito", () => {
+    for (const text of ["Gamaina IgG, IgM tachado", "Gamaina IgG, IgM (anulado)", "Gamaina IgG sin IgM", "Gamaina IgG, no IgM", "Gamaina IgG excepto IgM", "Gamaina IgG; IgM si IgG positivo", "Gamaina IgG, IgM opcional"]) {
       expect(texts(line(text, "Gamaina IgG", "IgM")), text).toEqual(["Gamaina IgG", "IgM"]);
+    }
+  });
+  it("dos analitos en la línea, unidos por palabras o por signos, nunca asignan la variante suelta al analito del donante", () => {
+    for (const text of ["Zetaina + Gamaina IgG", "Zetaina - Gamaina IgG", "Zetaina & Gamaina IgG", "Zetaina | Gamaina IgG", "Zetaina – Gamaina IgG", "Zetaina y Gamaina IgG", "Zetaina, Gamaina IgG"]) {
+      expect(texts(line(text, "Zetaina", "IgG")), text).toEqual(["Zetaina", "IgG"]);
+      expect(texts(line(text, "Gamaina", "IgG")), text).toEqual(["Gamaina", "IgG"]);
     }
   });
   it("no hereda si la variante no está en la línea, si las lecturas no coinciden en la línea o si repetiría el texto de otra fila", () => {
@@ -331,5 +348,65 @@ describe("herencia del analito: solo con fila donante y una línea fiable de tex
   });
   it("donantes de analitos distintos en la misma línea: no hereda", () => {
     expect(texts(line("Gamaina IgG, Zetaina IgM, IgA", "Gamaina IgG", "Zetaina IgM", "IgA"))).toEqual(["Gamaina IgG", "Zetaina IgM", "IgA"]);
+  });
+});
+
+describe("la X de selección: X, (x) y [x] son marcas de un estudio pedido, no parte del analito", () => {
+  const texts = (a: SimpleReading) => finals(a, a, []).map((s) => s.literalText);
+  const line = (text: string, ...rows: string[]) => reading(...rows.map((r) => row(r, text)));
+
+  it("withoutSelectionX quita la marca al comienzo, tras un signo, tras una variante y entre paréntesis o corchetes", () => {
+    const cases: Array<[string, string]> = [
+      ["X IgG", "IgG"], ["x Anti-lambda IgG", "Anti-lambda IgG"], ["IgG X", "IgG"], ["IgG x, IgM x", "IgG , IgM"], ["Anti-lambda: X IgG", "Anti-lambda: IgG"],
+      ["Anti-lambda IgG, X IgM", "Anti-lambda IgG, IgM"], ["Anti-lambda IgG (x) IgM (X)", "Anti-lambda IgG IgM"], ["Anti-lambda [x] IgG [ ] IgM", "Anti-lambda IgG [ ] IgM"],
+      ["Anti-lambda ( x ) IgG", "Anti-lambda IgG"], ["Anti-lambda {x} IgG", "Anti-lambda IgG"], ["total X / libre X", "total / libre"]
+    ];
+    for (const [input, expected] of cases) expect(withoutSelectionX(input), input).toBe(expected);
+  });
+  it("withoutSelectionX conserva la X que es parte del nombre y lo que no es una X suelta", () => {
+    for (const same of ["Factor X", "Factor X total", "Rayos X de tórax", "Cromosoma X", "Factor X IgG, IgM", "x-ray", "Xilosa", "IgGx", "Vitamina B12 X", "Hemograma completo", ""]) {
+      expect(withoutSelectionX(same), same).toBe(same);
+    }
+    // la marca se quita y el nombre se conserva en la misma línea
+    expect(withoutSelectionX("(x) Factor X total, [x] libre")).toBe("Factor X total, libre");
+    expect(withoutSelectionX("X Factor X total")).toBe("Factor X total");
+  });
+  it("lineAnalyte reconoce el analito aunque haya marcas X, y sigue negando las líneas con dos analitos", () => {
+    for (const marked of ["Gamaina IgG X IgM X", "X Gamaina IgG, IgM", "Gamaina IgG, IgM  X", "Gamaina IgG (x) IgM (x)", "Gamaina (x) IgG, (x) IgM", "Gamaina [x] IgG [ ] IgM", "Gamaina: X IgG X IgM"]) {
+      expect(lineAnalyte(marked), marked).toBe("gamaina");
+    }
+    for (const factor of ["Factor X IgG, IgM", "(x) Factor X total y libre", "Factor X [x] total, [x] libre", "Factor X: X total X libre"]) expect(lineAnalyte(factor), factor).toBe("factor x");
+    for (const two of ["Zetaina X, Gamaina IgG", "Zetaina IgG X, Gamaina IgM X", "X Zetaina, X Gamaina IgG", "Zetaina (x) y Gamaina (x) IgG", "Factor X IgG, Gamaina IgM X"]) {
+      expect(["zetaina", "gamaina", "factor x"], two).not.toContain(lineAnalyte(two));
+    }
+  });
+  it("la fila suelta hereda el analito del donante aunque la línea o la propia fila lleven una X de selección", () => {
+    for (const text of ["Gamaina IgG X IgM X", "X Gamaina IgG, IgM", "Gamaina IgG, IgM  X", "Gamaina IgG (x) IgM (x)", "Gamaina (x) IgG, (x) IgM", "Gamaina [x] IgG [ ] IgM", "Gamaina: X IgG X IgM"]) {
+      expect(texts(line(text, "Gamaina IgG", "IgM")), text).toEqual(["Gamaina IgG", "gamaina IgM"]);
+    }
+    // la X escrita dentro del texto de la fila no pasa a la reconstrucción
+    const marked = finals(line("Gamaina IgG, IgM", "X Gamaina IgG", "IgM X"), undefined, []);
+    expect(marked.map((s) => s.literalText)).toEqual(["X Gamaina IgG", "gamaina IgM"]);
+    expect(marked[1]?.inheritedFrom).toBe("IgM X");
+  });
+  it("Factor X conserva su identidad al heredar: la X del nombre no se pierde ni se confunde con una marca", () => {
+    expect(texts(line("Factor X IgG, IgM", "Factor X IgG", "IgM"))).toEqual(["Factor X IgG", "factor x IgM"]);
+    expect(texts(line("(x) Factor X total y libre", "Factor X total", "libre"))).toEqual(["Factor X total", "factor x libre"]);
+    expect(texts(line("Factor X [x] total, [x] libre", "Factor X total", "libre"))).toEqual(["Factor X total", "factor x libre"]);
+    // el donante es "Factor" a secas o es otro factor: no coincide con la línea y no hereda
+    expect(texts(line("Factor X IgG, IgM", "Factor IgG", "IgM"))).toEqual(["Factor IgG", "IgM"]);
+    expect(texts(line("Factor X IgG, IgM", "Factor V IgG", "IgM"))).toEqual(["Factor V IgG", "IgM"]);
+  });
+  it("líneas con varios analitos y marcas X: la variante suelta nunca se asigna al analito de la fila nombrada", () => {
+    for (const text of ["Zetaina X, Gamaina IgG", "Zetaina IgG X, Gamaina IgM X", "X Zetaina, X Gamaina IgG", "Zetaina (x), Gamaina (x) IgG", "Zetaina [x] / Gamaina [x] IgG"]) {
+      expect(texts(line(text, "Zetaina", "IgG")), text).toEqual(["Zetaina", "IgG"]);
+      expect(texts(line(text, "Zetaina IgM", "IgG")), text).toEqual(["Zetaina IgM", "IgG"]);
+    }
+  });
+  it("límite que se conserva: una X suelta justo después de la palabra del analito se trata como parte del nombre y queda en revisión", () => {
+    expect(texts(line("Gamaina X IgG X IgM", "Gamaina IgG", "IgM"))).toEqual(["Gamaina IgG", "IgM"]);
+  });
+  it("sin donante sigue sin heredar aunque haya marcas X", () => {
+    expect(texts(line("Gamaina: X IgG X IgM", "IgG", "IgM"))).toEqual(["IgG", "IgM"]);
   });
 });
