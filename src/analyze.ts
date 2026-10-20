@@ -32,6 +32,23 @@ export interface FinalVisualStudy extends SimpleStudy {
   collapsedFrom?: string[];
   // Si el texto era solo una variante ("IgG") y heredó el analito de otra fila de su misma línea: el texto original.
   inheritedFrom?: string;
+  // Las lecturas ORIGINALES de los dos lectores (texto literal de cada uno) de cada fila que aporta este estudio: una pareja si es una fila, varias si
+  // varias filas se reunieron en un paquete. Sobrevive a la reconstrucción (herencia de analito, paquete) para comprobar siempre lo que cada modelo leyó.
+  readerPairs?: Array<{ a: string; b: string }>;
+}
+
+// ¿Difieren las lecturas ORIGINALES de los dos lectores? Nunca se busca por el texto reconstruido: cada estudio lleva sus propias parejas de lecturas.
+//  - Estudio sin reconstruir (acordado): bloquea si los lectores difieren en una variante explícita.
+//  - Estudio RECONSTRUIDO (herencia o paquete): la correspondencia con lo que cada modelo leyó debe ser inequívoca. Bloquea si falta alguna pareja,
+//    si los lectores no leyeron el MISMO texto visible en alguna fila o si difieren en una variante. Lo que no puede verificarse queda en revisión.
+export function readersDisagree(study: FinalVisualStudy): boolean {
+  const pairs = study.readerPairs ?? [];
+  if (study.inheritedFrom !== undefined || study.collapsedFrom !== undefined) {
+    const expected = study.collapsedFrom?.length ?? 1;
+    if (pairs.length !== expected) return true;
+    return pairs.some((pair) => !sameVisibleText(pair.a, pair.b) || !sameVariants(pair.a, pair.b));
+  }
+  return study.source === "agreed" && pairs.some((pair) => !sameVariants(pair.a, pair.b));
 }
 
 export interface CatalogCandidate {
@@ -428,12 +445,16 @@ export function finalVisualStudiesOf(consensus: SimpleConsensus, judgement: Simp
     return (lineText ? { ...rest, lineText } : rest) as T & { lineText?: string };
   };
   const all = [
-    ...consensus.agreedStudies.map((study) => ({ ...withLine(study, pairOf(study)?.a, pairOf(study)?.b), source: "agreed" as const })),
+    ...consensus.agreedStudies.map((study) => {
+      const pair = pairOf(study);
+      return { ...withLine(study, pair?.a, pair?.b), ...(pair ? { readerPairs: [{ a: pair.a.literalText, b: pair.b.literalText }] } : {}), source: "agreed" as const };
+    }),
     ...judgement.resolvedStudies
       .filter((resolved) => resolved.verdict === "confirmed")
       .map((resolved) => {
         const dispute = consensus.disputes.find((candidate) => candidate.key === resolved.key);
-        return { ...withLine(resolved.study, dispute?.readerA.requested, dispute?.readerB.requested), ...judgeResolvedConfidence(resolved, consensus), source: "judge_confirmed" as const };
+        const seenBy = dispute?.readerA.requested && dispute.readerB.requested ? { readerPairs: [{ a: dispute.readerA.requested.literalText, b: dispute.readerB.requested.literalText }] } : {};
+        return { ...withLine(resolved.study, dispute?.readerA.requested, dispute?.readerB.requested), ...seenBy, ...judgeResolvedConfidence(resolved, consensus), source: "judge_confirmed" as const };
       })
   ];
   // Una selección visual, un estudio: el mismo texto (ignorando espaciado y puntuación) no se cuenta dos veces.
@@ -672,10 +693,7 @@ export function assembleAnalysis(args: {
     if (finalVisualStudies.length === 0) recipeStops.push("no_requested_studies");
     const unseenRegion = Boolean(document && !document.completeDocumentVisible);
     const variantMismatch = new Set<string>();
-    for (const study of finalVisualStudies) {
-      const pair = study.source === "agreed" ? consensus.agreedPairs?.find((candidate) => candidate.a.literalText === study.literalText) : undefined;
-      if (pair && !sameVariants(pair.a.literalText, pair.b.literalText)) variantMismatch.add(studyKeyOf(study.literalText));
-    }
+    for (const study of finalVisualStudies) if (readersDisagree(study)) variantMismatch.add(studyKeyOf(study.literalText));
     const evaluation = evaluatePartial({
       studies: finalVisualStudies,
       matches,

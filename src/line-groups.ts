@@ -116,7 +116,9 @@ export function collapseExplicitPackages(studies: FinalVisualStudy[], catalog: C
         literalText: lineText,
         normalizedName: lineText,
         confidence: weakest.confidence,
-        collapsedFrom: rows.map((row) => row.literalText)
+        collapsedFrom: rows.map((row) => row.literalText),
+        // Las lecturas originales de TODAS las filas que se reunieron: si alguna no consta, la reconstrucción no puede verificarse (ver readersDisagree).
+        readerPairs: rows.flatMap((row) => row.readerPairs ?? [])
       };
       rows.forEach((row, index) => replaced.set(row, index === 0 ? collapsed : null));
     } else {
