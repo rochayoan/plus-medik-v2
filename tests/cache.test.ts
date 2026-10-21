@@ -6,6 +6,7 @@ import {
   CACHE_VERSION,
   cachedAiCall,
   recordAiUsage,
+  setUsageSink,
   usageFromChatCompletions,
   usageFromGemini,
   usageFromResponses
@@ -22,6 +23,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  setUsageSink(undefined);
   stderr.mockRestore();
   delete process.env.AI_CACHE_DIR;
   delete process.env.AI_CACHE;
@@ -175,6 +177,24 @@ describe("cachedAiCall", () => {
   it("registra el usage de respuestas inválidas reintentadas", async () => {
     await recordAiUsage({ label: "gemini-openrouter", provider: "openrouter", model: "m", usage: { inputTokens: 1 }, invalid: true });
     expect((await usageLines())[0]).toMatchObject({ invalid: true, cacheHit: false, usage: { inputTokens: 1 } });
+  });
+});
+
+describe("setUsageSink", () => {
+  it("con un sink instalado, el usage va al sink y no a usage.jsonl", async () => {
+    const lines: Array<Record<string, unknown>> = [];
+    setUsageSink((line) => { lines.push(line); });
+    process.env.AI_CACHE = "off";
+    await run(okCall());
+    expect(lines).toEqual([expect.objectContaining({ label: "test-reader", cacheHit: false, usage: expect.objectContaining({ costUsd: 0.01 }) })]);
+    expect(await readdir(dir)).toEqual([]);
+  });
+
+  it("un sink que falla no interrumpe la llamada al modelo", async () => {
+    setUsageSink(() => { throw new Error("db caída"); });
+    process.env.AI_CACHE = "off";
+    expect(await run(okCall())).toEqual({ answer: "uno" });
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining("db caída"));
   });
 });
 

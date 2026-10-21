@@ -163,8 +163,9 @@ const simpleReaderInstructions = simpleReaderInstructionsFor(false);
 const UNAVAILABLE_RETRY_DELAYS_MS = [3000, 6000, 12000];
 const INVALID_RESPONSE_RETRIES = 1;
 
+// 503 (sobrecarga) y 429 (límite de tasa, frecuente con varias fotos simultáneas) son transitorios.
 function isUnavailable(error: unknown): boolean {
-  return (error instanceof ApiError || error instanceof OpenAI.APIError) && error.status === 503;
+  return (error instanceof ApiError || error instanceof OpenAI.APIError) && (error.status === 503 || error.status === 429);
 }
 
 async function withUnavailableRetry<T>(call: () => Promise<T>): Promise<T> {
@@ -174,7 +175,7 @@ async function withUnavailableRetry<T>(call: () => Promise<T>): Promise<T> {
     } catch (error) {
       const delay = UNAVAILABLE_RETRY_DELAYS_MS[attempt];
       if (!isUnavailable(error) || delay === undefined) throw error;
-      console.error(`Gemini 503 UNAVAILABLE, reintento ${attempt + 1}/${UNAVAILABLE_RETRY_DELAYS_MS.length} en ${delay / 1000}s...`);
+      console.error(`Gemini ${(error as { status?: number }).status} transitorio, reintento ${attempt + 1}/${UNAVAILABLE_RETRY_DELAYS_MS.length} en ${delay / 1000}s...`);
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }

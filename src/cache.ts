@@ -43,7 +43,23 @@ export interface UsageRecord {
   invalid?: boolean;
 }
 
+// Destino opcional del registro de usage (p. ej. una tabla en producción, donde el disco no persiste). Si hay uno instalado,
+// reemplaza a .cache/usage.jsonl. Un fallo del sink nunca interrumpe la llamada al modelo.
+export type UsageSink = (line: Record<string, unknown>) => void | Promise<void>;
+let usageSink: UsageSink | undefined;
+export function setUsageSink(sink: UsageSink | undefined): void {
+  usageSink = sink;
+}
+
 async function appendUsageLine(line: Record<string, unknown>): Promise<void> {
+  if (usageSink) {
+    try {
+      await usageSink(line);
+    } catch (error) {
+      console.error(`No se pudo registrar usage: ${(error as Error).message}`);
+    }
+    return;
+  }
   try {
     const root = cacheRoot();
     await mkdir(root, { recursive: true });
