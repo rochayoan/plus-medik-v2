@@ -28,6 +28,7 @@ Los modelos **leen**. Ningún modelo autoriza AUTO por sí solo. El código dete
 - Sí: X, check, círculo, subrayado, tachado o rayón como evidencia visual que los modelos deben interpretar.
 - No por ahora: solicitudes clínicas cuyo contenido depende de escritura manuscrita.
 - No todavía: WhatsApp, Supabase, UI, CRM, pedidos, pagos o producción.
+- Portal web de cotización (convenios, clínicas, médicos): en [`web/`](web/README.md). Reutiliza `analyzeImage` para precargar cotizaciones desde una foto; el usuario confirma todo lo que no es seguro.
 
 ## Modelos iniciales
 

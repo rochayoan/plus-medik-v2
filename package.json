@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Core multimodal de lectura segura de solicitudes de laboratorio para PlusMedik.",
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "benchmark": "tsx scripts/benchmark.ts",
@@ -39,5 +40,14 @@
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
     "vitest": "^3.2.0"
-  }
+  },
+  "exports": {
+    "./*": {
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
+    }
+  },
+  "workspaces": [
+    "web"
+  ]
 }

@@ -1,0 +1,52 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand-50: #effaf8;
+  --color-brand-100: #d6f1ec;
+  --color-brand-500: #14907f;
+  --color-brand-600: #0f766e;
+  --color-brand-700: #0c5f59;
+  --color-ink: #1f2933;
+  --color-muted: #61707d;
+  --color-line: #dfe7ec;
+  --color-surface: #f5f8fa;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background: var(--color-surface);
+  color: var(--color-ink);
+}
+
+/* Botones y campos: tamaño táctil cómodo en el celular. */
+@utility btn {
+  @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+}
+@utility btn-primary {
+  @apply btn bg-brand-600 text-white hover:bg-brand-700;
+}
+@utility btn-warning {
+  @apply btn bg-amber-600 text-white hover:bg-amber-700;
+}
+@utility btn-secondary {
+  @apply btn border border-line bg-white text-ink hover:bg-surface;
+}
+@utility btn-ghost {
+  @apply btn text-muted hover:bg-surface hover:text-ink;
+}
+@utility btn-danger {
+  @apply btn border border-red-200 bg-white text-red-700 hover:bg-red-50;
+}
+@utility input {
+  @apply min-h-11 w-full rounded-lg border border-line bg-white px-3 py-2.5 text-base outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100;
+}
+@utility card {
+  @apply rounded-xl border border-line bg-white;
+}
+@utility label {
+  @apply mb-1 block text-sm font-medium text-ink;
+}
