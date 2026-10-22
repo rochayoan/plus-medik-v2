@@ -16,19 +16,22 @@ export interface AuditLease {
 
 //   claimed    esta ejecución posee el lease (takeover = lo reclamó de una ejecución anterior cuyo lease había vencido, sin envío reservado).
 //   duplicate  NO se procesa: BUSY (otra ejecución con lease vigente), IN_DOUBT (hay o pudo haber un envío en curso: nunca se reabre),
-//              FINISHED (ya terminó) o EXHAUSTED (demasiados intentos; lo cierra el recuperador).
+//              FINISHED (ya terminó), EXHAUSTED (demasiados intentos; lo cierra el recuperador) o HUMAN_PAUSED (atención humana activa para el contacto).
 export type AuditClaim =
   | { kind: "claimed"; runId: string; lease: AuditLease; takeover: boolean }
-  | { kind: "duplicate"; processingStatus: string; reason?: "BUSY" | "IN_DOUBT" | "FINISHED" | "EXHAUSTED" };
+  | { kind: "duplicate"; processingStatus: string; reason?: "BUSY" | "IN_DOUBT" | "FINISHED" | "EXHAUSTED" | "HUMAN_PAUSED" };
 
 export type ReplyAuditState = "ACCEPTED" | "UNKNOWN";
 
 // Resultado de pedir autorización para llamar a Kapso. SOLO "reserved" autoriza el envío; cualquier otro resultado (o un error) significa NO enviar.
 export type SendReservation = "reserved" | "blocked" | "lost";
+// Comprobación final antes de llamar a Kapso: "proceed" es la única que permite enviar.
+export type SendConfirmation = "proceed" | "blocked" | "lost";
 export type SendableResult = Exclude<QuoteResult, "ignored">;
 
 export interface AuditRepository {
-  claim(image: Pick<IncomingImage, "messageId" | "mediaId">): Promise<AuditClaim>;
+  // contactKey (HMAC del contacto, ver human-control.ts) activa el control de atención humana: un contacto pausado no se procesa.
+  claim(image: Pick<IncomingImage, "messageId" | "mediaId">, options?: { contactKey?: string }): Promise<AuditClaim>;
   // false = el lease se perdió (otra ejecución lo reclamó o el recuperador cerró la corrida). Un fallo de red NO es "perdido": lanza.
   renewLease(runId: string, lease: AuditLease): Promise<boolean>;
   recordIgnored(runId: string, reason: "IMAGE_SIZE" | "IMAGE_TYPE", lease: AuditLease): Promise<void>;
@@ -37,6 +40,9 @@ export interface AuditRepository {
   recordFailure(runId: string, errorCode: AuditErrorCode, lease: AuditLease): Promise<void>;
   // Reserva de envío bajo bloqueo de fila: debe concederse ANTES de llamar a Kapso y es la comprobación de pausa (ver block_send en la migración).
   reserveSend(runId: string, kind: SendableResult, lease: AuditLease): Promise<SendReservation>;
+  // Comprobación final, lo más cerca posible de la llamada a Kapso: si el contacto se pausó, la reserva (aún sin usar) se libera. No elimina la carrera residual
+  // entre esta respuesta y la llamada externa.
+  confirmSend(runId: string, lease: AuditLease): Promise<SendConfirmation>;
   recordReply(runId: string, reply: { state: ReplyAuditState; result: SendableResult; processingStatus: "COMPLETED" | "FAILED"; providerMessageId?: string }, lease: AuditLease): Promise<void>;
 }
 
@@ -333,26 +339,29 @@ export function buildEvidencePayload(evidence: AnalysisEvidence, runtime: { engi
   };
 }
 
-export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}): AuditRepository & AuditMaintenance {
+export interface SupabaseRpcOptions {
+  baseUrl?: string;
+  serviceKey?: string;
+  fetchFn?: typeof fetch;
+  requestTimeoutMs?: number;
+  retryDelayMs?: number;
+}
+
+// Cliente mínimo de las funciones RPC de Supabase (PostgREST), compartido por la auditoría y el control de atención. Solo hace POST a /rest/v1/rpc/<nombre>.
+export function createSupabaseRpc(options: SupabaseRpcOptions = {}): (name: string, args: Record<string, unknown>) => Promise<Record<string, unknown>> {
   const baseUrl = (options.baseUrl ?? process.env.SUPABASE_URL)?.replace(/\/+$/, "");
   const serviceKey = options.serviceKey ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!baseUrl || !serviceKey) throw new Error("Supabase audit configuration is required");
   const fetchFn = options.fetchFn ?? fetch;
-  const flags = sanitizeFlags(options.runtime?.flags);
-  const rawEngineVersion = options.runtime?.engineVersion ?? process.env.VERCEL_GIT_COMMIT_SHA;
-  const engineVersion = rawEngineVersion && COMMIT_SHA.test(rawEngineVersion) ? rawEngineVersion.toLowerCase() : null;
   const headers = { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, "Content-Type": "application/json" };
   const timeoutMs = options.requestTimeoutMs ?? 5000;
   const retryDelayMs = options.retryDelayMs ?? 300;
-
-  const leaseSeconds = options.leaseSeconds ?? 120;
-  const sendLeaseSeconds = options.sendLeaseSeconds ?? 120;
 
   // Llamada a una función transaccional e IDEMPOTENTE de la base. El cuerpo se serializa una vez: si una petición termina sin respuesta (timeout, red caída,
   // 5xx) no se sabe si la transacción se confirmó; se repite UNA vez con exactamente el mismo contenido (todas las funciones usadas aquí responden igual ante
   // el mismo contenido y el mismo owner/fence). Si tampoco hay respuesta, el resultado queda DESCONOCIDO (UNKNOWN_OUTCOME): no se reintenta más. Nunca se lee
   // ni se propaga el cuerpo de un error del servidor. 410 = lease perdido (no se reintenta), 409 = conflicto, otros 4xx = rechazo.
-  async function rpc(name: string, args: Json): Promise<Record<string, unknown>> {
+  return async function rpc(name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
     const body = JSON.stringify(args);
     const attempts = 2;
     for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -372,13 +381,26 @@ export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}
       if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
     }
     throw new AuditWriteError("UNKNOWN_OUTCOME");
-  }
+  };
+}
+
+export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}): AuditRepository & AuditMaintenance {
+  const baseUrl = (options.baseUrl ?? process.env.SUPABASE_URL)?.replace(/\/+$/, "");
+  const serviceKey = options.serviceKey ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!baseUrl || !serviceKey) throw new Error("Supabase audit configuration is required");
+  const fetchFn = options.fetchFn ?? fetch;
+  const flags = sanitizeFlags(options.runtime?.flags);
+  const rawEngineVersion = options.runtime?.engineVersion ?? process.env.VERCEL_GIT_COMMIT_SHA;
+  const engineVersion = rawEngineVersion && COMMIT_SHA.test(rawEngineVersion) ? rawEngineVersion.toLowerCase() : null;
+  const rpc = createSupabaseRpc({ baseUrl, serviceKey, fetchFn, requestTimeoutMs: options.requestTimeoutMs, retryDelayMs: options.retryDelayMs });
+  const leaseSeconds = options.leaseSeconds ?? 120;
+  const sendLeaseSeconds = options.sendLeaseSeconds ?? 120;
 
   const leaseArgs = (runId: string, lease: AuditLease) => ({ p_run_id: runId, p_owner: lease.owner, p_fence: lease.fence });
   const str = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
 
   return {
-    async claim(image) {
+    async claim(image, claimOptions) {
       // Cada ejecución tiene su propio propietario. La reclamación es atómica en la base (inserta, reconoce un duplicado o reclama un lease vencido).
       const owner = randomUUID();
       const result = await rpc("plusmedik_audit_claim_run", {
@@ -388,9 +410,11 @@ export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}
         p_lease_seconds: leaseSeconds,
         p_schema_version: AUDIT_SCHEMA_VERSION,
         p_engine_version: engineVersion,
-        p_flags: flags
+        p_flags: flags,
+        ...(claimOptions?.contactKey ? { p_contact_key: claimOptions.contactKey } : {})
       });
       const outcome = str(result.outcome);
+      if (outcome === "paused") return { kind: "duplicate", processingStatus: "HUMAN_PAUSED", reason: "HUMAN_PAUSED" };
       if ((outcome === "claimed" || outcome === "taken_over") && str(result.run_id) && typeof result.fence === "number") {
         return { kind: "claimed", runId: str(result.run_id)!, lease: { owner, fence: result.fence }, takeover: outcome === "taken_over" };
       }
@@ -421,6 +445,15 @@ export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}
       try {
         const result = await rpc("plusmedik_audit_reserve_send", { ...leaseArgs(runId, lease), p_kind: kind, p_lease_seconds: sendLeaseSeconds });
         return result.status === "reserved" ? "reserved" : result.status === "blocked" ? "blocked" : "lost";
+      } catch (error) {
+        if (error instanceof AuditWriteError && error.kind === "LEASE_LOST") return "lost";
+        throw error; // CONFLICT / REJECTED / UNKNOWN_OUTCOME: quien llama NO envía
+      }
+    },
+    async confirmSend(runId, lease) {
+      try {
+        const result = await rpc("plusmedik_audit_confirm_send", leaseArgs(runId, lease));
+        return result.status === "proceed" ? "proceed" : result.status === "blocked" ? "blocked" : "lost";
       } catch (error) {
         if (error instanceof AuditWriteError && error.kind === "LEASE_LOST") return "lost";
         throw error; // CONFLICT / REJECTED / UNKNOWN_OUTCOME: quien llama NO envía

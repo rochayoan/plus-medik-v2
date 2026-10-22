@@ -201,7 +201,7 @@ Sin CRM, pedidos, tablas ni sistema propio de duplicados: la única defensa es r
 
 ## Auditoría persistente (Supabase) — migraciones NO aplicadas
 
-Cada imagen procesada deja una corrida en `plusmedik_audit_runs` y sus evidencias en `plusmedik_audit_studies`, `plusmedik_audit_model_calls` y `plusmedik_audit_checks` (sin imágenes, teléfonos, prompts, respuestas crudas, razonamientos ni texto clínico libre). Las migraciones están en `supabase/migrations/` y **no se han aplicado a ningún Supabase remoto**; se ejecutan en este orden, sin modificar las anteriores: `20261020000000` (Fase 6) → `20261021000000` (telemetría de IA) → `20261022000000` (transaccional e inmutabilidad) → `20261023000000` (leases, fencing y recuperación).
+Cada imagen procesada deja una corrida en `plusmedik_audit_runs` y sus evidencias en `plusmedik_audit_studies`, `plusmedik_audit_model_calls` y `plusmedik_audit_checks` (sin imágenes, teléfonos, prompts, respuestas crudas, razonamientos ni texto clínico libre). Las migraciones están en `supabase/migrations/` y **no se han aplicado a ningún Supabase remoto**; se ejecutan en este orden, sin modificar las anteriores: `20261020000000` (Fase 6) → `20261021000000` (telemetría de IA) → `20261022000000` (transaccional e inmutabilidad) → `20261023000000` (leases, fencing y recuperación) → `20261024000000` (control de atención humana).
 
 - **Atomicidad.** Las evidencias de un análisis (resumen de la corrida, estudios, llamadas de IA y verificaciones) y el resultado del envío se escriben con las funciones `plusmedik_audit_record_evidence` y `plusmedik_audit_record_reply`: una transacción cada una, con lista blanca de campos, validación previa y errores sin valores. **Quedan fuera** (escrituras separadas y por tanto no atómicas con lo anterior): el claim del mensaje (INSERT en `runs`) y las actualizaciones operativas `recordIgnored`/`recordFailure`. Una corrida terminada con `evidence_recorded_at` NULL indica evidencia no confirmada (brecha de auditoría observable). El envío a WhatsApp nunca forma parte de la transacción.
 - **Idempotencia y reintentos.** La función bloquea la fila de la corrida y guarda el hash del contenido: el mismo contenido repetido responde `already_recorded` (sin duplicar); uno distinto sobre una corrida ya registrada se rechaza (409). Si una petición termina sin respuesta (timeout, red, 5xx) no se sabe si se confirmó: el cliente repite UNA vez, con exactamente los mismos bytes; si tampoco hay respuesta el resultado queda `UNKNOWN_OUTCOME`, se registra solo ese código y el procesamiento continúa (fail-open). **El envío a WhatsApp nunca se repite** por un fallo de auditoría. Peor caso con Supabase colgado: 2 intentos de 5 s por escritura.
@@ -245,3 +245,42 @@ Las corridas anteriores a F1.3 (sin lease) conservan el contrato de F1.2, aparec
 **Conciliación de `SEND_UNKNOWN`:** compare con la conversación en Kapso si existe un mensaje saliente posterior a `send_reserved_at`. No hay una consulta automática (la API no se asume); hoy es una revisión humana.
 
 **Preparación para intervención humana (sin integrar):** `plusmedik_audit_block_send(message_id, motivo)` impide una respuesta pendiente si aún no se reservó (`blocked`) o informa `too_late` si ya se reservó. La comprobación real ocurre en `reserve_send`, bajo el mismo bloqueo de fila: un bloqueo y una reserva no se pueden cruzar. No conoce ninguna tabla de otros sistemas. Un bloqueo que llegue **antes** de que exista la corrida no se puede registrar aquí (requeriría una clave de conversación que esta fase no introduce).
+
+### Atención humana: apagado automático de la IA (F2.1) — migración NO aplicada, función APAGADA por defecto
+
+Cuando una persona del laboratorio escribe al paciente desde **WhatsApp Business**, la IA deja de responder a ese contacto hasta que se reactive de forma explícita. Se reutiliza el criterio de La Fija (un mensaje saliente con `message.kapso.origin === "business_app"`), sin copiar sus tablas ni su lógica de restaurante.
+
+**Eventos de Kapso reconocidos** (formato v2 verificado en https://docs.kapso.ai/docs/platform/webhooks/message-events; `src/human-control.ts`): se clasifica por `direction` + `origin` + estado, no solo por el nombre del evento (`X-Webhook-Event`).
+
+| Clase | Cómo se reconoce | Efecto |
+| --- | --- | --- |
+| Paciente | `direction: inbound` (o `whatsapp.message.received`) | Imágenes → motor de recetas; el origin de un entrante (`cloud_api`) no se usa |
+| **Intervención humana** | `direction: outbound` + `origin: business_app`, evento de creación (`sent`) | **Pausa** al contacto |
+| Bot propio | `outbound` + `origin: cloud_api` (lo enviado por la API de Kapso) | Ninguno: el bot jamás se apaga a sí mismo |
+| Estados de entrega | `delivered`, `read`, `failed` (cabecera o `message.kapso.status`); comparten `message.id` con el mensaje original | Ninguno: **nunca** son una intervención |
+| Historial importado | `origin: history_sync` | Ninguno |
+| Otra app / agente de Meta | `other_app`, `meta_business_agent` | Solo se registra (no se interpreta como humano) |
+| **Origen desconocido** | saliente sin `origin` o con uno no reconocido | Se registra como `UNKNOWN_ORIGIN`; no se inventa que fue humano |
+| Otros | eventos de conversación/contacto/thread, sin mensaje, dirección ausente | Ninguno |
+
+Kapso no documenta en qué evento llega exactamente un eco de `business_app` (solo que lleva ese origen); por eso el criterio no depende del nombre del evento. El webhook de La Fija solo mira `direction`/`origin`, no valida firma ni distingue estados: aquí se conserva la verificación de firma (`x-webhook-signature`) y se descartan los estados de entrega.
+
+**Estado persistente (única fuente de verdad):** tabla `plusmedik_attention_contacts` (`ACTIVE` | `HUMAN_PAUSED`, `revision`, `paused_at`, `pause_reason = HUMAN_WHATSAPP_BUSINESS_APP`, `pause_source`, `resumed_at`, `last_human_event_at`, `updated_at`). La fila se crea si no existe (incluso sin ningún análisis previo). Tabla `plusmedik_attention_events` (inmutable; `event_key` único deduplica). El contacto se identifica con `contact_key = HMAC-SHA256(PLUSMEDIK_CONTACT_HMAC_KEY, "plusmedik-contact-v1|<KAPSO_PHONE_NUMBER_ID>|<dígitos del teléfono>")`: estable entre conversaciones, acotado al número del laboratorio y sin guardar el teléfono. Los procesamientos (`plusmedik_audit_runs`) guardan la misma clave (`contact_key`), que es lo que permite bloquear los pendientes de un contacto.
+
+**Máquina de estados:** `ACTIVE` → (mensaje humano posterior a la última reactivación) → `HUMAN_PAUSED` → (`plusmedik_attention_resume`, explícita) → `ACTIVE`. La revisión sube exactamente con cada cambio de estado. Un evento humano repetido es `duplicate`; otro mientras está pausado es `ALREADY_PAUSED` (solo adelanta `last_human_event_at`); uno **anterior a la última reactivación** es `STALE_IGNORED` y no vuelve a pausar. No hay reactivación por tiempo.
+
+**Coordinación con el envío (todo en la base, orden de bloqueo fijo contacto → corrida):**
+1. *Antes del análisis*: `plusmedik_audit_claim_run` no procesa a un contacto pausado (registra `PATIENT_SUPPRESSED`).
+2. *Al pausar*: se bloquean los procesamientos pendientes del contacto (los que aún no reservaron envío).
+3. *En la reserva* (`reserve_send`): bajo el bloqueo de la corrida se vuelve a consultar el bloqueo y el estado del contacto (respaldo ante un claim concurrente que la pausa no pudo ver).
+4. *Comprobación final* (`plusmedik_audit_confirm_send`, justo antes de llamar a Kapso): si el contacto se pausó tras la reserva, la reserva (aún sin usar) se libera y no se envía.
+
+**Lo que NO se puede garantizar:** un evento humano que llega después de la comprobación final, o mientras la llamada a Kapso está en curso, **no puede cancelar ese envío**; tampoco se puede retirar un mensaje ya entregado a Kapso, ni se asume exactly-once. Esa carrera se registra como evento auditable (`late_reserved_runs` y `replied_after_event_runs` en el evento, y `attention_reason = HUMAN_PAUSE_AFTER_RESERVATION | BOT_REPLIED_AFTER_HUMAN_EVENT` en la corrida). Tampoco se recupera un evento humano que Kapso no entregue (o que agote sus reintentos).
+
+**Falla cerrada.** Con el control activo no se responde si: no hay clave estable del contacto (clave dedicada ausente o teléfono ausente), no hay auditoría, el claim falla (aunque `requireAuditGuard` no esté definido: el control lo implica), o la reserva o la comprobación final no obtienen respuesta. Un evento humano que no se pudo registrar responde **503** para que Kapso reintente (a los 10 s y 40 s, máximo 3 intentos; el registro es idempotente).
+
+**Política de ACK (explicación y consecuencias).** *Imágenes*: sin cambios — se responde 200 de inmediato y se procesa en segundo plano (`waitUntil`). Consecuencia heredada: si el claim falla después del 200, Kapso **no** reintentará una entrega ya confirmada; con el control activo el paciente no recibe respuesta automática (puede reenviar la foto) y queda `reply_withheld`. Esperar el claim antes del 200 sería una mejora para otra fase. *Eventos humanos*: se registra la pausa **antes** de responder, con plazos cortos (2 intentos de 3 s) por debajo de los 10 s que Kapso concede; si falla, 503 y reintento de Kapso. Riesgo residual: si se agotan los 3 intentos, el evento se pierde.
+
+**Configuración (documentada; NO configurada en producción):** `PLUSMEDIK_HUMAN_CONTROL=on` activa el control (apagado si falta); `PLUSMEDIK_CONTACT_HMAC_KEY` (≥ 32 caracteres, clave **dedicada**, distinta de `WEBHOOK_SECRET` y de cualquier otra); `KAPSO_PHONE_NUMBER_ID` (ya existente) acota las claves; `REQUIRE_AUDIT_GUARD=on` exige el claim aunque el control esté apagado (requisito de producción recomendado). Las pruebas usan valores simulados. Para activarlo: aplicar las cinco migraciones (previo ensayo), definir las variables en Vercel y verificar en un número piloto (`ALLOWED_PHONES`) con una pausa y una reactivación reales.
+
+**Reactivación:** `plusmedik_attention_resume(contact_key, motivo, actor)` (solo `service_role`). No hay pantallas ni endpoint de control manual todavía. Reactivar no desbloquea lo ya cancelado: el paciente puede reenviar su foto.

@@ -32,6 +32,7 @@ function fakeSupabase(script: Behavior[] = []) {
     if (path === "rpc/plusmedik_audit_claim_run") return new Response(JSON.stringify({ outcome: "claimed", run_id: "run-1", fence: 1 }), { status: 200 });
     if (path === "rpc/plusmedik_audit_reserve_send") return new Response(JSON.stringify({ status: "reserved" }), { status: 200 });
     if (path === "rpc/plusmedik_audit_renew_lease") return new Response(JSON.stringify({ status: "renewed" }), { status: 200 });
+    if (path === "rpc/plusmedik_audit_confirm_send") return new Response(JSON.stringify({ status: "proceed" }), { status: 200 });
     const behavior = script.shift() ?? "ok";
     const key = `${path}:${(JSON.parse(body) as { p_run_id: string }).p_run_id}`;
     const commit = (): "recorded" | "already_recorded" | "conflict" => {
@@ -245,7 +246,7 @@ describe("fail-open y envío a WhatsApp", () => {
     expect(JSON.parse(server.rpcCalls().at(-1)!.body).p_reply).toMatchObject({ state: "UNKNOWN" });
   });
 
-  const spyAudit = (): AuditRepository => ({ claim: vi.fn(async () => ({ kind: "claimed" as const, runId: "run-1", lease: LEASE, takeover: false })), recordIgnored: vi.fn(), renewLease: vi.fn(async () => true), reserveSend: vi.fn(async () => "reserved" as const), recordEvidence: vi.fn(async () => undefined), recordFailure: vi.fn(async () => undefined), recordReply: vi.fn(async () => undefined) });
+  const spyAudit = (): AuditRepository => ({ claim: vi.fn(async () => ({ kind: "claimed" as const, runId: "run-1", lease: LEASE, takeover: false })), recordIgnored: vi.fn(), renewLease: vi.fn(async () => true), reserveSend: vi.fn(async () => "reserved" as const), confirmSend: vi.fn(async () => "proceed" as const), recordEvidence: vi.fn(async () => undefined), recordFailure: vi.fn(async () => undefined), recordReply: vi.fn(async () => undefined) });
 
   it("si el análisis falla, solo se registran las llamadas de IA que ocurrieron (sin resumen inventado) y una sola vez", async () => {
     const audit = spyAudit();
@@ -281,11 +282,12 @@ describe("migraciones: orden y aditividad", () => {
     expect(sha(await readFile(join(dir, "20261020000000_plusmedik_persistent_audit.sql"), "utf8"))).toBe("1110edc1e1b3f6c4961b87bdb763ecea535ef5b1d6ba9086ff314a86b88ad61a");
     expect(sha(await readFile(join(dir, "20261021000000_plusmedik_audit_telemetry.sql"), "utf8"))).toBe("08e555cf0c872ce2380cbd5046c2296a525c20b6caaddee6ae51ccdb53243256");
     expect(sha(await readFile(join(dir, "20261022000000_plusmedik_audit_transactional.sql"), "utf8"))).toBe("1135f673e0a8e5de5ef03dae1acae55427c01ff99f4a5988f90595abe9244079");
+    expect(sha(await readFile(join(dir, "20261023000000_plusmedik_audit_leases.sql"), "utf8"))).toBe("1b6546c2a44142a00b771f303dccc43f5ea408cd912a340c3b3e406e63185ee7");
   });
 
-  it("la migración de leases es la última, no crea tablas ni borra objetos, sin SQL dinámico, y cada función SECURITY DEFINER fija su search_path", async () => {
+  it("la migración de leases no crea tablas ni borra objetos, sin SQL dinámico, y cada función SECURITY DEFINER fija su search_path", async () => {
     const files = (await readdir(dir)).filter((name) => name.endsWith(".sql")).sort();
-    expect(files.at(-1)).toBe("20261023000000_plusmedik_audit_leases.sql");
+    expect(files.slice(-2)).toEqual(["20261023000000_plusmedik_audit_leases.sql", "20261024000000_plusmedik_human_control.sql"]);
     const sql = (await readFile(join(dir, "20261023000000_plusmedik_audit_leases.sql"), "utf8")).replace(/--.*$/gm, "");
     expect(sql).not.toMatch(/\bcreate\s+table\b/i);
     expect(sql).not.toMatch(/\bdrop\s+/i);
@@ -299,7 +301,7 @@ describe("migraciones: orden y aditividad", () => {
 
   it("la migración transaccional es posterior a ambas, no crea tablas ni borra objetos", async () => {
     const files = (await readdir(dir)).filter((name) => name.endsWith(".sql")).sort();
-    expect(files.slice(-4, -1)).toEqual(["20261020000000_plusmedik_persistent_audit.sql", "20261021000000_plusmedik_audit_telemetry.sql", "20261022000000_plusmedik_audit_transactional.sql"]);
+    expect(files.slice(-5, -2)).toEqual(["20261020000000_plusmedik_persistent_audit.sql", "20261021000000_plusmedik_audit_telemetry.sql", "20261022000000_plusmedik_audit_transactional.sql"]);
     const sql = (await readFile(join(dir, "20261022000000_plusmedik_audit_transactional.sql"), "utf8")).replace(/--.*$/gm, "");
     expect(sql).not.toMatch(/\bcreate\s+table\b/i);
     expect(sql).not.toMatch(/\bdrop\s+/i);

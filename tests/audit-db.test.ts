@@ -19,6 +19,7 @@ const M1 = join(migrationsDir, "20261020000000_plusmedik_persistent_audit.sql");
 const M2 = join(migrationsDir, "20261021000000_plusmedik_audit_telemetry.sql");
 const M3 = join(migrationsDir, "20261022000000_plusmedik_audit_transactional.sql");
 const M4 = join(migrationsDir, "20261023000000_plusmedik_audit_leases.sql");
+const M5 = join(migrationsDir, "20261024000000_plusmedik_human_control.sql");
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const sentinel = "SENTINELA_CLINICA_9";
@@ -63,7 +64,7 @@ describe.skipIf(!bin)("auditoría contra PostgreSQL real", () => {
     server = await startEphemeralPostgres(bin!);
     db = await server.createDatabase("audit");
     await db.ok(SUPABASE_BOOTSTRAP_SQL);
-    for (const file of [M1, M2, M3, M4]) await db.applyFile(file);
+    for (const file of [M1, M2, M3, M4, M5]) await db.applyFile(file);
   });
   afterAll(async () => {
     await server?.stop();
@@ -83,11 +84,12 @@ describe.skipIf(!bin)("auditoría contra PostgreSQL real", () => {
     db.ok(`select (select count(*) from public.plusmedik_audit_studies where run_id='${runId}') || ',' || (select count(*) from public.plusmedik_audit_model_calls where run_id='${runId}') || ',' || (select count(*) from public.plusmedik_audit_checks where run_id='${runId}');`);
   const runRow = async (runId: string): Promise<Json> => JSON.parse(await db.ok(`select to_json(r) from public.plusmedik_audit_runs r where id='${runId}';`));
 
-  it("las cuatro migraciones se aplican desde cero y las tres últimas se pueden volver a ejecutar (F1.2 sobre el esquema final de F1.3)", async () => {
+  it("las cinco migraciones se aplican desde cero y se pueden volver a ejecutar en orden (F1.2 sobre el esquema final)", async () => {
     await db.applyFile(M2);
     await db.applyFile(M3);
     await db.applyFile(M4);
-    expect(await db.ok("select count(*) from pg_proc where proname like 'plusmedik_audit_%'")).toBe("22");
+    await db.applyFile(M5);
+    expect(await db.ok("select count(*) from pg_proc where proname like 'plusmedik_audit_%'")).toBe("23");
   });
 
   describe("escritura atómica de evidencias", () => {

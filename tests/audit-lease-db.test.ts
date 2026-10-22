@@ -10,7 +10,7 @@ if (!bin) console.warn("[audit-lease-db] PostgreSQL no disponible: se omiten las
 vi.setConfig({ testTimeout: 90_000, hookTimeout: 180_000 });
 
 const migrationsDir = join(__dirname, "..", "supabase", "migrations");
-const MIGRATIONS = ["20261020000000_plusmedik_persistent_audit.sql", "20261021000000_plusmedik_audit_telemetry.sql", "20261022000000_plusmedik_audit_transactional.sql", "20261023000000_plusmedik_audit_leases.sql"].map((name) => join(migrationsDir, name));
+const MIGRATIONS = ["20261020000000_plusmedik_persistent_audit.sql", "20261021000000_plusmedik_audit_telemetry.sql", "20261022000000_plusmedik_audit_transactional.sql", "20261023000000_plusmedik_audit_leases.sql", "20261024000000_plusmedik_human_control.sql"].map((name) => join(migrationsDir, name));
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 type Json = Record<string, any>;
 
@@ -473,7 +473,9 @@ describe.skipIf(!bin)("leases y recuperación contra PostgreSQL real", () => {
         insert into public.plusmedik_audit_studies (run_id, study_index, decision) values ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 0, 'AUTO');
         insert into public.plusmedik_audit_checks (run_id, check_kind, check_status) values ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'REPLY', 'ACCEPTED');`);
       await legacy.applyFile(MIGRATIONS[3]!);
-      await legacy.applyFile(MIGRATIONS[3]!); // re-ejecutable también sobre datos
+      await legacy.applyFile(MIGRATIONS[4]!);
+      await legacy.applyFile(MIGRATIONS[3]!); // re-ejecutables también sobre datos (en orden)
+      await legacy.applyFile(MIGRATIONS[4]!);
 
       expect(await legacy.ok("select count(*) from public.plusmedik_audit_runs")).toBe("3");
       expect(await legacy.ok("select (select count(*) from public.plusmedik_audit_studies) || ',' || (select count(*) from public.plusmedik_audit_checks)")).toBe("1,1");
@@ -522,7 +524,7 @@ describe.skipIf(!bin)("leases y recuperación contra PostgreSQL real", () => {
     it("las funciones son SECURITY DEFINER con search_path vacío; service_role solo ejecuta las públicas", async () => {
       expect(await db.ok(`select count(*) from pg_proc where proname in ('plusmedik_audit_claim_run','plusmedik_audit_renew_lease','plusmedik_audit_lock_leased','plusmedik_audit_fenced_record_evidence','plusmedik_audit_fenced_close','plusmedik_audit_reserve_send','plusmedik_audit_fenced_record_reply','plusmedik_audit_recover_stale','plusmedik_audit_block_send') and (not prosecdef or proconfig is distinct from array['search_path=""'])`)).toBe("0");
       expect(await db.ok(`select count(*) from pg_proc where proname like 'plusmedik_audit_%' and proconfig is null`)).toBe("0");
-      for (const fn of ["claim_run(text, text, text, integer, integer, text, jsonb, integer)", "renew_lease(uuid, text, bigint, integer)", "fenced_record_evidence(uuid, text, bigint, jsonb)", "fenced_close(uuid, text, bigint, jsonb)", "reserve_send(uuid, text, bigint, text, integer)", "fenced_record_reply(uuid, text, bigint, jsonb)", "recover_stale(integer, integer, integer)", "block_send(text, text)"]) {
+      for (const fn of ["claim_run(text, text, text, integer, integer, text, jsonb, integer, text)", "renew_lease(uuid, text, bigint, integer)", "fenced_record_evidence(uuid, text, bigint, jsonb)", "fenced_close(uuid, text, bigint, jsonb)", "reserve_send(uuid, text, bigint, text, integer)", "fenced_record_reply(uuid, text, bigint, jsonb)", "recover_stale(integer, integer, integer)", "block_send(text, text)"]) {
         expect(await db.ok(`select has_function_privilege('service_role', 'public.plusmedik_audit_${fn}', 'execute')::text || has_function_privilege('public', 'public.plusmedik_audit_${fn}', 'execute')::text`), fn).toBe("truefalse");
       }
       for (const fn of ["prove(uuid, bigint)", "lock_leased(uuid, text, bigint)"]) expect(await db.ok(`select has_function_privilege('service_role', 'public.plusmedik_audit_${fn}', 'execute')::text`), fn).toBe("false");

@@ -401,7 +401,7 @@ function auditSpy(): AuditRepository {
     claim: vi.fn(async () => ({ kind: "claimed" as const, runId: "run-1", lease: LEASE, takeover: false })),
     recordIgnored: vi.fn(async () => undefined),
     renewLease: vi.fn(async () => true),
-    reserveSend: vi.fn(async () => "reserved" as const),
+    reserveSend: vi.fn(async () => "reserved" as const), confirmSend: vi.fn(async () => "proceed" as const),
     recordEvidence: vi.fn(async () => undefined),
     recordFailure: vi.fn(async () => undefined),
     recordReply: vi.fn(async () => undefined)

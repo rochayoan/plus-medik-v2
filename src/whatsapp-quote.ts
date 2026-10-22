@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { AnalysisResult } from "./analyze.js";
-import { AuditWriteError, catalogFingerprint, processingFailureCode, type AuditLease, type AuditRepository, type ProcessingPhase, type SendableResult, type SendReservation } from "./audit.js";
+import { AuditWriteError, catalogFingerprint, processingFailureCode, type AuditLease, type AuditRepository, type ProcessingPhase, type SendableResult, type SendConfirmation, type SendReservation } from "./audit.js";
 import { withAiCallObserver, type AiCallEvent } from "./cache.js";
 import type { PublicQuote } from "./partial-auto.js";
 import type { CatalogStudy } from "./types.js";
@@ -125,6 +125,10 @@ export interface QuoteDeps {
   leaseRenewIntervalMs?: number;
   // true: si el claim falla (la base no responde) NO se responde, porque no se puede demostrar que nadie más responderá. Por defecto false (política heredada).
   requireAuditGuard?: boolean;
+  // Control de atención humana (ver human-control.ts). Si está presente: el contacto se identifica con una clave estable (HMAC) y SIN ella no se responde; un
+  // contacto con la IA pausada no se procesa; la reserva y la comprobación final de envío vuelven a consultar la pausa; y el claim de la auditoría pasa a ser
+  // obligatorio (como requireAuditGuard).
+  humanControl?: { contactKeyFor(phone: string): string | undefined };
 }
 
 export type QuoteResult = "quoted" | "no_quote" | "technical_issue" | "ignored";
@@ -196,9 +200,19 @@ export async function handleImageMessage(image: IncomingImage, deps: QuoteDeps):
   let auditRunId: string | undefined;
   let lease: AuditLease | undefined;
   const writeErrorKind = (error: unknown) => (error instanceof AuditWriteError ? { kind: error.kind } : {});
+  // Atención humana: sin una clave estable del contacto, o sin la auditoría que concede los leases y las reservas, no hay forma de comprobar la pausa -> no se responde.
+  let contactKey: string | undefined;
+  if (deps.humanControl) {
+    contactKey = deps.humanControl.contactKeyFor(image.from);
+    if (!contactKey || !deps.audit) {
+      deps.log("reply_withheld", { reason: contactKey ? "audit_guard_unavailable" : "contact_unidentified" });
+      return "ignored";
+    }
+  }
   if (deps.audit) {
     try {
-      const claim = await deps.audit.claim({ messageId: image.messageId, mediaId: image.mediaId });
+      const claimImage = { messageId: image.messageId, mediaId: image.mediaId };
+      const claim = contactKey ? await deps.audit.claim(claimImage, { contactKey }) : await deps.audit.claim(claimImage);
       if (claim.kind === "duplicate") {
         deps.log("duplicate_ignored", { processingStatus: claim.processingStatus, ...(claim.reason ? { reason: claim.reason } : {}) });
         return "ignored";
@@ -210,7 +224,7 @@ export async function handleImageMessage(image: IncomingImage, deps: QuoteDeps):
       deps.log("audit_unavailable", { stage: "claim", ...writeErrorKind(error) });
       // Sin claim no hay lease ni reserva: la exclusión del envío no se puede demostrar. Por defecto se responde igual (política heredada: el webhook ya
       // confirmó la recepción, así que un duplicado exigiría una segunda entrega mientras la base no responde); requireAuditGuard lo impide.
-      if (deps.requireAuditGuard) {
+      if (deps.requireAuditGuard || deps.humanControl) {
         deps.log("reply_withheld", { reason: "audit_guard_unavailable" });
         return "ignored";
       }
@@ -312,6 +326,22 @@ export async function handleImageMessage(image: IncomingImage, deps: QuoteDeps):
       }
       if (reservation !== "reserved") {
         deps.log("reply_withheld", { reason: reservation });
+        return "ignored";
+      }
+    }
+
+    // Comprobación final, lo más cerca posible de la llamada a Kapso: si el contacto se pausó tras la reserva, se libera la reserva y NO se envía. Un evento humano
+    // que llegue después de esta comprobación (o durante la llamada) ya no puede cancelar el envío: queda registrado como carrera, no evitado.
+    if (guarded) {
+      let confirmation: SendConfirmation | "unavailable";
+      try {
+        confirmation = await deps.audit!.confirmSend(auditRunId!, lease!);
+      } catch (error) {
+        confirmation = "unavailable";
+        deps.log("audit_unavailable", { stage: "confirm", ...writeErrorKind(error) });
+      }
+      if (confirmation !== "proceed") {
+        deps.log("reply_withheld", { reason: confirmation });
         return "ignored";
       }
     }

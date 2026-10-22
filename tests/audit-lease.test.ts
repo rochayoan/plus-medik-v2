@@ -134,7 +134,7 @@ function audit(overrides: Partial<AuditRepository> = {}): AuditRepository {
     recordIgnored: vi.fn(async () => undefined),
     recordEvidence: vi.fn(async () => undefined),
     recordFailure: vi.fn(async () => undefined),
-    reserveSend: vi.fn(async () => "reserved" as const),
+    reserveSend: vi.fn(async () => "reserved" as const), confirmSend: vi.fn(async () => "proceed" as const),
     recordReply: vi.fn(async () => undefined),
     ...overrides
   };

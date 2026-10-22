@@ -5,6 +5,8 @@ import { handleRecoveryRequest } from "../src/audit-recovery.js";
 import type { AnalysisResult } from "../src/analyze.js";
 import { formatQuoteMessage, handleImageMessage, NO_QUOTE_MESSAGE, TECHNICAL_ISSUE_MESSAGE, type IncomingImage, type QuoteDeps } from "../src/whatsapp-quote.js";
 import { findPostgresBin, startEphemeralPostgres, SUPABASE_BOOTSTRAP_SQL, type EphemeralPostgres, type PgDatabase } from "./support/ephemeral-postgres.js";
+import { crashPoint, forever, gate, withFaults } from "./support/faults.js";
+import { newNetwork, postgrestOverPsql } from "./support/postgrest-over-psql.js";
 
 // Escenarios de interrupción de extremo a extremo: handleImageMessage REAL + repositorio REAL (src/audit.ts) + PostgreSQL REAL. Lo único simulado es la red hacia
 // Supabase (un adaptador que traduce cada llamada RPC de PostgREST a la función SQL correspondiente) y Kapso (un contador de envíos). Una "caída" es una ejecución
@@ -14,76 +16,18 @@ const bin = findPostgresBin();
 if (!bin) console.warn("[audit-recovery-e2e] PostgreSQL no disponible: se omiten los escenarios de recuperación contra la base real.");
 vi.setConfig({ testTimeout: 120_000, hookTimeout: 180_000 });
 
-const MIGRATIONS = ["20261020000000_plusmedik_persistent_audit.sql", "20261021000000_plusmedik_audit_telemetry.sql", "20261022000000_plusmedik_audit_transactional.sql", "20261023000000_plusmedik_audit_leases.sql"].map((name) => join(__dirname, "..", "supabase", "migrations", name));
+const MIGRATIONS = ["20261020000000_plusmedik_persistent_audit.sql", "20261021000000_plusmedik_audit_telemetry.sql", "20261022000000_plusmedik_audit_transactional.sql", "20261023000000_plusmedik_audit_leases.sql", "20261024000000_plusmedik_human_control.sql"].map((name) => join(__dirname, "..", "supabase", "migrations", name));
 const jpeg = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, ...new Array(20).fill(0)]);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const forever = () => new Promise<never>(() => undefined);
-
-const PARAM_TYPES: Record<string, string> = {
-  p_run_id: "uuid", p_payload: "jsonb", p_owner: "text", p_fence: "bigint", p_close: "jsonb", p_kind: "text", p_lease_seconds: "integer", p_reply: "jsonb", p_message_id: "text", p_media_id: "text",
-  p_schema_version: "integer", p_engine_version: "text", p_flags: "jsonb", p_max_attempts: "integer", p_reserved_grace_seconds: "integer", p_abandon_grace_seconds: "integer", p_limit: "integer", p_reason: "text"
-};
-const literal = (key: string, value: unknown): string => {
-  const type = PARAM_TYPES[key];
-  if (!type) throw new Error(`parámetro desconocido: ${key}`);
-  if (value === null || value === undefined) return `null::${type}`;
-  if (type === "jsonb") return `$j$${JSON.stringify(value)}$j$::jsonb`;
-  if (type === "text" || type === "uuid") return `$t$${String(value)}$t$::${type}`;
-  return `${Number(value)}::${type}`;
-};
-
-// Estado de la "red" hacia Supabase: se puede cortar por completo o por función.
-interface Network { down: boolean; downFor: Set<string>; calls: string[] }
-
-function postgrestOverPsql(db: PgDatabase, network: Network): typeof fetch {
-  return (async (input: unknown, init?: RequestInit) => {
-    const name = String(input).split("/rest/v1/rpc/")[1];
-    if (!name || !/^plusmedik_audit_[a-z_]+$/.test(name)) throw new Error("solo RPC de auditoría");
-    network.calls.push(name);
-    if (network.down || network.downFor.has(name)) throw new TypeError("fetch failed");
-    const args = JSON.parse(String(init?.body)) as Record<string, unknown>;
-    const sql = `set role service_role; select public.${name}(${Object.entries(args).map(([key, value]) => `${key} => ${literal(key, value)}`).join(", ")});`;
-    const result = await db.psql(sql);
-    if (result.code === 0) return new Response(result.stdout.split("\n")[0] || "{}", { status: 200 });
-    const code = /ERROR:\s+(PT\d{3}|[0-9A-Z]{5}):/.exec(result.stderr)?.[1] ?? "";
-    return new Response("{}", { status: code.startsWith("PT") ? Number(code.slice(2)) : 500 });
-  }) as typeof fetch;
-}
 
 const publicQuote = { studies: [{ name: "HEMOGRAMA", priceBs: 45 }], totalBs: 45, totalLabel: "Total de los estudios cotizados", tariff: "PACIENTE" as const };
 const okAnalysis = () => ({ decision: "AUTO_SAFE", reasons: [], finalVisualStudies: [], disputes: [], judgeResolved: [], unresolvedDisputes: [], matches: [], unmatched: [], ambiguous: [], modelSuggested: [], outcome: "AUTO_COMPLETE", publicQuote }) as AnalysisResult;
-
-// Una "caída" en un punto de un método del repositorio: la ejecución se detiene antes o después de que la base conteste.
-type Fault = { before?: () => Promise<void>; after?: () => Promise<void> };
-function withFaults(real: AuditRepository, faults: Partial<Record<keyof AuditRepository, Fault>>): AuditRepository {
-  const wrap = <K extends keyof AuditRepository>(method: K) =>
-    (async (...args: unknown[]) => {
-      await faults[method]?.before?.();
-      const result = await (real[method] as (...a: unknown[]) => Promise<unknown>)(...args);
-      await faults[method]?.after?.();
-      return result;
-    }) as AuditRepository[K];
-  return { claim: wrap("claim"), renewLease: wrap("renewLease"), recordIgnored: wrap("recordIgnored"), recordEvidence: wrap("recordEvidence"), recordFailure: wrap("recordFailure"), reserveSend: wrap("reserveSend"), recordReply: wrap("recordReply") };
-}
-const crashPoint = () => {
-  let reached!: () => void;
-  const signal = new Promise<void>((resolve) => (reached = resolve));
-  return { hook: async () => { reached(); await forever(); }, reached: signal };
-};
-// Una ejecución "colgada" que se puede reanudar después (para probar al ejecutor antiguo que revive).
-const gate = () => {
-  let open!: () => void;
-  let reached!: () => void;
-  const passed = new Promise<void>((resolve) => (open = resolve));
-  const arrived = new Promise<void>((resolve) => (reached = resolve));
-  return { hook: async () => { reached(); await passed; }, open, arrived };
-};
 
 describe.skipIf(!bin)("recuperación de procesamientos interrumpidos (extremo a extremo contra PostgreSQL real)", () => {
   let server: EphemeralPostgres;
   let db: PgDatabase;
   let counter = 0;
-  const network: Network = { down: false, downFor: new Set(), calls: [] };
+  const network = newNetwork();
 
   beforeAll(async () => {
     server = await startEphemeralPostgres(bin!);
@@ -299,7 +243,7 @@ describe.skipIf(!bin)("recuperación de procesamientos interrumpidos (extremo a 
       expect(after).toMatchObject({ lease_fence: 2, send_state: "ACCEPTED", evidence_hash: before.evidence_hash, kapso_outbound_message_id: before.kapso_outbound_message_id });
     });
 
-    it("el recuperador cierra la corrida mientras el antiguo sigue vivo con la reserva: ese único envío ocurre, su registro se rechaza y nadie más envía", async () => {
+    it("el recuperador cierra la corrida mientras el antiguo sigue vivo con la reserva: la comprobación final lo detiene y nadie envía", async () => {
       const image = newImage();
       const hold = gate();
       const stale = setup({}, withFaults(repository(), { reserveSend: { after: hold.hook } }));
@@ -310,11 +254,11 @@ describe.skipIf(!bin)("recuperación de procesamientos interrumpidos (extremo a 
       const fresh = setup();
       await expect(handleImageMessage(image, fresh.deps)).resolves.toBe("ignored");
       hold.open();
-      await expect(staleDone).resolves.toBe("quoted");
-      expect(stale.sends).toHaveLength(1);
+      await expect(staleDone).resolves.toBe("ignored");
+      expect(stale.sends).toEqual([]);
       expect(fresh.sends).toEqual([]);
-      expect(events(stale.logs, "audit_unavailable").map((entry) => entry.kind)).toContain("LEASE_LOST");
-      expect(await row(image.messageId)).toMatchObject({ send_state: "UNKNOWN", attention_reason: "SEND_OUTCOME_UNKNOWN" }); // honesto: no se pudo confirmar
+      expect(events(stale.logs, "reply_withheld")).toEqual([{ reason: "lost" }]);
+      expect(await row(image.messageId)).toMatchObject({ send_state: "UNKNOWN", attention_reason: "SEND_OUTCOME_UNKNOWN" }); // conservador: la base no puede saber que nunca se llamó a Kapso
     });
   });
 
