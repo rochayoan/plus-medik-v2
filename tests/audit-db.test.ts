@@ -18,6 +18,7 @@ const migrationsDir = join(__dirname, "..", "supabase", "migrations");
 const M1 = join(migrationsDir, "20261020000000_plusmedik_persistent_audit.sql");
 const M2 = join(migrationsDir, "20261021000000_plusmedik_audit_telemetry.sql");
 const M3 = join(migrationsDir, "20261022000000_plusmedik_audit_transactional.sql");
+const M4 = join(migrationsDir, "20261023000000_plusmedik_audit_leases.sql");
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const sentinel = "SENTINELA_CLINICA_9";
@@ -62,7 +63,7 @@ describe.skipIf(!bin)("auditoría contra PostgreSQL real", () => {
     server = await startEphemeralPostgres(bin!);
     db = await server.createDatabase("audit");
     await db.ok(SUPABASE_BOOTSTRAP_SQL);
-    for (const file of [M1, M2, M3]) await db.applyFile(file);
+    for (const file of [M1, M2, M3, M4]) await db.applyFile(file);
   });
   afterAll(async () => {
     await server?.stop();
@@ -82,10 +83,11 @@ describe.skipIf(!bin)("auditoría contra PostgreSQL real", () => {
     db.ok(`select (select count(*) from public.plusmedik_audit_studies where run_id='${runId}') || ',' || (select count(*) from public.plusmedik_audit_model_calls where run_id='${runId}') || ',' || (select count(*) from public.plusmedik_audit_checks where run_id='${runId}');`);
   const runRow = async (runId: string): Promise<Json> => JSON.parse(await db.ok(`select to_json(r) from public.plusmedik_audit_runs r where id='${runId}';`));
 
-  it("las tres migraciones se aplican desde cero y la telemetría y la transaccional se pueden volver a ejecutar", async () => {
+  it("las cuatro migraciones se aplican desde cero y las tres últimas se pueden volver a ejecutar (F1.2 sobre el esquema final de F1.3)", async () => {
     await db.applyFile(M2);
     await db.applyFile(M3);
-    expect(await db.ok("select count(*) from pg_proc where proname like 'plusmedik_audit_%'")).toBe("12");
+    await db.applyFile(M4);
+    expect(await db.ok("select count(*) from pg_proc where proname like 'plusmedik_audit_%'")).toBe("22");
   });
 
   describe("escritura atómica de evidencias", () => {
@@ -492,8 +494,8 @@ describe.skipIf(!bin)("auditoría contra PostgreSQL real", () => {
         baseUrl: "https://example.supabase.co", serviceKey: "k", retryDelayMs: 0,
         fetchFn: async (input, init) => { requests.push({ path: String(input).replace("https://example.supabase.co/rest/v1/", ""), body: JSON.parse(String(init?.body)) }); return new Response('{"status":"recorded"}', { status: 200 }); }
       });
-      await repository.recordReply(runId, { state: "ACCEPTED", result: "quoted", processingStatus: "COMPLETED", providerMessageId: "wamid.HBgLabc123==" });
-      const reply = requests.find((request) => request.path === "rpc/plusmedik_audit_record_reply")!.body;
+      await repository.recordReply(runId, { state: "ACCEPTED", result: "quoted", processingStatus: "COMPLETED", providerMessageId: "wamid.HBgLabc123==" }, { owner: "owner-0000001", fence: 1 });
+      const reply = requests.find((request) => request.path === "rpc/plusmedik_audit_fenced_record_reply")!.body;
       expect(reply.p_run_id).toBe(runId);
       expect(JSON.parse(await db.ok(`set role service_role; select public.plusmedik_audit_record_reply('${runId}'::uuid, $json$${JSON.stringify(reply.p_reply)}$json$::jsonb);`))).toEqual({ status: "recorded" });
       expect(await runRow(runId)).toMatchObject({ processing_status: "COMPLETED", reply_state: "ACCEPTED", kapso_outbound_message_id: "wamid.HBgLabc123==" });

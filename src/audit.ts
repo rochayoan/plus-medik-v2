@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { AnalysisResult } from "./analyze.js";
 import type { AiCallEvent } from "./cache.js";
 import type { CatalogStudy } from "./types.js";
@@ -7,19 +7,50 @@ import type { IncomingImage, QuoteResult } from "./whatsapp-quote.js";
 // Versión del contrato de lo que se persiste. Las filas anteriores a la telemetría (Fase 6) no la tienen (NULL = versión 1, sin telemetría).
 export const AUDIT_SCHEMA_VERSION = 2;
 
+// Lease de una ejecución: propietario único + generación (fence). Toda escritura de una corrida con lease los presenta; si otra ejecución reclamó el lease
+// (o el recuperador cerró la corrida) la generación ya no coincide y la base rechaza la escritura (PT410 -> AuditWriteError LEASE_LOST).
+export interface AuditLease {
+  owner: string;
+  fence: number;
+}
+
+//   claimed    esta ejecución posee el lease (takeover = lo reclamó de una ejecución anterior cuyo lease había vencido, sin envío reservado).
+//   duplicate  NO se procesa: BUSY (otra ejecución con lease vigente), IN_DOUBT (hay o pudo haber un envío en curso: nunca se reabre),
+//              FINISHED (ya terminó) o EXHAUSTED (demasiados intentos; lo cierra el recuperador).
 export type AuditClaim =
-  | { kind: "claimed"; runId: string }
-  | { kind: "duplicate"; processingStatus: string };
+  | { kind: "claimed"; runId: string; lease: AuditLease; takeover: boolean }
+  | { kind: "duplicate"; processingStatus: string; reason?: "BUSY" | "IN_DOUBT" | "FINISHED" | "EXHAUSTED" };
 
 export type ReplyAuditState = "ACCEPTED" | "UNKNOWN";
 
+// Resultado de pedir autorización para llamar a Kapso. SOLO "reserved" autoriza el envío; cualquier otro resultado (o un error) significa NO enviar.
+export type SendReservation = "reserved" | "blocked" | "lost";
+export type SendableResult = Exclude<QuoteResult, "ignored">;
+
 export interface AuditRepository {
   claim(image: Pick<IncomingImage, "messageId" | "mediaId">): Promise<AuditClaim>;
-  recordIgnored(runId: string, reason: "IMAGE_SIZE" | "IMAGE_TYPE"): Promise<void>;
+  // false = el lease se perdió (otra ejecución lo reclamó o el recuperador cerró la corrida). Un fallo de red NO es "perdido": lanza.
+  renewLease(runId: string, lease: AuditLease): Promise<boolean>;
+  recordIgnored(runId: string, reason: "IMAGE_SIZE" | "IMAGE_TYPE", lease: AuditLease): Promise<void>;
   // TODAS las evidencias del procesamiento (resumen del análisis, estudios, llamadas de IA y verificaciones) en UNA transacción idempotente (ver AuditWriteError).
-  recordEvidence(runId: string, evidence: AnalysisEvidence): Promise<void>;
-  recordFailure(runId: string, errorCode: AuditErrorCode): Promise<void>;
-  recordReply(runId: string, reply: { state: ReplyAuditState; result: QuoteResult; processingStatus: "COMPLETED" | "FAILED"; providerMessageId?: string }): Promise<void>;
+  recordEvidence(runId: string, evidence: AnalysisEvidence, lease: AuditLease): Promise<void>;
+  recordFailure(runId: string, errorCode: AuditErrorCode, lease: AuditLease): Promise<void>;
+  // Reserva de envío bajo bloqueo de fila: debe concederse ANTES de llamar a Kapso y es la comprobación de pausa (ver block_send en la migración).
+  reserveSend(runId: string, kind: SendableResult, lease: AuditLease): Promise<SendReservation>;
+  recordReply(runId: string, reply: { state: ReplyAuditState; result: SendableResult; processingStatus: "COMPLETED" | "FAILED"; providerMessageId?: string }, lease: AuditLease): Promise<void>;
+}
+
+export interface RecoverySummary {
+  sendOutcomeUnknown: number;
+  abandonedBeforeSend: number;
+}
+
+// Operaciones de mantenimiento (no forman parte del flujo de un mensaje).
+export interface AuditMaintenance {
+  // Cierra de forma segura lo interrumpido. NUNCA envía ni reintenta envíos.
+  recoverStale(options?: { reservedGraceSeconds?: number; abandonGraceSeconds?: number; limit?: number }): Promise<RecoverySummary>;
+  // Preparación para una intervención humana: impide una respuesta pendiente si todavía no se reservó el envío.
+  blockSend(messageId: string, reason: string): Promise<"blocked" | "too_late" | "not_found" | "closed" | "unsupported">;
 }
 
 export type AuditErrorCode =
@@ -60,7 +91,8 @@ export interface AnalysisEvidence {
 //   REJECTED         el servidor rechazó el contenido (HTTP 4xx): no se reintenta, no hay nada confirmado.
 //   CONFLICT         ya había evidencia confirmada con OTRO contenido (HTTP 409): lo confirmado no se modifica.
 //   UNKNOWN_OUTCOME  no se supo si se confirmó (timeout, red caída, 5xx) tras agotar los reintentos idénticos: puede haberse confirmado o no.
-export type AuditWriteErrorKind = "REJECTED" | "CONFLICT" | "UNKNOWN_OUTCOME";
+//   LEASE_LOST       la ejecución ya no posee el lease (HTTP 410): no debe escribir ni enviar nada más.
+export type AuditWriteErrorKind = "REJECTED" | "CONFLICT" | "UNKNOWN_OUTCOME" | "LEASE_LOST";
 export class AuditWriteError extends Error {
   constructor(readonly kind: AuditWriteErrorKind, readonly httpStatus?: number) {
     super(`audit_write_${kind.toLowerCase()}`);
@@ -114,6 +146,9 @@ export interface SupabaseAuditOptions {
   // supo su resultado; retryDelayMs es la espera entre ambos intentos.
   requestTimeoutMs?: number;
   retryDelayMs?: number;
+  // Duración del lease al reclamar un mensaje y de la reserva de envío (segundos). Por defecto 120. La seguridad NO depende de estos plazos (ver reserva).
+  leaseSeconds?: number;
+  sendLeaseSeconds?: number;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -298,7 +333,7 @@ export function buildEvidencePayload(evidence: AnalysisEvidence, runtime: { engi
   };
 }
 
-export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}): AuditRepository {
+export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}): AuditRepository & AuditMaintenance {
   const baseUrl = (options.baseUrl ?? process.env.SUPABASE_URL)?.replace(/\/+$/, "");
   const serviceKey = options.serviceKey ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!baseUrl || !serviceKey) throw new Error("Supabase audit configuration is required");
@@ -310,17 +345,14 @@ export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}
   const timeoutMs = options.requestTimeoutMs ?? 5000;
   const retryDelayMs = options.retryDelayMs ?? 300;
 
-  async function request(path: string, init: RequestInit = {}): Promise<Response> {
-    const response = await fetchFn(`${baseUrl}/rest/v1/${path}`, { ...init, headers: { ...headers, ...init.headers }, signal: AbortSignal.timeout(timeoutMs) });
-    if (!response.ok) throw new Error(`audit_http_${response.status}`);
-    return response;
-  }
+  const leaseSeconds = options.leaseSeconds ?? 120;
+  const sendLeaseSeconds = options.sendLeaseSeconds ?? 120;
 
   // Llamada a una función transaccional e IDEMPOTENTE de la base. El cuerpo se serializa una vez: si una petición termina sin respuesta (timeout, red caída,
-  // 5xx) no se sabe si la transacción se confirmó; se repite UNA vez con exactamente el mismo contenido, y la base responde 'already_recorded' si ya estaba
-  // confirmada. Si tampoco hay respuesta, el resultado queda DESCONOCIDO (UNKNOWN_OUTCOME): no se reintenta más y el procesamiento sigue (fail-open).
-  // Nunca se lee ni se propaga el cuerpo de un error del servidor.
-  async function rpc(name: string, args: Json): Promise<"recorded" | "already_recorded"> {
+  // 5xx) no se sabe si la transacción se confirmó; se repite UNA vez con exactamente el mismo contenido (todas las funciones usadas aquí responden igual ante
+  // el mismo contenido y el mismo owner/fence). Si tampoco hay respuesta, el resultado queda DESCONOCIDO (UNKNOWN_OUTCOME): no se reintenta más. Nunca se lee
+  // ni se propaga el cuerpo de un error del servidor. 410 = lease perdido (no se reintenta), 409 = conflicto, otros 4xx = rechazo.
+  async function rpc(name: string, args: Json): Promise<Record<string, unknown>> {
     const body = JSON.stringify(args);
     const attempts = 2;
     for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -331,9 +363,10 @@ export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}
         response = undefined; // timeout o fallo de red: puede haberse confirmado
       }
       if (response?.ok) {
-        const result = (await response.json().catch(() => undefined)) as { status?: unknown } | undefined;
-        return result?.status === "already_recorded" ? "already_recorded" : "recorded";
+        const result = (await response.json().catch(() => undefined)) as unknown;
+        return typeof result === "object" && result !== null && !Array.isArray(result) ? (result as Record<string, unknown>) : {};
       }
+      if (response && response.status === 410) throw new AuditWriteError("LEASE_LOST", 410);
       if (response && response.status === 409) throw new AuditWriteError("CONFLICT", 409);
       if (response && response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429) throw new AuditWriteError("REJECTED", response.status);
       if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
@@ -341,41 +374,77 @@ export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}
     throw new AuditWriteError("UNKNOWN_OUTCOME");
   }
 
-  async function patchRun(runId: string, body: Json): Promise<void> {
-    await request(`plusmedik_audit_runs?id=eq.${encodeURIComponent(runId)}`, { method: "PATCH", body: JSON.stringify(body) });
-  }
+  const leaseArgs = (runId: string, lease: AuditLease) => ({ p_run_id: runId, p_owner: lease.owner, p_fence: lease.fence });
+  const str = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
 
   return {
     async claim(image) {
-      const response = await request("plusmedik_audit_runs?on_conflict=kapso_message_id", {
-        method: "POST",
-        headers: { Prefer: "resolution=ignore-duplicates,return=representation" },
-        body: JSON.stringify({ kapso_message_id: image.messageId, kapso_media_id: image.mediaId ?? null, processing_status: "PROCESSING", audit_schema_version: AUDIT_SCHEMA_VERSION, engine_version: engineVersion, flags })
+      // Cada ejecución tiene su propio propietario. La reclamación es atómica en la base (inserta, reconoce un duplicado o reclama un lease vencido).
+      const owner = randomUUID();
+      const result = await rpc("plusmedik_audit_claim_run", {
+        p_message_id: image.messageId,
+        p_media_id: image.mediaId ?? null,
+        p_owner: owner,
+        p_lease_seconds: leaseSeconds,
+        p_schema_version: AUDIT_SCHEMA_VERSION,
+        p_engine_version: engineVersion,
+        p_flags: flags
       });
-      const rows = await response.json() as Array<{ id?: unknown }>;
-      const insertedId = typeof rows[0]?.id === "string" ? rows[0].id : undefined;
-      if (insertedId) return { kind: "claimed", runId: insertedId };
-
-      const duplicate = await request(`plusmedik_audit_runs?kapso_message_id=eq.${encodeURIComponent(image.messageId)}&select=processing_status&limit=1`);
-      const existing = await duplicate.json() as Array<{ processing_status?: unknown }>;
-      return { kind: "duplicate", processingStatus: typeof existing[0]?.processing_status === "string" ? existing[0].processing_status : "UNKNOWN" };
+      const outcome = str(result.outcome);
+      if ((outcome === "claimed" || outcome === "taken_over") && str(result.run_id) && typeof result.fence === "number") {
+        return { kind: "claimed", runId: str(result.run_id)!, lease: { owner, fence: result.fence }, takeover: outcome === "taken_over" };
+      }
+      const reasons = { busy: "BUSY", in_doubt: "IN_DOUBT", finished: "FINISHED", exhausted: "EXHAUSTED" } as const;
+      return { kind: "duplicate", processingStatus: str(result.status) ?? "UNKNOWN", reason: reasons[outcome as keyof typeof reasons] };
     },
-    async recordIgnored(runId, reason) {
-      await patchRun(runId, { processing_status: "IGNORED", error_code: reason, completed_at: new Date().toISOString() });
+    async renewLease(runId, lease) {
+      try {
+        await rpc("plusmedik_audit_renew_lease", { ...leaseArgs(runId, lease), p_lease_seconds: leaseSeconds });
+        return true;
+      } catch (error) {
+        if (error instanceof AuditWriteError && error.kind === "LEASE_LOST") return false;
+        throw error;
+      }
     },
-    async recordEvidence(runId, evidence) {
+    async recordIgnored(runId, reason, lease) {
+      // Imagen demasiado grande o vacía: no habrá respuesta (cierre final). Tipo no soportado: se cierra el análisis y sigue un aviso, que debe reservarse.
+      await rpc("plusmedik_audit_fenced_close", { ...leaseArgs(runId, lease), p_close: { status: "IGNORED", error_code: reason, final: reason === "IMAGE_SIZE" } });
+    },
+    async recordEvidence(runId, evidence, lease) {
       const payload = buildEvidencePayload(evidence, { engineVersion, flags });
-      if (payload) await rpc("plusmedik_audit_record_evidence", { p_run_id: runId, p_payload: payload });
+      if (payload) await rpc("plusmedik_audit_fenced_record_evidence", { ...leaseArgs(runId, lease), p_payload: payload });
     },
-    async recordFailure(runId, errorCode) {
-      await patchRun(runId, { processing_status: "FAILED", error_code: errorCode, completed_at: new Date().toISOString() });
+    async recordFailure(runId, errorCode, lease) {
+      await rpc("plusmedik_audit_fenced_close", { ...leaseArgs(runId, lease), p_close: { status: "FAILED", error_code: errorCode, final: false } });
     },
-    async recordReply(runId, reply) {
+    async reserveSend(runId, kind, lease) {
+      try {
+        const result = await rpc("plusmedik_audit_reserve_send", { ...leaseArgs(runId, lease), p_kind: kind, p_lease_seconds: sendLeaseSeconds });
+        return result.status === "reserved" ? "reserved" : result.status === "blocked" ? "blocked" : "lost";
+      } catch (error) {
+        if (error instanceof AuditWriteError && error.kind === "LEASE_LOST") return "lost";
+        throw error; // CONFLICT / REJECTED / UNKNOWN_OUTCOME: quien llama NO envía
+      }
+    },
+    async recordReply(runId, reply, lease) {
       // Ciclo de vida + verificación REPLY en una sola transacción de la base. El envío a WhatsApp ya ocurrió y nunca se repite desde aquí.
-      await rpc("plusmedik_audit_record_reply", {
-        p_run_id: runId,
+      await rpc("plusmedik_audit_fenced_record_reply", {
+        ...leaseArgs(runId, lease),
         p_reply: { state: reply.state, result: reply.result, processing_status: reply.processingStatus, ...(reply.providerMessageId ? { provider_message_id: reply.providerMessageId } : {}) }
       });
+    },
+    async recoverStale(recovery = {}) {
+      const result = await rpc("plusmedik_audit_recover_stale", {
+        p_reserved_grace_seconds: recovery.reservedGraceSeconds ?? 60,
+        p_abandon_grace_seconds: recovery.abandonGraceSeconds ?? 900,
+        p_limit: recovery.limit ?? 50
+      });
+      return { sendOutcomeUnknown: Number(result.send_outcome_unknown ?? 0), abandonedBeforeSend: Number(result.abandoned_before_send ?? 0) };
+    },
+    async blockSend(messageId, reason) {
+      const result = await rpc("plusmedik_audit_block_send", { p_message_id: messageId, p_reason: reason });
+      const status = str(result.status);
+      return status === "blocked" || status === "too_late" || status === "not_found" || status === "closed" ? status : "unsupported";
     }
   };
 }

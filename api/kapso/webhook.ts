@@ -55,9 +55,11 @@ const realDeps: QuoteDeps = {
   },
   audit: {
     claim: (...args) => audit().claim(...args),
+    renewLease: (...args) => audit().renewLease(...args),
     recordIgnored: (...args) => audit().recordIgnored(...args),
     recordEvidence: (...args) => audit().recordEvidence(...args),
     recordFailure: (...args) => audit().recordFailure(...args),
+    reserveSend: (...args) => audit().reserveSend(...args),
     recordReply: (...args) => audit().recordReply(...args)
   },
   log: (event, data) => console.log(JSON.stringify({ app: "plusmedik", event, ...data }))

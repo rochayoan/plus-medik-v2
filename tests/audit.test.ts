@@ -4,6 +4,8 @@ import { cachedAiCall, withAiCallObserver, type AiCallEvent } from "../src/cache
 import { handleImageMessage, type IncomingImage, type QuoteDeps } from "../src/whatsapp-quote.js";
 import type { AnalysisResult } from "../src/analyze.js";
 
+const LEASE = { owner: "owner-0000001", fence: 1 };
+
 const image: IncomingImage = { messageId: "wamid.audit-1", from: "59170000000", mediaId: "media-1" };
 const jpeg = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, ...new Array(20).fill(0)]);
 
@@ -37,8 +39,10 @@ const analysis = (): AnalysisResult => ({
 
 function audit(overrides: Partial<AuditRepository> = {}): AuditRepository {
   return {
-    claim: vi.fn(async () => ({ kind: "claimed" as const, runId: "run-1" })),
+    claim: vi.fn(async () => ({ kind: "claimed" as const, runId: "run-1", lease: LEASE, takeover: false })),
     recordIgnored: vi.fn(async () => undefined),
+    renewLease: vi.fn(async () => true),
+    reserveSend: vi.fn(async () => "reserved" as const),
     recordEvidence: vi.fn(async () => undefined),
     recordFailure: vi.fn(async () => undefined),
     recordReply: vi.fn(async () => undefined),
@@ -66,7 +70,7 @@ describe("auditoría persistente del webhook", () => {
     await expect(handleImageMessage(image, d)).resolves.toBe("quoted");
     expect(vi.mocked(repo.claim)).toHaveBeenCalledWith({ messageId: image.messageId, mediaId: image.mediaId });
     expect(vi.mocked(d.downloadImage)).toHaveBeenCalledOnce();
-    expect(vi.mocked(repo.recordReply)).toHaveBeenCalledWith("run-1", { state: "ACCEPTED", result: "quoted", processingStatus: "COMPLETED", providerMessageId: "wamid.outbound" });
+    expect(vi.mocked(repo.recordReply)).toHaveBeenCalledWith("run-1", { state: "ACCEPTED", result: "quoted", processingStatus: "COMPLETED", providerMessageId: "wamid.outbound" }, LEASE);
   });
 
   it("un WAMID duplicado no descarga, analiza ni responde", async () => {
@@ -80,7 +84,7 @@ describe("auditoría persistente del webhook", () => {
 
   it("el claim único soporta dos ejecuciones concurrentes sin segundo envío", async () => {
     let claims = 0;
-    const repo = audit({ claim: vi.fn(async () => ++claims === 1 ? { kind: "claimed" as const, runId: "run-1" } : { kind: "duplicate" as const, processingStatus: "PROCESSING" }) });
+    const repo = audit({ claim: vi.fn(async () => ++claims === 1 ? { kind: "claimed" as const, runId: "run-1", lease: LEASE, takeover: false } : { kind: "duplicate" as const, processingStatus: "PROCESSING" }) });
     const d = deps(repo);
     await Promise.all([handleImageMessage(image, d), handleImageMessage(image, d)]);
     expect(d.sendText).toHaveBeenCalledTimes(1);
@@ -101,7 +105,7 @@ describe("auditoría persistente del webhook", () => {
     const d = deps(repo);
     d.sendText = vi.fn(async () => { throw new Error("timeout"); });
     await expect(handleImageMessage(image, d)).resolves.toBe("quoted");
-    expect(vi.mocked(repo.recordReply)).toHaveBeenCalledWith("run-1", { state: "UNKNOWN", result: "quoted", processingStatus: "COMPLETED" });
+    expect(vi.mocked(repo.recordReply)).toHaveBeenCalledWith("run-1", { state: "UNKNOWN", result: "quoted", processingStatus: "COMPLETED" }, LEASE);
     expect(d.sendText).toHaveBeenCalledTimes(1);
   });
 
@@ -110,8 +114,8 @@ describe("auditoría persistente del webhook", () => {
     const d = deps(repo);
     d.analyze = vi.fn(async () => { throw new Error("OpenAI unavailable secret=not-logged"); });
     await expect(handleImageMessage(image, d)).resolves.toBe("technical_issue");
-    expect(vi.mocked(repo.recordFailure)).toHaveBeenCalledWith("run-1", "AI_PROCESSING_FAILED");
-    expect(vi.mocked(repo.recordReply)).toHaveBeenCalledWith("run-1", expect.objectContaining({ state: "ACCEPTED", result: "technical_issue", processingStatus: "FAILED" }));
+    expect(vi.mocked(repo.recordFailure)).toHaveBeenCalledWith("run-1", "AI_PROCESSING_FAILED", LEASE);
+    expect(vi.mocked(repo.recordReply)).toHaveBeenCalledWith("run-1", expect.objectContaining({ state: "ACCEPTED", result: "technical_issue", processingStatus: "FAILED" }), LEASE);
     expect(JSON.stringify(vi.mocked(d.log).mock.calls)).not.toContain("secret=not-logged");
   });
 
@@ -132,8 +136,8 @@ describe("auditoría persistente del webhook", () => {
       throw new Error("OpenAI unavailable");
     };
     await expect(handleImageMessage(image, d)).resolves.toBe("technical_issue");
-    expect(vi.mocked(repo.recordEvidence)).toHaveBeenCalledWith("run-1", { aiCalls: [expect.objectContaining({ label: "openai-reader", outcome: "OK", usage: { inputTokens: 7 } })] });
-    expect(vi.mocked(repo.recordFailure)).toHaveBeenCalledWith("run-1", "AI_PROCESSING_FAILED");
+    expect(vi.mocked(repo.recordEvidence)).toHaveBeenCalledWith("run-1", { aiCalls: [expect.objectContaining({ label: "openai-reader", outcome: "OK", usage: { inputTokens: 7 } })] }, LEASE);
+    expect(vi.mocked(repo.recordFailure)).toHaveBeenCalledWith("run-1", "AI_PROCESSING_FAILED", LEASE);
   });
 });
 
@@ -156,13 +160,13 @@ describe("serialización segura de auditoría", () => {
       serviceKey: "test-service-key",
       fetchFn: async (input, init) => {
         requests.push(`${String(input)}\n${String(init?.body ?? "")}`);
-        if (String(input).includes("on_conflict")) return new Response(JSON.stringify([{ id: "run-1" }]), { status: 201 });
-        return new Response("", { status: 201 });
+        if (String(input).includes("plusmedik_audit_claim_run")) return new Response(JSON.stringify({ outcome: "claimed", run_id: "run-1", fence: 1 }), { status: 200 });
+        return new Response("{}", { status: 200 });
       }
     });
     const claim = await repository.claim(image);
     if (claim.kind !== "claimed") throw new Error("expected claim");
-    await repository.recordEvidence(claim.runId, { analysis: analysis(), aiCalls: [{ label: "gemini-openrouter", provider: "openrouter", model: "m", cacheHit: false, outcome: "OK", usage: { inputTokens: 2, outputTokens: 3, costUsd: 0.004 }, value: { requestedStudies: [{ literalText: "PACIENTE_SENTINELA", evidence: "check", confidence: "high" }], uncertainStudies: [] } }] });
+    await repository.recordEvidence(claim.runId, { analysis: analysis(), aiCalls: [{ label: "gemini-openrouter", provider: "openrouter", model: "m", cacheHit: false, outcome: "OK", usage: { inputTokens: 2, outputTokens: 3, costUsd: 0.004 }, value: { requestedStudies: [{ literalText: "PACIENTE_SENTINELA", evidence: "check", confidence: "high" }], uncertainStudies: [] } }] }, LEASE);
     const dump = requests.join("\n");
     for (const forbidden of ["59170000000", "PACIENTE_SENTINELA", "RAZON_PRIVADA", "TEXTO_PRIVADO", "test-service-key"]) expect(dump).not.toContain(forbidden);
     expect(dump).toContain("108");

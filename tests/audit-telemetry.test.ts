@@ -21,6 +21,8 @@ import { handleImageMessage, type IncomingImage, type QuoteDeps } from "../src/w
 import type { AnalysisResult } from "../src/analyze.js";
 import type { CatalogStudy } from "../src/types.js";
 
+const LEASE = { owner: "owner-0000001", fence: 1 };
+
 let dir: string;
 let stderr: ReturnType<typeof vi.spyOn>;
 
@@ -237,14 +239,14 @@ function repositoryWith(options: Partial<Parameters<typeof createSupabaseAuditRe
     fetchFn: async (input, init) => {
       const path = String(input).replace("https://example.supabase.co/rest/v1/", "");
       requests.push({ method: String(init?.method ?? "GET"), path, body: init?.body ? JSON.parse(String(init.body)) : undefined });
-      if (path.includes("on_conflict")) return new Response(JSON.stringify([{ id: "run-1" }]), { status: 201 });
-      return new Response("", { status: 201 });
+      if (path.includes("plusmedik_audit_claim_run")) return new Response(JSON.stringify({ outcome: "claimed", run_id: "run-1", fence: 1 }), { status: 200 });
+      return new Response("{}", { status: 200 });
     },
     ...options
   });
   return { repository, requests };
 }
-const EVIDENCE_RPC = "rpc/plusmedik_audit_record_evidence";
+const EVIDENCE_RPC = "rpc/plusmedik_audit_fenced_record_evidence";
 const evidenceOf = (requests: Captured[]) => requests.find((request) => request.path === EVIDENCE_RPC)?.body.p_payload as Record<string, any> | undefined;
 const rowsOf = (requests: Captured[]) => (evidenceOf(requests)?.model_calls ?? []) as Array<Record<string, unknown>>;
 const image: IncomingImage = { messageId: "wamid.telemetry-1", from: "59170000000", mediaId: "media-1" };
@@ -256,7 +258,7 @@ describe("persistencia de la telemetría", () => {
       await Promise.all([call("ok", { delay: 15, usage: { inputTokens: 10, outputTokens: 4, reasoningTokens: 2, costUsd: 0.0123 } }), call("falla", { fail: failing }).catch(() => undefined), call("sin-uso")]);
     });
     const { repository, requests } = repositoryWith();
-    await repository.recordEvidence("run-1", { aiCalls: events });
+    await repository.recordEvidence("run-1", { aiCalls: events }, LEASE);
     const rows = rowsOf(requests);
     expect(rows).toHaveLength(3);
     const byStage = (stage: string) => rows.find((row) => row.stage === stage)!;
@@ -270,13 +272,13 @@ describe("persistencia de la telemetría", () => {
   it("solo informa costo si el proveedor lo reportó: tokens sin costo no generan costo", async () => {
     const { events } = await observed(async () => { await call("tokens", { usage: { inputTokens: 3, outputTokens: 1 } }); });
     const { repository, requests } = repositoryWith();
-    await repository.recordEvidence("run-1", { aiCalls: events });
+    await repository.recordEvidence("run-1", { aiCalls: events }, LEASE);
     expect(rowsOf(requests)[0]).toMatchObject({ cost_usd: null, cost_status: "TOKENS_ONLY", input_tokens: 3 });
   });
 
   it("un cache hit no consume tokens ni costo en este procesamiento: el uso guardado no se persiste", async () => {
     const { repository, requests } = repositoryWith();
-    await repository.recordEvidence("run-1", { aiCalls: [{ label: "x", provider: "p", model: "m", cacheHit: true, outcome: "CACHE_HIT", usage: { inputTokens: 999, outputTokens: 99, costUsd: 5 }, callSeq: 1, attempt: 1 }] });
+    await repository.recordEvidence("run-1", { aiCalls: [{ label: "x", provider: "p", model: "m", cacheHit: true, outcome: "CACHE_HIT", usage: { inputTokens: 999, outputTokens: 99, costUsd: 5 }, callSeq: 1, attempt: 1 }] }, LEASE);
     expect(rowsOf(requests)[0]).toMatchObject({ cache_hit: true, input_tokens: null, output_tokens: null, reasoning_tokens: null, cost_usd: null, cost_status: "NO_PROVIDER_CALL" });
   });
 
@@ -288,7 +290,7 @@ describe("persistencia de la telemetría", () => {
     });
     const { repository, requests } = repositoryWith({ runtime: { engineVersion: "A1B2C3D4E5F6", flags: { semanticPrimary: true, apiKey: "sk-live-abc", note: "texto libre con espacios", authToken: "x" } } });
     await repository.claim(image);
-    await repository.recordEvidence("run-1", { aiCalls: events });
+    await repository.recordEvidence("run-1", { aiCalls: events }, LEASE);
     const dump = JSON.stringify(requests);
     for (const forbidden of ["PROMPT_SENTINELA_PACIENTE", "SECRETO", "JUAN PEREZ", "test-service-key-SECRETA", "59170000000", "sk-live-abc", "texto libre", "authToken"]) expect(dump).not.toContain(forbidden);
   });
@@ -297,7 +299,7 @@ describe("persistencia de la telemetría", () => {
     const legacy: AiCallEvent = { label: "legado", provider: "p", model: "m", cacheHit: false, outcome: "OK", usage: { inputTokens: 2 } };
     const { events } = await observed(async () => { await call("nuevo", { usage: { inputTokens: 2 } }); });
     const { repository, requests } = repositoryWith();
-    await repository.recordEvidence("run-1", { aiCalls: [legacy, ...events] });
+    await repository.recordEvidence("run-1", { aiCalls: [legacy, ...events] }, LEASE);
     const [oldRow, newRow] = rowsOf(requests);
     expect(Object.keys(oldRow!).sort()).toEqual(Object.keys(newRow!).sort());
     expect(oldRow).toMatchObject({ call_seq: null, completion_seq: null, attempt: null, started_at: null, duration_ms: null, reasoning_effort: null, params_hash: null, error_kind: null });
@@ -306,7 +308,7 @@ describe("persistencia de la telemetría", () => {
   it("valores fuera de rango o con formato inesperado se descartan (NULL) en vez de llegar a la base", async () => {
     const odd = { label: "raro", provider: "p", model: "m", cacheHit: false, outcome: "OK", callSeq: 0, completionSeq: -3, attempt: 1.5, durationMs: -1, startedAt: "no es fecha", reasoningEffort: "alto; drop table", paramsHash: "xyz", errorKind: "texto libre" } as unknown as AiCallEvent;
     const { repository, requests } = repositoryWith();
-    await repository.recordEvidence("run-1", { aiCalls: [odd] });
+    await repository.recordEvidence("run-1", { aiCalls: [odd] }, LEASE);
     expect(rowsOf(requests)[0]).toMatchObject({ call_seq: null, completion_seq: null, attempt: null, duration_ms: null, started_at: null, reasoning_effort: null, params_hash: null, error_kind: null });
   });
 });
@@ -315,22 +317,23 @@ describe("versionado de configuración", () => {
   it("el claim registra versión del contrato, versión del motor y banderas funcionales", async () => {
     const { repository, requests } = repositoryWith({ runtime: { engineVersion: "A1B2C3D4E5F6A7B8", flags: { semanticPrimary: true, handwrittenAuto: "on", partialAuto: true } } });
     await repository.claim(image);
-    expect(requests[0]!.body).toMatchObject({ audit_schema_version: AUDIT_SCHEMA_VERSION, engine_version: "a1b2c3d4e5f6a7b8", flags: { handwrittenAuto: "on", partialAuto: true, semanticPrimary: true } });
+    expect(requests[0]!.path).toBe("rpc/plusmedik_audit_claim_run");
+    expect(requests[0]!.body).toMatchObject({ p_schema_version: AUDIT_SCHEMA_VERSION, p_engine_version: "a1b2c3d4e5f6a7b8", p_flags: { handwrittenAuto: "on", partialAuto: true, semanticPrimary: true } });
   });
 
   it("sin versión de motor disponible queda desconocida (NULL), no inventada; VERCEL_GIT_COMMIT_SHA se usa si es válida", async () => {
     vi.stubEnv("VERCEL_GIT_COMMIT_SHA", "");
     const none = repositoryWith();
     await none.repository.claim(image);
-    expect(none.requests[0]!.body).toMatchObject({ engine_version: null, flags: {} });
+    expect(none.requests[0]!.body).toMatchObject({ p_engine_version: null, p_flags: {} });
     vi.stubEnv("VERCEL_GIT_COMMIT_SHA", "b4fec3484bd0feb3e3a564a1c22cf7ee125ed3ae");
     const fromEnv = repositoryWith();
     await fromEnv.repository.claim(image);
-    expect(fromEnv.requests[0]!.body.engine_version).toBe("b4fec3484bd0feb3e3a564a1c22cf7ee125ed3ae");
+    expect(fromEnv.requests[0]!.body.p_engine_version).toBe("b4fec3484bd0feb3e3a564a1c22cf7ee125ed3ae");
     vi.stubEnv("VERCEL_GIT_COMMIT_SHA", "no-es-un-sha; select *");
     const invalid = repositoryWith();
     await invalid.repository.claim(image);
-    expect(invalid.requests[0]!.body.engine_version).toBeNull();
+    expect(invalid.requests[0]!.body.p_engine_version).toBeNull();
   });
 
   it("sanitizeFlags descarta secretos, textos libres y valores no simples", () => {
@@ -355,10 +358,10 @@ describe("versionado de configuración", () => {
   it("recordEvidence guarda el hash de configuración del procesamiento y no escribe nada si no hubo análisis ni llamadas", async () => {
     const { events } = await observed(async () => { await call("uno"); });
     const { repository, requests } = repositoryWith({ runtime: { engineVersion: "abc1234", flags: { semanticPrimary: true } } });
-    await repository.recordEvidence("run-1", { aiCalls: events });
+    await repository.recordEvidence("run-1", { aiCalls: events }, LEASE);
     expect(evidenceOf(requests)!.run).toEqual({ config_hash: computeConfigHash({ engineVersion: "abc1234", flags: { semanticPrimary: true }, events }) });
     const empty = repositoryWith();
-    await empty.repository.recordEvidence("run-1", { aiCalls: [] });
+    await empty.repository.recordEvidence("run-1", { aiCalls: [] }, LEASE);
     expect(empty.requests).toHaveLength(0);
   });
 
@@ -381,10 +384,10 @@ describe("versionado de configuración", () => {
     const analysis = { decision: "HUMAN_REVIEW", reasons: [], finalVisualStudies: [], disputes: [], judgeResolved: [], unresolvedDisputes: [], matches: [], unmatched: [], ambiguous: [], modelSuggested: [] } as AnalysisResult;
     const fingerprint = catalogFingerprint([study("1", 10)]);
     const withCatalog = repositoryWith();
-    await withCatalog.repository.recordEvidence("run-1", { analysis, aiCalls: [], catalog: fingerprint });
+    await withCatalog.repository.recordEvidence("run-1", { analysis, aiCalls: [], catalog: fingerprint }, LEASE);
     expect(evidenceOf(withCatalog.requests)!.run).toMatchObject({ catalog_hash: fingerprint.hash, catalog_size: 1 });
     const without = repositoryWith();
-    await without.repository.recordEvidence("run-1", { analysis, aiCalls: [] });
+    await without.repository.recordEvidence("run-1", { analysis, aiCalls: [] }, LEASE);
     expect(evidenceOf(without.requests)!.run).not.toHaveProperty("catalog_hash");
     expect(evidenceOf(without.requests)!.run).not.toHaveProperty("catalog_size");
   });
@@ -395,8 +398,10 @@ describe("versionado de configuración", () => {
 const jpeg = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, ...new Array(20).fill(0)]);
 function auditSpy(): AuditRepository {
   return {
-    claim: vi.fn(async () => ({ kind: "claimed" as const, runId: "run-1" })),
+    claim: vi.fn(async () => ({ kind: "claimed" as const, runId: "run-1", lease: LEASE, takeover: false })),
     recordIgnored: vi.fn(async () => undefined),
+    renewLease: vi.fn(async () => true),
+    reserveSend: vi.fn(async () => "reserved" as const),
     recordEvidence: vi.fn(async () => undefined),
     recordFailure: vi.fn(async () => undefined),
     recordReply: vi.fn(async () => undefined)
@@ -421,22 +426,22 @@ describe("clasificación de fallos del procesamiento: por etapa, no por texto", 
   it("cada etapa produce su código aunque el mensaje mencione palabras de otra", async () => {
     const download = quoteDeps({ downloadImage: vi.fn(async () => { throw new Error("catalog openai gemini"); }) });
     await handleImageMessage(image, download.deps);
-    expect(download.audit.recordFailure).toHaveBeenCalledWith("run-1", "MEDIA_DOWNLOAD_FAILED");
+    expect(download.audit.recordFailure).toHaveBeenCalledWith("run-1", "MEDIA_DOWNLOAD_FAILED", LEASE);
 
     const catalog = quoteDeps({ loadCatalog: vi.fn(async () => { throw new Error("media download image openai"); }) });
     await handleImageMessage(image, catalog.deps);
-    expect(catalog.audit.recordFailure).toHaveBeenCalledWith("run-1", "CATALOG_LOAD_FAILED");
+    expect(catalog.audit.recordFailure).toHaveBeenCalledWith("run-1", "CATALOG_LOAD_FAILED", LEASE);
 
     const analysis = quoteDeps({ analyze: vi.fn(async () => { throw new Error("catalog supabase media download image"); }) });
     await handleImageMessage(image, analysis.deps);
-    expect(analysis.audit.recordFailure).toHaveBeenCalledWith("run-1", "AI_PROCESSING_FAILED");
+    expect(analysis.audit.recordFailure).toHaveBeenCalledWith("run-1", "AI_PROCESSING_FAILED", LEASE);
   });
 
   it("un fallo posterior al análisis es inesperado y nunca se persiste ni se registra el mensaje del error", async () => {
     const after = quoteDeps({});
     after.deps.analyze = vi.fn(async () => ({ get outcome(): never { throw new Error(`${misleading} secret=sk-SECRETO`); } }) as unknown as AnalysisResult);
     await expect(handleImageMessage(image, after.deps)).resolves.toBe("technical_issue");
-    expect(after.audit.recordFailure).toHaveBeenCalledWith("run-1", "UNEXPECTED_PROCESSING_FAILED");
+    expect(after.audit.recordFailure).toHaveBeenCalledWith("run-1", "UNEXPECTED_PROCESSING_FAILED", LEASE);
     expect(JSON.stringify([vi.mocked(after.audit.recordFailure).mock.calls, after.logs])).not.toContain("SECRETO");
     expect(JSON.stringify(after.logs)).not.toContain("secret=");
   });
@@ -550,12 +555,14 @@ describe("migración aditiva de telemetría", () => {
       analysis: { decision: "HUMAN_REVIEW", reasons: [], finalVisualStudies: [], disputes: [], judgeResolved: [], unresolvedDisputes: [], matches: [], unmatched: [], ambiguous: [], modelSuggested: [] } as AnalysisResult,
       aiCalls: events,
       catalog: catalogFingerprint(catalog)
-    });
+    }, LEASE);
 
-    // columnas que escribe el repositorio: el claim (INSERT en runs) y las secciones del contenido de la función transaccional
-    const claimKeys = Object.keys(requests.find((request) => request.path.startsWith("plusmedik_audit_runs"))!.body);
+    // columnas que escribe el repositorio: los argumentos del claim (que la función de la base guarda en runs) y la sección del contenido de la función transaccional
+    const claimColumns: Record<string, string> = { p_schema_version: "audit_schema_version", p_engine_version: "engine_version", p_flags: "flags" };
+    const claim = requests.find((request) => request.path === "rpc/plusmedik_audit_claim_run")!.body;
+    for (const key of Object.keys(claim)) expect(Object.keys(claimColumns).concat(["p_message_id", "p_media_id", "p_owner", "p_lease_seconds"]), key).toContain(key);
     const payload = evidenceOf(requests)!;
-    const runKeys: string[] = [...claimKeys, ...Object.keys(payload.run)];
+    const runKeys: string[] = [...Object.keys(claim).flatMap((key) => (claimColumns[key] ? [claimColumns[key]!] : [])), ...Object.keys(payload.run)];
     const callKeys = new Set<string>(payload.model_calls.flatMap((row: object) => Object.keys(row)));
     const runColumns = new Set([...original_("plusmedik_audit_runs"), ...added("plusmedik_audit_runs", sql), ...added("plusmedik_audit_runs", transactional)]);
     const callColumns = new Set([...original_("plusmedik_audit_model_calls"), ...added("plusmedik_audit_model_calls", sql)]);

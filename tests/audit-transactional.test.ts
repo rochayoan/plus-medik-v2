@@ -7,6 +7,8 @@ import type { AnalysisResult } from "../src/analyze.js";
 import type { AiCallEvent } from "../src/cache.js";
 import { handleImageMessage, type IncomingImage, type QuoteDeps } from "../src/whatsapp-quote.js";
 
+const LEASE = { owner: "owner-0000001", fence: 1 };
+
 // Cliente de la escritura transaccional: reintentos idénticos, resultado desconocido, rechazos, fail-open y "nunca reenviar WhatsApp".
 // El servidor es una simulación (ninguna red). El comportamiento de la base (transacción, idempotencia por hash, bloqueo por corrida) se prueba
 // contra PostgreSQL real en tests/audit-db.test.ts.
@@ -25,10 +27,11 @@ function fakeSupabase(script: Behavior[] = []) {
     const path = String(input).replace("https://example.supabase.co/rest/v1/", "");
     const body = String(init?.body ?? "");
     calls.push({ path, body, hadSignal: init?.signal instanceof AbortSignal });
-    if (!path.startsWith("rpc/")) {
-      if (path.includes("on_conflict")) return new Response(JSON.stringify([{ id: "run-1" }]), { status: 201 });
-      return new Response("", { status: 204 });
-    }
+    if (!path.startsWith("rpc/")) return new Response("", { status: 204 });
+    // claim, reserva y renovación responden bien sin consumir el guion: el guion describe solo las escrituras de evidencia y de resultado de envío.
+    if (path === "rpc/plusmedik_audit_claim_run") return new Response(JSON.stringify({ outcome: "claimed", run_id: "run-1", fence: 1 }), { status: 200 });
+    if (path === "rpc/plusmedik_audit_reserve_send") return new Response(JSON.stringify({ status: "reserved" }), { status: 200 });
+    if (path === "rpc/plusmedik_audit_renew_lease") return new Response(JSON.stringify({ status: "renewed" }), { status: 200 });
     const behavior = script.shift() ?? "ok";
     const key = `${path}:${(JSON.parse(body) as { p_run_id: string }).p_run_id}`;
     const commit = (): "recorded" | "already_recorded" | "conflict" => {
@@ -50,7 +53,8 @@ function fakeSupabase(script: Behavior[] = []) {
       case "http409": return new Response(SERVER_SECRET, { status: 409 });
     }
   }) as typeof fetch;
-  return { fetchFn, calls, committed, rpcCalls: () => calls.filter((call) => call.path.startsWith("rpc/")) };
+  // Solo las escrituras de evidencia y de resultado de envío (las que el guion controla).
+  return { fetchFn, calls, committed, rpcCalls: () => calls.filter((call) => /^rpc\/plusmedik_audit_fenced_record_(evidence|reply)$/.test(call.path)) };
 }
 
 const repositoryOver = (server: ReturnType<typeof fakeSupabase>, extra: Record<string, unknown> = {}) =>
@@ -64,14 +68,14 @@ const evidence = { aiCalls: events };
 describe("escritura transaccional: reintentos idénticos y resultado desconocido", () => {
   it("la primera petición se confirma: no hay reintento", async () => {
     const server = fakeSupabase();
-    await repositoryOver(server).recordEvidence("run-1", evidence);
+    await repositoryOver(server).recordEvidence("run-1", evidence, LEASE);
     expect(server.rpcCalls()).toHaveLength(1);
     expect(server.rpcCalls()[0]!.hadSignal).toBe(true); // toda petición lleva un plazo
   });
 
   it("timeout DESPUÉS de confirmar en la base: el reintento idéntico recibe 'already_recorded' y no se duplica nada", async () => {
     const server = fakeSupabase(["timeout-after-commit", "ok"]);
-    await expect(repositoryOver(server).recordEvidence("run-1", evidence)).resolves.toBeUndefined();
+    await expect(repositoryOver(server).recordEvidence("run-1", evidence, LEASE)).resolves.toBeUndefined();
     const [first, second] = server.rpcCalls();
     expect(second!.body).toBe(first!.body); // exactamente los mismos bytes
     expect(server.committed.size).toBe(1);
@@ -79,20 +83,20 @@ describe("escritura transaccional: reintentos idénticos y resultado desconocido
 
   it("timeout ANTES de confirmar: el reintento idéntico lo confirma", async () => {
     const server = fakeSupabase(["timeout-before-commit", "ok"]);
-    await repositoryOver(server).recordEvidence("run-1", evidence);
+    await repositoryOver(server).recordEvidence("run-1", evidence, LEASE);
     expect(server.rpcCalls()).toHaveLength(2);
     expect(server.committed.size).toBe(1);
   });
 
   it.each<[Behavior]>([["http500"], ["http502"], ["network"]])("%s en el primer intento se reintenta una vez", async (behavior) => {
     const server = fakeSupabase([behavior, "ok"]);
-    await repositoryOver(server).recordEvidence("run-1", evidence);
+    await repositoryOver(server).recordEvidence("run-1", evidence, LEASE);
     expect(server.rpcCalls()).toHaveLength(2);
   });
 
   it("si ninguno de los dos intentos responde, el resultado queda DESCONOCIDO: exactamente 2 peticiones, sin más reintentos", async () => {
     const server = fakeSupabase(["timeout-after-commit", "timeout-before-commit", "ok", "ok"]);
-    const error = await repositoryOver(server).recordEvidence("run-1", evidence).catch((caught) => caught);
+    const error = await repositoryOver(server).recordEvidence("run-1", evidence, LEASE).catch((caught) => caught);
     expect(error).toBeInstanceOf(AuditWriteError);
     expect(error).toMatchObject({ kind: "UNKNOWN_OUTCOME" });
     expect(server.rpcCalls()).toHaveLength(2);
@@ -100,7 +104,7 @@ describe("escritura transaccional: reintentos idénticos y resultado desconocido
 
   it("fallo de conexión en ambos intentos: UNKNOWN_OUTCOME, sin filtrar el texto del error de red", async () => {
     const server = fakeSupabase(["network", "network"]);
-    const error = (await repositoryOver(server).recordEvidence("run-1", evidence).catch((caught) => caught)) as AuditWriteError;
+    const error = (await repositoryOver(server).recordEvidence("run-1", evidence, LEASE).catch((caught) => caught)) as AuditWriteError;
     expect(error.kind).toBe("UNKNOWN_OUTCOME");
     expect(error.message).toBe("audit_write_unknown_outcome");
     expect(JSON.stringify([error.message, error.stack?.split("\n")[0], (error as { cause?: unknown }).cause])).not.toContain(SERVER_SECRET);
@@ -108,7 +112,7 @@ describe("escritura transaccional: reintentos idénticos y resultado desconocido
 
   it("un rechazo del servidor (4xx) no se reintenta y no propaga su cuerpo", async () => {
     const server = fakeSupabase(["http422", "ok"]);
-    const error = (await repositoryOver(server).recordEvidence("run-1", evidence).catch((caught) => caught)) as AuditWriteError;
+    const error = (await repositoryOver(server).recordEvidence("run-1", evidence, LEASE).catch((caught) => caught)) as AuditWriteError;
     expect(error).toMatchObject({ kind: "REJECTED", httpStatus: 422 });
     expect(error.message).not.toContain(SERVER_SECRET);
     expect(server.rpcCalls()).toHaveLength(1);
@@ -116,15 +120,15 @@ describe("escritura transaccional: reintentos idénticos y resultado desconocido
 
   it("un conflicto (contenido distinto ya confirmado) no se reintenta ni se sobrescribe", async () => {
     const server = fakeSupabase(["http409", "ok"]);
-    const error = (await repositoryOver(server).recordEvidence("run-1", evidence).catch((caught) => caught)) as AuditWriteError;
+    const error = (await repositoryOver(server).recordEvidence("run-1", evidence, LEASE).catch((caught) => caught)) as AuditWriteError;
     expect(error).toMatchObject({ kind: "CONFLICT", httpStatus: 409 });
     expect(error.message).not.toContain(SERVER_SECRET);
     expect(server.rpcCalls()).toHaveLength(1);
     // y contra el servidor simulado con estado: otro contenido para la misma corrida da conflicto real
     const stateful = fakeSupabase();
-    await repositoryOver(stateful).recordEvidence("run-9", evidence);
+    await repositoryOver(stateful).recordEvidence("run-9", evidence, LEASE);
     const other = { aiCalls: [{ ...events[0]!, durationMs: 999 }] };
-    await expect(repositoryOver(stateful).recordEvidence("run-9", other)).rejects.toMatchObject({ kind: "CONFLICT" });
+    await expect(repositoryOver(stateful).recordEvidence("run-9", other, LEASE)).rejects.toMatchObject({ kind: "CONFLICT" });
   });
 
   it("un plazo vencido de verdad (la petición nunca responde) corta cada intento y termina en UNKNOWN_OUTCOME", async () => {
@@ -135,26 +139,26 @@ describe("escritura transaccional: reintentos idénticos y resultado desconocido
     }) as unknown as typeof fetch;
     const repository = createSupabaseAuditRepository({ baseUrl: "https://example.supabase.co", serviceKey: "k", fetchFn: hanging, requestTimeoutMs: 25, retryDelayMs: 0 });
     const started = Date.now();
-    await expect(repository.recordEvidence("run-1", evidence)).rejects.toMatchObject({ kind: "UNKNOWN_OUTCOME" });
+    await expect(repository.recordEvidence("run-1", evidence, LEASE)).rejects.toMatchObject({ kind: "UNKNOWN_OUTCOME" });
     expect(calls).toBe(2);
     expect(Date.now() - started).toBeLessThan(2000);
   });
 
   it("el envío se registra con la misma política (una transacción, reintento idéntico, resultado desconocido)", async () => {
     const server = fakeSupabase(["timeout-after-commit", "ok"]);
-    await repositoryOver(server).recordReply("run-1", { state: "ACCEPTED", result: "quoted", processingStatus: "COMPLETED", providerMessageId: "wamid.out" });
+    await repositoryOver(server).recordReply("run-1", { state: "ACCEPTED", result: "quoted", processingStatus: "COMPLETED", providerMessageId: "wamid.out" }, LEASE);
     const [first, second] = server.rpcCalls();
-    expect(first!.path).toBe("rpc/plusmedik_audit_record_reply");
+    expect(first!.path).toBe("rpc/plusmedik_audit_fenced_record_reply");
     expect(second!.body).toBe(first!.body);
-    expect(JSON.parse(first!.body)).toEqual({ p_run_id: "run-1", p_reply: { state: "ACCEPTED", result: "quoted", processing_status: "COMPLETED", provider_message_id: "wamid.out" } });
+    expect(JSON.parse(first!.body)).toEqual({ p_run_id: "run-1", p_owner: LEASE.owner, p_fence: LEASE.fence, p_reply: { state: "ACCEPTED", result: "quoted", processing_status: "COMPLETED", provider_message_id: "wamid.out" } });
     const unknown = fakeSupabase(["network", "network"]);
-    await expect(repositoryOver(unknown).recordReply("run-1", { state: "UNKNOWN", result: "no_quote", processingStatus: "COMPLETED" })).rejects.toMatchObject({ kind: "UNKNOWN_OUTCOME" });
+    await expect(repositoryOver(unknown).recordReply("run-1", { state: "UNKNOWN", result: "no_quote", processingStatus: "COMPLETED" }, LEASE)).rejects.toMatchObject({ kind: "UNKNOWN_OUTCOME" });
     expect(JSON.parse(unknown.rpcCalls()[0]!.body).p_reply).not.toHaveProperty("provider_message_id");
   });
 
   it("sin análisis ni llamadas de IA no hay nada que registrar: no se llama a la base", async () => {
     const server = fakeSupabase();
-    await repositoryOver(server).recordEvidence("run-1", { aiCalls: [] });
+    await repositoryOver(server).recordEvidence("run-1", { aiCalls: [] }, LEASE);
     expect(server.calls).toHaveLength(0);
   });
 });
@@ -241,7 +245,7 @@ describe("fail-open y envío a WhatsApp", () => {
     expect(JSON.parse(server.rpcCalls().at(-1)!.body).p_reply).toMatchObject({ state: "UNKNOWN" });
   });
 
-  const spyAudit = (): AuditRepository => ({ claim: vi.fn(async () => ({ kind: "claimed" as const, runId: "run-1" })), recordIgnored: vi.fn(), recordEvidence: vi.fn(async () => undefined), recordFailure: vi.fn(async () => undefined), recordReply: vi.fn(async () => undefined) });
+  const spyAudit = (): AuditRepository => ({ claim: vi.fn(async () => ({ kind: "claimed" as const, runId: "run-1", lease: LEASE, takeover: false })), recordIgnored: vi.fn(), renewLease: vi.fn(async () => true), reserveSend: vi.fn(async () => "reserved" as const), recordEvidence: vi.fn(async () => undefined), recordFailure: vi.fn(async () => undefined), recordReply: vi.fn(async () => undefined) });
 
   it("si el análisis falla, solo se registran las llamadas de IA que ocurrieron (sin resumen inventado) y una sola vez", async () => {
     const audit = spyAudit();
@@ -249,7 +253,7 @@ describe("fail-open y envío a WhatsApp", () => {
     await expect(handleImageMessage(image, deps)).resolves.toBe("technical_issue");
     expect(vi.mocked(audit.recordEvidence)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(audit.recordEvidence).mock.calls[0]![1]).not.toHaveProperty("analysis");
-    expect(vi.mocked(audit.recordFailure)).toHaveBeenCalledWith("run-1", "AI_PROCESSING_FAILED");
+    expect(vi.mocked(audit.recordFailure)).toHaveBeenCalledWith("run-1", "AI_PROCESSING_FAILED", LEASE);
   });
 
   it("si la evidencia del análisis ya se intentó y algo falla después, no se vuelve a enviar (sería un contenido distinto)", async () => {
@@ -265,7 +269,7 @@ describe("fail-open y envío a WhatsApp", () => {
     await expect(handleImageMessage(image, deps)).resolves.toBe("technical_issue");
     expect(vi.mocked(audit.recordEvidence)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(audit.recordEvidence).mock.calls[0]![1]).toHaveProperty("analysis");
-    expect(vi.mocked(audit.recordFailure)).toHaveBeenCalledWith("run-1", "UNEXPECTED_PROCESSING_FAILED");
+    expect(vi.mocked(audit.recordFailure)).toHaveBeenCalledWith("run-1", "UNEXPECTED_PROCESSING_FAILED", LEASE);
   });
 });
 
@@ -273,14 +277,29 @@ describe("migraciones: orden y aditividad", () => {
   const dir = join(__dirname, "..", "supabase", "migrations");
   const sha = (text: string) => createHash("sha256").update(text.replace(/\r\n/g, "\n")).digest("hex");
 
-  it("las migraciones anteriores (Fase 6 y telemetría) no se modificaron", async () => {
+  it("las migraciones anteriores (Fase 6, telemetría y transaccional) no se modificaron", async () => {
     expect(sha(await readFile(join(dir, "20261020000000_plusmedik_persistent_audit.sql"), "utf8"))).toBe("1110edc1e1b3f6c4961b87bdb763ecea535ef5b1d6ba9086ff314a86b88ad61a");
     expect(sha(await readFile(join(dir, "20261021000000_plusmedik_audit_telemetry.sql"), "utf8"))).toBe("08e555cf0c872ce2380cbd5046c2296a525c20b6caaddee6ae51ccdb53243256");
+    expect(sha(await readFile(join(dir, "20261022000000_plusmedik_audit_transactional.sql"), "utf8"))).toBe("1135f673e0a8e5de5ef03dae1acae55427c01ff99f4a5988f90595abe9244079");
+  });
+
+  it("la migración de leases es la última, no crea tablas ni borra objetos, sin SQL dinámico, y cada función SECURITY DEFINER fija su search_path", async () => {
+    const files = (await readdir(dir)).filter((name) => name.endsWith(".sql")).sort();
+    expect(files.at(-1)).toBe("20261023000000_plusmedik_audit_leases.sql");
+    const sql = (await readFile(join(dir, "20261023000000_plusmedik_audit_leases.sql"), "utf8")).replace(/--.*$/gm, "");
+    expect(sql).not.toMatch(/\bcreate\s+table\b/i);
+    expect(sql).not.toMatch(/\bdrop\s+/i);
+    expect(sql).not.toMatch(/\bexecute\s+(format|'|\()/i);
+    expect(sql).not.toMatch(/\bdelete\s+from\b/i);
+    expect(sql).not.toMatch(/\btruncate\b/i);
+    for (const definition of sql.split(/create or replace function/i).slice(1)) if (/security definer/i.test(definition)) expect(definition).toMatch(/set search_path = ''/);
+    // ninguna función nueva queda ejecutable por PUBLIC: todas se revocan explícitamente
+    for (const name of ["claim_run", "renew_lease", "fenced_record_evidence", "fenced_close", "reserve_send", "fenced_record_reply", "recover_stale", "block_send", "prove", "lock_leased"]) expect(sql).toMatch(new RegExp(`revoke all on function public\\.plusmedik_audit_${name}\\(`));
   });
 
   it("la migración transaccional es posterior a ambas, no crea tablas ni borra objetos", async () => {
     const files = (await readdir(dir)).filter((name) => name.endsWith(".sql")).sort();
-    expect(files.slice(-3)).toEqual(["20261020000000_plusmedik_persistent_audit.sql", "20261021000000_plusmedik_audit_telemetry.sql", "20261022000000_plusmedik_audit_transactional.sql"]);
+    expect(files.slice(-4, -1)).toEqual(["20261020000000_plusmedik_persistent_audit.sql", "20261021000000_plusmedik_audit_telemetry.sql", "20261022000000_plusmedik_audit_transactional.sql"]);
     const sql = (await readFile(join(dir, "20261022000000_plusmedik_audit_transactional.sql"), "utf8")).replace(/--.*$/gm, "");
     expect(sql).not.toMatch(/\bcreate\s+table\b/i);
     expect(sql).not.toMatch(/\bdrop\s+/i);
