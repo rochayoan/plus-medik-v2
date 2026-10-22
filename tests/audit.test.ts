@@ -39,8 +39,7 @@ function audit(overrides: Partial<AuditRepository> = {}): AuditRepository {
   return {
     claim: vi.fn(async () => ({ kind: "claimed" as const, runId: "run-1" })),
     recordIgnored: vi.fn(async () => undefined),
-    recordAnalysis: vi.fn(async () => undefined),
-    recordAiCalls: vi.fn(async () => undefined),
+    recordEvidence: vi.fn(async () => undefined),
     recordFailure: vi.fn(async () => undefined),
     recordReply: vi.fn(async () => undefined),
     ...overrides
@@ -133,7 +132,7 @@ describe("auditoría persistente del webhook", () => {
       throw new Error("OpenAI unavailable");
     };
     await expect(handleImageMessage(image, d)).resolves.toBe("technical_issue");
-    expect(vi.mocked(repo.recordAiCalls)).toHaveBeenCalledWith("run-1", [expect.objectContaining({ label: "openai-reader", outcome: "OK", usage: { inputTokens: 7 } })]);
+    expect(vi.mocked(repo.recordEvidence)).toHaveBeenCalledWith("run-1", { aiCalls: [expect.objectContaining({ label: "openai-reader", outcome: "OK", usage: { inputTokens: 7 } })] });
     expect(vi.mocked(repo.recordFailure)).toHaveBeenCalledWith("run-1", "AI_PROCESSING_FAILED");
   });
 });
@@ -163,8 +162,7 @@ describe("serialización segura de auditoría", () => {
     });
     const claim = await repository.claim(image);
     if (claim.kind !== "claimed") throw new Error("expected claim");
-    await repository.recordAnalysis(claim.runId, analysis());
-    await repository.recordAiCalls(claim.runId, [{ label: "gemini-openrouter", provider: "openrouter", model: "m", cacheHit: false, outcome: "OK", usage: { inputTokens: 2, outputTokens: 3, costUsd: 0.004 }, value: { requestedStudies: [{ literalText: "PACIENTE_SENTINELA", evidence: "check", confidence: "high" }], uncertainStudies: [] } }]);
+    await repository.recordEvidence(claim.runId, { analysis: analysis(), aiCalls: [{ label: "gemini-openrouter", provider: "openrouter", model: "m", cacheHit: false, outcome: "OK", usage: { inputTokens: 2, outputTokens: 3, costUsd: 0.004 }, value: { requestedStudies: [{ literalText: "PACIENTE_SENTINELA", evidence: "check", confidence: "high" }], uncertainStudies: [] } }] });
     const dump = requests.join("\n");
     for (const forbidden of ["59170000000", "PACIENTE_SENTINELA", "RAZON_PRIVADA", "TEXTO_PRIVADO", "test-service-key"]) expect(dump).not.toContain(forbidden);
     expect(dump).toContain("108");

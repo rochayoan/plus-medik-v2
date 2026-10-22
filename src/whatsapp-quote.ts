@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { AnalysisResult } from "./analyze.js";
-import { catalogFingerprint, processingFailureCode, type AuditRepository, type ProcessingPhase } from "./audit.js";
+import { AuditWriteError, catalogFingerprint, processingFailureCode, type AuditRepository, type ProcessingPhase } from "./audit.js";
 import { withAiCallObserver, type AiCallEvent } from "./cache.js";
 import type { PublicQuote } from "./partial-auto.js";
 import type { CatalogStudy } from "./types.js";
@@ -202,8 +202,9 @@ export async function handleImageMessage(image: IncomingImage, deps: QuoteDeps):
     if (!auditRunId) return;
     try {
       await action();
-    } catch {
-      deps.log("audit_unavailable", { stage });
+    } catch (error) {
+      // Solo el código del fallo de escritura (nunca texto del servidor): REJECTED, CONFLICT o UNKNOWN_OUTCOME (no se supo si se confirmó).
+      deps.log("audit_unavailable", { stage, ...(error instanceof AuditWriteError ? { kind: error.kind } : {}) });
     }
   };
   let reply: string;
@@ -212,6 +213,7 @@ export async function handleImageMessage(image: IncomingImage, deps: QuoteDeps):
   const aiCalls: AiCallEvent[] = [];
   // Etapa en curso: el código de fallo de la auditoría sale de DÓNDE falló el flujo, no del texto del error.
   let phase: ProcessingPhase = "MEDIA_DOWNLOAD";
+  let evidenceAttempted = false;
   try {
     const { bytes } = await deps.downloadImage(image);
     phase = "OTHER";
@@ -237,8 +239,9 @@ export async function handleImageMessage(image: IncomingImage, deps: QuoteDeps):
       phase = "OTHER";
       // Registro INTERNO (solo en el log del servidor, minimizado): lo pendiente y por qué. Nunca va al paciente.
       deps.log("analysis", { messageId: image.messageId, phone: who, ...buildAnalysisLog(analysis) });
-      await persist("analysis", () => deps.audit!.recordAnalysis(auditRunId!, analysis, { catalog: catalogFingerprint(catalog) }));
-      await persist("model_calls", () => deps.audit!.recordAiCalls(auditRunId!, aiCalls));
+      // Todas las evidencias del análisis se confirman juntas o ninguna (una transacción en la base). Si falla, el envío al paciente sigue igual.
+      evidenceAttempted = true;
+      await persist("evidence", () => deps.audit!.recordEvidence(auditRunId!, { analysis, aiCalls, catalog: catalogFingerprint(catalog) }));
       if (analysis.publicQuote && analysis.outcome !== "HUMAN_REVIEW") {
         reply = formatQuoteMessage(analysis.publicQuote);
         result = "quoted";
@@ -250,7 +253,7 @@ export async function handleImageMessage(image: IncomingImage, deps: QuoteDeps):
   } catch (error) {
     const errorCode = processingFailureCode(phase);
     deps.log("processing_failed", { messageId: image.messageId, phone: who, errorCode });
-    await persist("model_calls", () => deps.audit!.recordAiCalls(auditRunId!, aiCalls));
+    if (!evidenceAttempted) await persist("evidence", () => deps.audit!.recordEvidence(auditRunId!, { aiCalls }));
     await persist("failure", () => deps.audit!.recordFailure(auditRunId!, errorCode));
     reply = TECHNICAL_ISSUE_MESSAGE;
     result = "technical_issue";

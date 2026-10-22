@@ -244,7 +244,9 @@ function repositoryWith(options: Partial<Parameters<typeof createSupabaseAuditRe
   });
   return { repository, requests };
 }
-const rowsOf = (requests: Captured[]) => requests.filter((request) => request.path === "plusmedik_audit_model_calls").flatMap((request) => request.body as Array<Record<string, unknown>>);
+const EVIDENCE_RPC = "rpc/plusmedik_audit_record_evidence";
+const evidenceOf = (requests: Captured[]) => requests.find((request) => request.path === EVIDENCE_RPC)?.body.p_payload as Record<string, any> | undefined;
+const rowsOf = (requests: Captured[]) => (evidenceOf(requests)?.model_calls ?? []) as Array<Record<string, unknown>>;
 const image: IncomingImage = { messageId: "wamid.telemetry-1", from: "59170000000", mediaId: "media-1" };
 
 describe("persistencia de la telemetría", () => {
@@ -254,7 +256,7 @@ describe("persistencia de la telemetría", () => {
       await Promise.all([call("ok", { delay: 15, usage: { inputTokens: 10, outputTokens: 4, reasoningTokens: 2, costUsd: 0.0123 } }), call("falla", { fail: failing }).catch(() => undefined), call("sin-uso")]);
     });
     const { repository, requests } = repositoryWith();
-    await repository.recordAiCalls("run-1", events);
+    await repository.recordEvidence("run-1", { aiCalls: events });
     const rows = rowsOf(requests);
     expect(rows).toHaveLength(3);
     const byStage = (stage: string) => rows.find((row) => row.stage === stage)!;
@@ -268,13 +270,13 @@ describe("persistencia de la telemetría", () => {
   it("solo informa costo si el proveedor lo reportó: tokens sin costo no generan costo", async () => {
     const { events } = await observed(async () => { await call("tokens", { usage: { inputTokens: 3, outputTokens: 1 } }); });
     const { repository, requests } = repositoryWith();
-    await repository.recordAiCalls("run-1", events);
+    await repository.recordEvidence("run-1", { aiCalls: events });
     expect(rowsOf(requests)[0]).toMatchObject({ cost_usd: null, cost_status: "TOKENS_ONLY", input_tokens: 3 });
   });
 
   it("un cache hit no consume tokens ni costo en este procesamiento: el uso guardado no se persiste", async () => {
     const { repository, requests } = repositoryWith();
-    await repository.recordAiCalls("run-1", [{ label: "x", provider: "p", model: "m", cacheHit: true, outcome: "CACHE_HIT", usage: { inputTokens: 999, outputTokens: 99, costUsd: 5 }, callSeq: 1, attempt: 1 }]);
+    await repository.recordEvidence("run-1", { aiCalls: [{ label: "x", provider: "p", model: "m", cacheHit: true, outcome: "CACHE_HIT", usage: { inputTokens: 999, outputTokens: 99, costUsd: 5 }, callSeq: 1, attempt: 1 }] });
     expect(rowsOf(requests)[0]).toMatchObject({ cache_hit: true, input_tokens: null, output_tokens: null, reasoning_tokens: null, cost_usd: null, cost_status: "NO_PROVIDER_CALL" });
   });
 
@@ -286,7 +288,7 @@ describe("persistencia de la telemetría", () => {
     });
     const { repository, requests } = repositoryWith({ runtime: { engineVersion: "A1B2C3D4E5F6", flags: { semanticPrimary: true, apiKey: "sk-live-abc", note: "texto libre con espacios", authToken: "x" } } });
     await repository.claim(image);
-    await repository.recordAiCalls("run-1", events);
+    await repository.recordEvidence("run-1", { aiCalls: events });
     const dump = JSON.stringify(requests);
     for (const forbidden of ["PROMPT_SENTINELA_PACIENTE", "SECRETO", "JUAN PEREZ", "test-service-key-SECRETA", "59170000000", "sk-live-abc", "texto libre", "authToken"]) expect(dump).not.toContain(forbidden);
   });
@@ -295,7 +297,7 @@ describe("persistencia de la telemetría", () => {
     const legacy: AiCallEvent = { label: "legado", provider: "p", model: "m", cacheHit: false, outcome: "OK", usage: { inputTokens: 2 } };
     const { events } = await observed(async () => { await call("nuevo", { usage: { inputTokens: 2 } }); });
     const { repository, requests } = repositoryWith();
-    await repository.recordAiCalls("run-1", [legacy, ...events]);
+    await repository.recordEvidence("run-1", { aiCalls: [legacy, ...events] });
     const [oldRow, newRow] = rowsOf(requests);
     expect(Object.keys(oldRow!).sort()).toEqual(Object.keys(newRow!).sort());
     expect(oldRow).toMatchObject({ call_seq: null, completion_seq: null, attempt: null, started_at: null, duration_ms: null, reasoning_effort: null, params_hash: null, error_kind: null });
@@ -304,7 +306,7 @@ describe("persistencia de la telemetría", () => {
   it("valores fuera de rango o con formato inesperado se descartan (NULL) en vez de llegar a la base", async () => {
     const odd = { label: "raro", provider: "p", model: "m", cacheHit: false, outcome: "OK", callSeq: 0, completionSeq: -3, attempt: 1.5, durationMs: -1, startedAt: "no es fecha", reasoningEffort: "alto; drop table", paramsHash: "xyz", errorKind: "texto libre" } as unknown as AiCallEvent;
     const { repository, requests } = repositoryWith();
-    await repository.recordAiCalls("run-1", [odd]);
+    await repository.recordEvidence("run-1", { aiCalls: [odd] });
     expect(rowsOf(requests)[0]).toMatchObject({ call_seq: null, completion_seq: null, attempt: null, duration_ms: null, started_at: null, reasoning_effort: null, params_hash: null, error_kind: null });
   });
 });
@@ -350,14 +352,13 @@ describe("versionado de configuración", () => {
     expect(computeConfigHash({ ...base, engineVersion: undefined })).not.toBe(hash);
   });
 
-  it("recordAiCalls guarda el hash de configuración del procesamiento y no lo toca si no hubo llamadas", async () => {
+  it("recordEvidence guarda el hash de configuración del procesamiento y no escribe nada si no hubo análisis ni llamadas", async () => {
     const { events } = await observed(async () => { await call("uno"); });
     const { repository, requests } = repositoryWith({ runtime: { engineVersion: "abc1234", flags: { semanticPrimary: true } } });
-    await repository.recordAiCalls("run-1", events);
-    const patch = requests.find((request) => request.method === "PATCH")!;
-    expect(patch.body).toEqual({ config_hash: computeConfigHash({ engineVersion: "abc1234", flags: { semanticPrimary: true }, events }) });
+    await repository.recordEvidence("run-1", { aiCalls: events });
+    expect(evidenceOf(requests)!.run).toEqual({ config_hash: computeConfigHash({ engineVersion: "abc1234", flags: { semanticPrimary: true }, events }) });
     const empty = repositoryWith();
-    await empty.repository.recordAiCalls("run-1", []);
+    await empty.repository.recordEvidence("run-1", { aiCalls: [] });
     expect(empty.requests).toHaveLength(0);
   });
 
@@ -376,15 +377,16 @@ describe("versionado de configuración", () => {
     expect(catalog.map((item) => item.id)).toEqual(["2", "1"]);
   });
 
-  it("recordAnalysis guarda la huella del catálogo; sin contexto queda NULL", async () => {
+  it("recordEvidence guarda la huella del catálogo; sin ella la clave no se envía (queda NULL)", async () => {
     const analysis = { decision: "HUMAN_REVIEW", reasons: [], finalVisualStudies: [], disputes: [], judgeResolved: [], unresolvedDisputes: [], matches: [], unmatched: [], ambiguous: [], modelSuggested: [] } as AnalysisResult;
     const fingerprint = catalogFingerprint([study("1", 10)]);
     const withCatalog = repositoryWith();
-    await withCatalog.repository.recordAnalysis("run-1", analysis, { catalog: fingerprint });
-    expect(withCatalog.requests.find((request) => request.method === "PATCH")!.body).toMatchObject({ catalog_hash: fingerprint.hash, catalog_size: 1 });
+    await withCatalog.repository.recordEvidence("run-1", { analysis, aiCalls: [], catalog: fingerprint });
+    expect(evidenceOf(withCatalog.requests)!.run).toMatchObject({ catalog_hash: fingerprint.hash, catalog_size: 1 });
     const without = repositoryWith();
-    await without.repository.recordAnalysis("run-1", analysis);
-    expect(without.requests.find((request) => request.method === "PATCH")!.body).toMatchObject({ catalog_hash: null, catalog_size: null });
+    await without.repository.recordEvidence("run-1", { analysis, aiCalls: [] });
+    expect(evidenceOf(without.requests)!.run).not.toHaveProperty("catalog_hash");
+    expect(evidenceOf(without.requests)!.run).not.toHaveProperty("catalog_size");
   });
 });
 
@@ -395,8 +397,7 @@ function auditSpy(): AuditRepository {
   return {
     claim: vi.fn(async () => ({ kind: "claimed" as const, runId: "run-1" })),
     recordIgnored: vi.fn(async () => undefined),
-    recordAnalysis: vi.fn(async () => undefined),
-    recordAiCalls: vi.fn(async () => undefined),
+    recordEvidence: vi.fn(async () => undefined),
     recordFailure: vi.fn(async () => undefined),
     recordReply: vi.fn(async () => undefined)
   };
@@ -448,7 +449,7 @@ describe("clasificación de fallos del procesamiento: por etapa, no por texto", 
     const run = quoteDeps({});
     const loaded = await run.deps.loadCatalog();
     await handleImageMessage(image, run.deps);
-    expect(vi.mocked(run.audit.recordAnalysis).mock.calls[0]![2]).toEqual({ catalog: catalogFingerprint(loaded) });
+    expect(vi.mocked(run.audit.recordEvidence).mock.calls[0]![1].catalog).toEqual(catalogFingerprint(loaded));
     expect(run.deps.loadCatalog).toHaveBeenCalledTimes(2); // la de esta prueba y la del flujo
   });
 });
@@ -533,8 +534,9 @@ describe("migración aditiva de telemetría", () => {
   it("las columnas nuevas coinciden con lo que el repositorio escribe (sin deriva)", async () => {
     const sql = normalize(await readFile(join(migrationsDir, "20261021000000_plusmedik_audit_telemetry.sql"), "utf8"));
     const original = normalize(await readFile(join(migrationsDir, "20261020000000_plusmedik_persistent_audit.sql"), "utf8"));
-    const added = (table: string) => {
-      const block = sql.match(new RegExp(`alter table public\\.${table}\\n([\\s\\S]*?);`))![1]!;
+    const transactional = normalize(await readFile(join(migrationsDir, "20261022000000_plusmedik_audit_transactional.sql"), "utf8"));
+    const added = (table: string, text: string) => {
+      const block = text.match(new RegExp(`alter table public\\.${table}\\n([\\s\\S]*?);`))![1]!;
       return [...block.matchAll(/add column if not exists (\w+)/g)].map((match) => match[1]!);
     };
     const original_ = (table: string) => {
@@ -544,20 +546,24 @@ describe("migración aditiva de telemetría", () => {
     const { events } = await observed(async () => { await call("uno", { usage: { inputTokens: 1 } }); });
     const { repository, requests } = repositoryWith({ runtime: { engineVersion: "abc1234", flags: { semanticPrimary: true } } });
     await repository.claim(image);
-    await repository.recordAnalysis("run-1", { decision: "HUMAN_REVIEW", reasons: [], finalVisualStudies: [], disputes: [], judgeResolved: [], unresolvedDisputes: [], matches: [], unmatched: [], ambiguous: [], modelSuggested: [] } as AnalysisResult, { catalog: catalogFingerprint(catalog) });
-    await repository.recordAiCalls("run-1", events);
+    await repository.recordEvidence("run-1", {
+      analysis: { decision: "HUMAN_REVIEW", reasons: [], finalVisualStudies: [], disputes: [], judgeResolved: [], unresolvedDisputes: [], matches: [], unmatched: [], ambiguous: [], modelSuggested: [] } as AnalysisResult,
+      aiCalls: events,
+      catalog: catalogFingerprint(catalog)
+    });
 
-    const runColumns = new Set([...original_("plusmedik_audit_runs"), ...added("plusmedik_audit_runs")]);
-    const callColumns = new Set([...original_("plusmedik_audit_model_calls"), ...added("plusmedik_audit_model_calls")]);
-    for (const request of requests) {
-      const rows = (Array.isArray(request.body) ? request.body : [request.body]) as Array<Record<string, unknown>>;
-      const allowed = request.path.startsWith("plusmedik_audit_runs") ? runColumns : request.path === "plusmedik_audit_model_calls" ? callColumns : undefined;
-      if (allowed) for (const row of rows) for (const key of Object.keys(row)) expect(allowed.has(key), `${request.path}.${key}`).toBe(true);
-    }
-    // cada columna nueva la escribe el repositorio
-    const written = (path: string) => new Set(requests.filter((request) => request.path.startsWith(path)).flatMap((request) => (Array.isArray(request.body) ? request.body : [request.body]).flatMap((row: object) => Object.keys(row))));
-    for (const column of added("plusmedik_audit_runs")) expect(written("plusmedik_audit_runs").has(column), column).toBe(true);
-    for (const column of added("plusmedik_audit_model_calls")) expect(written("plusmedik_audit_model_calls").has(column), column).toBe(true);
+    // columnas que escribe el repositorio: el claim (INSERT en runs) y las secciones del contenido de la función transaccional
+    const claimKeys = Object.keys(requests.find((request) => request.path.startsWith("plusmedik_audit_runs"))!.body);
+    const payload = evidenceOf(requests)!;
+    const runKeys: string[] = [...claimKeys, ...Object.keys(payload.run)];
+    const callKeys = new Set<string>(payload.model_calls.flatMap((row: object) => Object.keys(row)));
+    const runColumns = new Set([...original_("plusmedik_audit_runs"), ...added("plusmedik_audit_runs", sql), ...added("plusmedik_audit_runs", transactional)]);
+    const callColumns = new Set([...original_("plusmedik_audit_model_calls"), ...added("plusmedik_audit_model_calls", sql)]);
+    for (const key of runKeys as string[]) expect(runColumns.has(key), `runs.${key}`).toBe(true);
+    for (const key of callKeys) expect(callColumns.has(key), `model_calls.${key}`).toBe(true);
+    // cada columna de la telemetría la escribe el repositorio; las de evidencia (evidence_*) las fija la función de la base
+    for (const column of added("plusmedik_audit_runs", sql)) expect(runKeys.includes(column), column).toBe(true);
+    for (const column of added("plusmedik_audit_model_calls", sql)) expect(callKeys.has(column), column).toBe(true);
   });
 });
 

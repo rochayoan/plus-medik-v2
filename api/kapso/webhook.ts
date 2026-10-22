@@ -56,8 +56,7 @@ const realDeps: QuoteDeps = {
   audit: {
     claim: (...args) => audit().claim(...args),
     recordIgnored: (...args) => audit().recordIgnored(...args),
-    recordAnalysis: (...args) => audit().recordAnalysis(...args),
-    recordAiCalls: (...args) => audit().recordAiCalls(...args),
+    recordEvidence: (...args) => audit().recordEvidence(...args),
     recordFailure: (...args) => audit().recordFailure(...args),
     recordReply: (...args) => audit().recordReply(...args)
   },

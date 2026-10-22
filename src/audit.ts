@@ -16,8 +16,8 @@ export type ReplyAuditState = "ACCEPTED" | "UNKNOWN";
 export interface AuditRepository {
   claim(image: Pick<IncomingImage, "messageId" | "mediaId">): Promise<AuditClaim>;
   recordIgnored(runId: string, reason: "IMAGE_SIZE" | "IMAGE_TYPE"): Promise<void>;
-  recordAnalysis(runId: string, analysis: AnalysisResult, context?: AnalysisAuditContext): Promise<void>;
-  recordAiCalls(runId: string, events: readonly AiCallEvent[]): Promise<void>;
+  // TODAS las evidencias del procesamiento (resumen del análisis, estudios, llamadas de IA y verificaciones) en UNA transacción idempotente (ver AuditWriteError).
+  recordEvidence(runId: string, evidence: AnalysisEvidence): Promise<void>;
   recordFailure(runId: string, errorCode: AuditErrorCode): Promise<void>;
   recordReply(runId: string, reply: { state: ReplyAuditState; result: QuoteResult; processingStatus: "COMPLETED" | "FAILED"; providerMessageId?: string }): Promise<void>;
 }
@@ -49,8 +49,23 @@ export interface CatalogFingerprint {
   size: number;
 }
 
-export interface AnalysisAuditContext {
+// Lo que se confirma en una sola transacción. Sin `analysis` (el análisis falló) solo se registran las llamadas de IA que sí ocurrieron.
+export interface AnalysisEvidence {
+  analysis?: AnalysisResult;
+  aiCalls: readonly AiCallEvent[];
   catalog?: CatalogFingerprint;
+}
+
+// Fallo de una escritura que debe ser transaccional. Solo lleva un código (nunca texto del servidor ni del contenido).
+//   REJECTED         el servidor rechazó el contenido (HTTP 4xx): no se reintenta, no hay nada confirmado.
+//   CONFLICT         ya había evidencia confirmada con OTRO contenido (HTTP 409): lo confirmado no se modifica.
+//   UNKNOWN_OUTCOME  no se supo si se confirmó (timeout, red caída, 5xx) tras agotar los reintentos idénticos: puede haberse confirmado o no.
+export type AuditWriteErrorKind = "REJECTED" | "CONFLICT" | "UNKNOWN_OUTCOME";
+export class AuditWriteError extends Error {
+  constructor(readonly kind: AuditWriteErrorKind, readonly httpStatus?: number) {
+    super(`audit_write_${kind.toLowerCase()}`);
+    this.name = "AuditWriteError";
+  }
 }
 
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
@@ -95,6 +110,10 @@ export interface SupabaseAuditOptions {
   fetchFn?: typeof fetch;
   // Identifica qué produjo cada análisis. engineVersion por defecto: VERCEL_GIT_COMMIT_SHA (desconocida si no existe, p. ej. fuera de Vercel).
   runtime?: { engineVersion?: string; flags?: Record<string, unknown> };
+  // Cada petición a Supabase se corta a los requestTimeoutMs (por defecto 5 s). Las escrituras transaccionales se repiten UNA vez, idénticas, si no se
+  // supo su resultado; retryDelayMs es la espera entre ambos intentos.
+  requestTimeoutMs?: number;
+  retryDelayMs?: number;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -164,7 +183,10 @@ function documentSummary(analysis: AnalysisResult): Json {
   };
 }
 
-function serializeStudies(runId: string, analysis: AnalysisResult): Json[] {
+// Código del catálogo: informativo y de texto corto, sin caracteres de control (la base lo exige). Se recorta, no se inventa.
+const catalogCode = (code: string | null | undefined): string | null => (typeof code === "string" ? code.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 64) : null);
+
+function serializeStudies(analysis: AnalysisResult): Json[] {
   const internal = analysis.internal;
   if (!internal) return [];
   const pending = new Map(internal.pending.filter((item) => item.kind === "STUDY").map((item) => [item.key, item]));
@@ -173,32 +195,29 @@ function serializeStudies(runId: string, analysis: AnalysisResult): Json[] {
     const pendingItem = pending.get(study.key);
     const quotedLines = study.lineIds.flatMap((id) => {
       const line = quotedById.get(id);
-      return line ? [{ labTestId: line.id, code: line.code, priceBs: line.priceBs, basis: line.basis }] : [];
+      return line ? [{ labTestId: line.id, code: catalogCode(line.code), priceBs: line.priceBs, basis: line.basis }] : [];
     });
     return {
-      run_id: runId,
       study_index: studyIndex,
       decision: study.decision,
       blockers: study.blockers,
       catalog_match_status: analysis.matches[studyIndex]?.status ?? null,
       quoted_lines: quotedLines,
-      candidate_codes: pendingItem?.candidates?.map((candidate) => ({ id: candidate.id, code: candidate.code, priceBs: candidate.priceBs })) ?? [],
+      candidate_codes: pendingItem?.candidates?.map((candidate) => ({ id: candidate.id, code: catalogCode(candidate.code), priceBs: candidate.priceBs })) ?? [],
       risk_class: study.risk?.class ?? null
     };
   });
 }
 
-function safeChecks(runId: string, analysis: AnalysisResult): Json[] {
+function safeChecks(analysis: AnalysisResult): Json[] {
   const internal = analysis.internal;
   return [
     {
-      run_id: runId,
       check_kind: "DOCUMENT",
       check_status: internal?.document.complete ? "PASS" : "REVIEW",
       summary: documentSummary(analysis)
     },
     {
-      run_id: runId,
       check_kind: "JUDGE",
       check_status: analysis.unresolvedDisputes.length === 0 ? "PASS" : "REVIEW",
       summary: {
@@ -208,7 +227,6 @@ function safeChecks(runId: string, analysis: AnalysisResult): Json[] {
       }
     },
     {
-      run_id: runId,
       check_kind: "CATALOG",
       check_status: (internal?.pending.length ?? 0) === 0 ? "PASS" : "REVIEW",
       summary: {
@@ -227,9 +245,8 @@ const iso = (value: unknown): string | null => (typeof value === "string" && !Nu
 
 // Todas las filas llevan las MISMAS claves (PostgREST lo exige en un lote). Lo que no se midió queda NULL (desconocido), nunca un valor inventado.
 // Un cache hit no consumió tokens ni costo en este procesamiento: el uso guardado en la caché es de una ejecución anterior y no se persiste.
-function serializeAiCalls(runId: string, events: readonly AiCallEvent[]): Json[] {
+function serializeAiCalls(events: readonly AiCallEvent[]): Json[] {
   return events.map((event) => ({
-    run_id: runId,
     stage: event.label,
     provider: event.provider,
     model: event.model,
@@ -252,6 +269,35 @@ function serializeAiCalls(runId: string, events: readonly AiCallEvent[]): Json[]
   }));
 }
 
+export const EVIDENCE_CONTRACT = 1;
+
+// Contenido de la RPC plusmedik_audit_record_evidence. Se construye UNA vez: un reintento envía exactamente los mismos bytes (la base reconoce el hash).
+// Devuelve undefined si no hay nada que registrar (sin análisis y sin llamadas de IA).
+export function buildEvidencePayload(evidence: AnalysisEvidence, runtime: { engineVersion: string | null; flags: AuditFlags }): Json | undefined {
+  const { analysis, aiCalls, catalog } = evidence;
+  if (!analysis && aiCalls.length === 0) return undefined;
+  const run: Record<string, unknown> = {};
+  if (analysis) {
+    const internal = analysis.internal;
+    Object.assign(run, {
+      analysis_decision: analysis.decision,
+      analysis_outcome: analysis.outcome ?? analysis.decision,
+      review_required: internal?.reviewRequired ?? analysis.decision === "HUMAN_REVIEW",
+      recipe_stops: internal?.recipeStops ?? analysis.reasons,
+      document_summary: documentSummary(analysis)
+    });
+    if (catalog) Object.assign(run, { catalog_hash: catalog.hash, catalog_size: catalog.size });
+  }
+  if (aiCalls.length > 0) run.config_hash = computeConfigHash({ engineVersion: runtime.engineVersion, flags: runtime.flags, events: aiCalls });
+  return {
+    contract: EVIDENCE_CONTRACT,
+    run,
+    studies: analysis ? serializeStudies(analysis) : [],
+    model_calls: serializeAiCalls(aiCalls),
+    checks: analysis ? safeChecks(analysis) : []
+  };
+}
+
 export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}): AuditRepository {
   const baseUrl = (options.baseUrl ?? process.env.SUPABASE_URL)?.replace(/\/+$/, "");
   const serviceKey = options.serviceKey ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -261,15 +307,38 @@ export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}
   const rawEngineVersion = options.runtime?.engineVersion ?? process.env.VERCEL_GIT_COMMIT_SHA;
   const engineVersion = rawEngineVersion && COMMIT_SHA.test(rawEngineVersion) ? rawEngineVersion.toLowerCase() : null;
   const headers = { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, "Content-Type": "application/json" };
+  const timeoutMs = options.requestTimeoutMs ?? 5000;
+  const retryDelayMs = options.retryDelayMs ?? 300;
 
   async function request(path: string, init: RequestInit = {}): Promise<Response> {
-    const response = await fetchFn(`${baseUrl}/rest/v1/${path}`, { ...init, headers: { ...headers, ...init.headers } });
+    const response = await fetchFn(`${baseUrl}/rest/v1/${path}`, { ...init, headers: { ...headers, ...init.headers }, signal: AbortSignal.timeout(timeoutMs) });
     if (!response.ok) throw new Error(`audit_http_${response.status}`);
     return response;
   }
 
-  async function insert(table: string, rows: Json | Json[], prefer = "return=minimal"): Promise<void> {
-    await request(table, { method: "POST", headers: { Prefer: prefer }, body: JSON.stringify(rows) });
+  // Llamada a una función transaccional e IDEMPOTENTE de la base. El cuerpo se serializa una vez: si una petición termina sin respuesta (timeout, red caída,
+  // 5xx) no se sabe si la transacción se confirmó; se repite UNA vez con exactamente el mismo contenido, y la base responde 'already_recorded' si ya estaba
+  // confirmada. Si tampoco hay respuesta, el resultado queda DESCONOCIDO (UNKNOWN_OUTCOME): no se reintenta más y el procesamiento sigue (fail-open).
+  // Nunca se lee ni se propaga el cuerpo de un error del servidor.
+  async function rpc(name: string, args: Json): Promise<"recorded" | "already_recorded"> {
+    const body = JSON.stringify(args);
+    const attempts = 2;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      let response: Response | undefined;
+      try {
+        response = await fetchFn(`${baseUrl}/rest/v1/rpc/${name}`, { method: "POST", headers, body, signal: AbortSignal.timeout(timeoutMs) });
+      } catch {
+        response = undefined; // timeout o fallo de red: puede haberse confirmado
+      }
+      if (response?.ok) {
+        const result = (await response.json().catch(() => undefined)) as { status?: unknown } | undefined;
+        return result?.status === "already_recorded" ? "already_recorded" : "recorded";
+      }
+      if (response && response.status === 409) throw new AuditWriteError("CONFLICT", 409);
+      if (response && response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429) throw new AuditWriteError("REJECTED", response.status);
+      if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    }
+    throw new AuditWriteError("UNKNOWN_OUTCOME");
   }
 
   async function patchRun(runId: string, body: Json): Promise<void> {
@@ -294,44 +363,18 @@ export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}
     async recordIgnored(runId, reason) {
       await patchRun(runId, { processing_status: "IGNORED", error_code: reason, completed_at: new Date().toISOString() });
     },
-    async recordAnalysis(runId, analysis, context) {
-      const internal = analysis.internal;
-      await patchRun(runId, {
-        processing_status: "ANALYZED",
-        catalog_hash: context?.catalog?.hash ?? null,
-        catalog_size: context?.catalog?.size ?? null,
-        analysis_decision: analysis.decision,
-        analysis_outcome: analysis.outcome ?? analysis.decision,
-        review_required: internal?.reviewRequired ?? analysis.decision === "HUMAN_REVIEW",
-        recipe_stops: internal?.recipeStops ?? analysis.reasons,
-        document_summary: documentSummary(analysis)
-      });
-      const studies = serializeStudies(runId, analysis);
-      if (studies.length) await insert("plusmedik_audit_studies", studies);
-      await insert("plusmedik_audit_checks", safeChecks(runId, analysis));
-    },
-    async recordAiCalls(runId, events) {
-      const rows = serializeAiCalls(runId, events);
-      if (rows.length === 0) return;
-      await insert("plusmedik_audit_model_calls", rows);
-      await patchRun(runId, { config_hash: computeConfigHash({ engineVersion, flags, events }) });
+    async recordEvidence(runId, evidence) {
+      const payload = buildEvidencePayload(evidence, { engineVersion, flags });
+      if (payload) await rpc("plusmedik_audit_record_evidence", { p_run_id: runId, p_payload: payload });
     },
     async recordFailure(runId, errorCode) {
       await patchRun(runId, { processing_status: "FAILED", error_code: errorCode, completed_at: new Date().toISOString() });
     },
     async recordReply(runId, reply) {
-      await patchRun(runId, {
-        processing_status: reply.processingStatus,
-        reply_state: reply.state,
-        reply_kind: reply.result,
-        kapso_outbound_message_id: reply.providerMessageId ?? null,
-        completed_at: new Date().toISOString()
-      });
-      await insert("plusmedik_audit_checks", {
-        run_id: runId,
-        check_kind: "REPLY",
-        check_status: reply.state,
-        summary: { result: reply.result, providerAccepted: reply.state === "ACCEPTED" }
+      // Ciclo de vida + verificación REPLY en una sola transacción de la base. El envío a WhatsApp ya ocurrió y nunca se repite desde aquí.
+      await rpc("plusmedik_audit_record_reply", {
+        p_run_id: runId,
+        p_reply: { state: reply.state, result: reply.result, processing_status: reply.processingStatus, ...(reply.providerMessageId ? { provider_message_id: reply.providerMessageId } : {}) }
       });
     }
   };
