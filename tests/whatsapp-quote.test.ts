@@ -287,6 +287,7 @@ describe("diagnóstico en el registro del servidor", () => {
     const log = logs.find((entry) => entry.event === "analysis")!.data as Record<string, any>;
     expect(log.studies.map((s: any) => [s.i, s.decision, s.codes])).toEqual([[0, "AUTO", ["108"]], [1, "HUMAN_REVIEW", []]]);
     expect(log.studies[1].blockers).toEqual(["catalog_unmatched"]);
+    expect(log.studies[1].uncertainty).toEqual(["IDENTITY"]);
     expect(log.studies.map((s: any) => s.confidence)).toEqual(["high", "high"]);
     expect(log).toHaveProperty("disputes");
     expect(log.judge).toEqual({ confirmed: 0, rejected: 0, unresolved: 0 });

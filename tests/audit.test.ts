@@ -25,7 +25,7 @@ const analysis = (): AnalysisResult => ({
     recipeComplete: true,
     reviewRequired: false,
     quoted: { lines: [{ id: "test-1", code: "108", name: "HEMOGRAMA", priceBs: 45, basis: ["EXACT_CONFIRMED"], texts: ["PACIENTE_SENTINELA"] }], subtotalBs: 45 },
-    studies: [{ key: "hemograma", text: "PACIENTE_SENTINELA", decision: "AUTO", blockers: [], lineIds: ["test-1"] }],
+    studies: [{ key: "hemograma", text: "PACIENTE_SENTINELA", decision: "AUTO", blockers: [], uncertainty: [], lineIds: ["test-1"] }],
     pending: [],
     recipeStops: [],
     document: { type: "TEXT_EXPLICIT_REQUEST", complete: true, issueKinds: [], problems: ["RAZON_PRIVADA"], unseenRegion: false, zones: [], impactCheck: { needed: false, candidates: [] } },

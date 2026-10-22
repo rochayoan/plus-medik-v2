@@ -149,6 +149,7 @@ export function buildAnalysisLog(analysis: AnalysisResult): Record<string, unkno
       i: index,
       decision: study.decision,
       blockers: study.blockers,
+      uncertainty: study.uncertainty,
       risk: study.risk?.class,
       codes: study.lineIds.map((id) => codeOfId.get(id)).filter(Boolean),
       confidence: source?.confidence,
@@ -166,6 +167,7 @@ export function buildAnalysisLog(analysis: AnalysisResult): Record<string, unkno
     studies,
     pending: internal?.pending.map((p) => ({
       kind: p.kind,
+      uncertainty: p.uncertainty,
       // Los bloqueos de una disputa son texto libre del juez: no se registran.
       blockers: p.kind === "DISPUTE" ? undefined : p.blockers,
       candidates: p.candidates?.map((c) => c.code)
