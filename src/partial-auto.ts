@@ -1,3 +1,4 @@
+import { uncertaintyKinds, type UncertaintyKind } from "./uncertainty.js";
 import { createHash } from "node:crypto";
 import { isPackageComponent } from "./catalog-shadow.js";
 import { droppedLineItemDetails, heldPackageGroups, lineServiceGap } from "./line-groups.js";
@@ -26,6 +27,8 @@ export interface StudyDecision {
   text: string;
   decision: "AUTO" | "HUMAN_REVIEW";
   blockers: AnalysisReason[];
+  // Qué clase de incertidumbre hay detrás de los bloqueos (lectura, identidad, documento, política). Solo diagnóstico.
+  uncertainty: UncertaintyKind[];
   // UUID que aporta este estudio a la cotización (vacío si quedó pendiente).
   lineIds: string[];
   // Riesgo visual (solo si el estudio no tenía otros bloqueos y se evaluó frente a las zonas que no se ven). Solo para el CRM.
@@ -37,6 +40,7 @@ export interface PendingItem {
   kind: "STUDY" | "DISPUTE" | "UNSEEN_REGION";
   text?: string;
   blockers: string[];
+  uncertainty: UncertaintyKind[];
   candidates?: CatalogCandidate[];
 }
 
@@ -222,6 +226,7 @@ export function evaluatePartial(input: PartialInput): { outcome: QuoteOutcome; r
     text: study.literalText,
     decision: blockers[index]!.length === 0 ? "AUTO" : "HUMAN_REVIEW",
     blockers: blockers[index]!,
+    uncertainty: uncertaintyKinds(blockers[index]!),
     lineIds: blockers[index]!.length === 0 ? linesOf(input.matches[index]!).map((line) => line.id) : [],
     ...(risks[index] ? { risk: risks[index] } : {})
   }));
@@ -242,12 +247,12 @@ export function evaluatePartial(input: PartialInput): { outcome: QuoteOutcome; r
   const dropped = droppedLineItemDetails(input.studies);
   const pending: PendingItem[] = [
     ...input.studies.flatMap((study, index): PendingItem[] =>
-      studies[index]!.decision === "AUTO" ? [] : [{ key: keys[index]!, kind: "STUDY", text: study.literalText, blockers: studies[index]!.blockers, candidates: candidatesOf(input.matches[index]!, input.catalogById) }]
+      studies[index]!.decision === "AUTO" ? [] : [{ key: keys[index]!, kind: "STUDY", text: study.literalText, blockers: studies[index]!.blockers, uncertainty: studies[index]!.uncertainty, candidates: candidatesOf(input.matches[index]!, input.catalogById) }]
     ),
     // Un elemento que la línea nombra y ninguna fila representa es un estudio posiblemente pedido y no leído: la receta no puede quedar completa.
-    ...dropped.map((entry): PendingItem => ({ key: `line:${normalizeStudyKey(entry.item)}`, kind: "STUDY", text: entry.item, blockers: ["line_item_unrepresented"] })),
-    ...input.unresolvedDisputes.map((dispute): PendingItem => ({ key: `dispute:${dispute.key}`, kind: "DISPUTE", text: dispute.key, blockers: [dispute.reason] })),
-    ...(zones.length > 0 ? [{ key: "UNSEEN_REGION", kind: "UNSEEN_REGION" as const, blockers: zones.map((zone) => zone.kind) }] : [])
+    ...dropped.map((entry): PendingItem => ({ key: `line:${normalizeStudyKey(entry.item)}`, kind: "STUDY", text: entry.item, blockers: ["line_item_unrepresented"], uncertainty: uncertaintyKinds(["line_item_unrepresented"]) })),
+    ...input.unresolvedDisputes.map((dispute): PendingItem => ({ key: `dispute:${dispute.key}`, kind: "DISPUTE", text: dispute.key, blockers: [dispute.reason], uncertainty: ["READING"] })),
+    ...(zones.length > 0 ? [{ key: "UNSEEN_REGION", kind: "UNSEEN_REGION" as const, blockers: zones.map((zone) => zone.kind), uncertainty: ["DOCUMENT" as const] }] : [])
   ];
 
   const allLines = [...lineMap.values()];

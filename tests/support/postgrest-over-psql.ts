@@ -1,0 +1,43 @@
+import type { PgDatabase } from "./ephemeral-postgres.js";
+
+// Adaptador de PRUEBAS: traduce cada llamada RPC de PostgREST (POST /rest/v1/rpc/<función> con un cuerpo JSON de argumentos con nombre) a la función SQL real de la
+// base efímera, ejecutándola como service_role mediante psql. Así los repositorios REALES de producción (src/audit.ts, src/human-control.ts) se prueban contra
+// PostgreSQL real sin red. Un SQLSTATE de la forma PT### se devuelve como HTTP ###, igual que hace PostgREST.
+
+export const PARAM_TYPES: Record<string, string> = {
+  p_run_id: "uuid", p_payload: "jsonb", p_owner: "text", p_fence: "bigint", p_close: "jsonb", p_kind: "text", p_lease_seconds: "integer", p_reply: "jsonb", p_message_id: "text", p_media_id: "text",
+  p_schema_version: "integer", p_engine_version: "text", p_flags: "jsonb", p_max_attempts: "integer", p_reserved_grace_seconds: "integer", p_abandon_grace_seconds: "integer", p_limit: "integer",
+  p_reason: "text", p_contact_key: "text", p_event_key: "text", p_occurred_at: "timestamptz", p_source: "text", p_actor: "text", p_detail: "jsonb"
+};
+
+const literal = (key: string, value: unknown): string => {
+  const type = PARAM_TYPES[key];
+  if (!type) throw new Error(`parámetro desconocido: ${key}`);
+  if (value === null || value === undefined) return `null::${type}`;
+  if (type === "jsonb") return `$j$${JSON.stringify(value)}$j$::jsonb`;
+  if (type === "text" || type === "uuid" || type === "timestamptz") return `$t$${String(value)}$t$::${type}`;
+  return `${Number(value)}::${type}`;
+};
+
+// Estado de la "red" hacia Supabase: se puede cortar por completo o por función.
+export interface Network {
+  down: boolean;
+  downFor: Set<string>;
+  calls: string[];
+}
+export const newNetwork = (): Network => ({ down: false, downFor: new Set(), calls: [] });
+
+export function postgrestOverPsql(db: PgDatabase, network: Network): typeof fetch {
+  return (async (input: unknown, init?: RequestInit) => {
+    const name = String(input).split("/rest/v1/rpc/")[1];
+    if (!name || !/^plusmedik_(audit|attention)_[a-z_]+$/.test(name)) throw new Error("solo RPC de auditoría o atención");
+    network.calls.push(name);
+    if (network.down || network.downFor.has(name)) throw new TypeError("fetch failed");
+    const args = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    const sql = `set role service_role; select public.${name}(${Object.entries(args).map(([key, value]) => `${key} => ${literal(key, value)}`).join(", ")});`;
+    const result = await db.psql(sql);
+    if (result.code === 0) return new Response(result.stdout.split("\n")[0] || "{}", { status: 200 });
+    const code = /ERROR:\s+(PT\d{3}|[0-9A-Z]{5}):/.exec(result.stderr)?.[1] ?? "";
+    return new Response("{}", { status: code.startsWith("PT") ? Number(code.slice(2)) : 500 });
+  }) as typeof fetch;
+}

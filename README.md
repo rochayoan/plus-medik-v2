@@ -187,7 +187,7 @@ No se reescribe WhatsApp ni infraestructura antes de demostrar el core.
 2. Toma solo mensajes ENTRANTES de tipo imagen (texto, audio, reacciones y mensajes salientes se ignoran). Si `ALLOWED_PHONES` está definida, solo responde a esos números.
 3. Responde 200 de inmediato y sigue en segundo plano (`waitUntil`), así Kapso no reintenta mientras el motor trabaja.
 4. Descarga la imagen, carga el catálogo activo (Supabase, solo lectura) y llama a `analyzeImage` con las banderas ya validadas por argumento (semántico, AUTO parcial, manuscrito); el AUTO MATCH no cambia.
-5. Envía por Kapso UNA respuesta con cada estudio verificado, su precio, el total ("Total de los estudios cotizados") y emojis (`src/whatsapp-quote.ts`). Con una cotización parcial solo van los estudios seguros; los pendientes, bloqueos y la función del documento se registran en el log del servidor (JSON, teléfono enmascarado) y nunca se mencionan al paciente. El log (`event: analysis`) está minimizado: solo códigos y enumeraciones (decisión, bloqueos, riesgo visual, certeza, códigos del catálogo, contadores); no incluye el teléfono completo, el texto de las líneas ni texto libre de los modelos. Para depurar un caso, `PILOT_LOG_STUDY_TEXT=on` agrega además el nombre de cada estudio leído (recortado a 60 caracteres).
+5. Envía por Kapso UNA respuesta con cada estudio verificado, su precio, el total ("Total de los estudios cotizados") y emojis (`src/whatsapp-quote.ts`). Con una cotización parcial solo van los estudios seguros; los pendientes, bloqueos y la función del documento se registran en el log del servidor (JSON, teléfono enmascarado) y nunca se mencionan al paciente. El log (`event: analysis`) está minimizado: solo códigos y enumeraciones (decisión, bloqueos, clase de incertidumbre, riesgo visual, certeza, códigos del catálogo, contadores); no incluye el teléfono completo, el nombre ni el texto de los estudios leídos, el texto de las líneas ni texto libre de los modelos, y no hay ninguna bandera que lo permita.
 6. Si no hay cotización (ningún estudio verificable, no es una solicitud, imagen ilegible) se pide una foto más clara; si algo falla, un mensaje técnico neutro. Nunca se envía el detalle de un error.
 
 Sin CRM, pedidos, tablas ni sistema propio de duplicados: la única defensa es responder 200 enseguida. Un reintento de Kapso (si el 200 no llegara a tiempo) podría generar una segunda respuesta.
@@ -198,3 +198,89 @@ Sin CRM, pedidos, tablas ni sistema propio de duplicados: la única defensa es r
 3. Despliega y comprueba `GET https://<dominio>/api/kapso/webhook` → `{"ok":true}`.
 4. En Kapso, registra el webhook `https://<dominio>/api/kapso/webhook` para mensajes entrantes de WhatsApp, con el mismo secreto que `WEBHOOK_SECRET`.
 5. Envía una foto desde un número de `ALLOWED_PHONES` y revisa los registros de Vercel (`event: analysis`, `reply_sent`).
+
+## Auditoría persistente (Supabase) — migraciones NO aplicadas
+
+Cada imagen procesada deja una corrida en `plusmedik_audit_runs` y sus evidencias en `plusmedik_audit_studies`, `plusmedik_audit_model_calls` y `plusmedik_audit_checks` (sin imágenes, teléfonos, prompts, respuestas crudas, razonamientos ni texto clínico libre). Las migraciones están en `supabase/migrations/` y **no se han aplicado a ningún Supabase remoto**; se ejecutan en este orden, sin modificar las anteriores: `20261020000000` (Fase 6) → `20261021000000` (telemetría de IA) → `20261022000000` (transaccional e inmutabilidad) → `20261023000000` (leases, fencing y recuperación) → `20261024000000` (control de atención humana).
+
+- **Atomicidad.** Las evidencias de un análisis (resumen de la corrida, estudios, llamadas de IA y verificaciones) y el resultado del envío se escriben con las funciones `plusmedik_audit_record_evidence` y `plusmedik_audit_record_reply`: una transacción cada una, con lista blanca de campos, validación previa y errores sin valores. **Quedan fuera** (escrituras separadas y por tanto no atómicas con lo anterior): el claim del mensaje (INSERT en `runs`) y las actualizaciones operativas `recordIgnored`/`recordFailure`. Una corrida terminada con `evidence_recorded_at` NULL indica evidencia no confirmada (brecha de auditoría observable). El envío a WhatsApp nunca forma parte de la transacción.
+- **Idempotencia y reintentos.** La función bloquea la fila de la corrida y guarda el hash del contenido: el mismo contenido repetido responde `already_recorded` (sin duplicar); uno distinto sobre una corrida ya registrada se rechaza (409). Si una petición termina sin respuesta (timeout, red, 5xx) no se sabe si se confirmó: el cliente repite UNA vez, con exactamente los mismos bytes; si tampoco hay respuesta el resultado queda `UNKNOWN_OUTCOME`, se registra solo ese código y el procesamiento continúa (fail-open). **El envío a WhatsApp nunca se repite** por un fallo de auditoría. Peor caso con Supabase colgado: 2 intentos de 5 s por escritura.
+- **Inmutabilidad.** `service_role` solo LEE `studies`, `model_calls` y `checks` y solo actualiza las columnas operativas de `runs`; triggers impiden UPDATE/DELETE/TRUNCATE de las evidencias (incluso al propietario), cambiar las columnas de evidencia ya registradas y las transiciones de estado inválidas. **Límites:** `service_role` se salta RLS (no se confía en RLS contra él); el propietario o un superusuario pueden desactivar triggers o cambiar privilegios, y quien tenga la credencial de `service_role` puede registrar evidencia (no la puede reescribir, pero la base no prueba su autenticidad). Aún no existe purga: los triggers bloquean todo DELETE (la retención de 30/180 días se aplicará en su propia migración).
+- **Pruebas contra PostgreSQL real.** `tests/audit-db.test.ts` crea un clúster efímero (directorio temporal, 127.0.0.1, se destruye al terminar), aplica las tres migraciones desde cero y prueba la función, los privilegios y los triggers. Usa los binarios de PostgreSQL instalados (autodetecta `C:\Program Files\PostgreSQL\*\bin`, `/usr/lib/postgresql` o el PATH; `PLUSMEDIK_PG_BIN` fuerza una carpeta). Sin PostgreSQL esas pruebas se omiten con un aviso.
+
+### Leases, reserva de envío y recuperación (F1.3) — migración NO aplicada
+
+**Prioridad: nunca enviar dos respuestas al mismo paciente.** La exclusión no depende del reloj ni de temporizadores: depende de una **reserva de envío** que la base concede una sola vez, bajo bloqueo de fila, a la ejecución que posee el lease con la generación (fence) vigente. `handleImageMessage` solo llama a Kapso después de que la base confirme esa reserva; con cualquier otro resultado (bloqueada, lease perdido, cerrada, base no disponible o resultado desconocido) **no envía**: un mensaje no enviado se concilia después, uno duplicado no se puede deshacer.
+
+**Flujo:** `claim (lease)` → descarga → análisis → evidencia (con fencing) → **reserva** → Kapso → resultado (con fencing). Cada ejecución tiene un propietario único (UUID) y toda escritura sobre la corrida presenta `owner + fence`. Si otra ejecución reclama el lease (o el recuperador cierra la corrida) el fence cambia y la base rechaza a la antigua con 410 (`LEASE_LOST`); un trigger lo impone también contra escrituras directas sobre corridas con lease. El latido que renueva el lease durante el análisis (cada 40 s, lease de 120 s) solo mejora la disponibilidad: sin él, lo peor que pasa es que otra ejecución reclame el lease y la antigua no pueda enviar.
+
+**Estados** (`send_state` + `processing_status`; vista `plusmedik_audit_run_phase`):
+
+| Fase | `processing_status` / `send_state` | Significado | ¿Se reanuda? |
+| --- | --- | --- | --- |
+| A. `RECOVERABLE` | `PROCESSING` / `NOT_RESERVED` | Procesamiento sin envío reservado | Sí: un webhook reenviado reclama el lease **vencido** (fence + 1) |
+| B. `ANALYZED_UNSENT` | `ANALYZED` / `NOT_RESERVED` | Análisis terminado, sin intento de envío | Sí (se vuelve a analizar; la primera evidencia confirmada se conserva) |
+| C. `SENDING` | cualquiera / `RESERVED` | Envío reservado o en curso (Kapso pudo o no haberse llamado) | **Nunca**: ni el webhook ni el recuperador lo reenvían |
+| D. `SENT_ACCEPTED` | `COMPLETED`/`FAILED` / `ACCEPTED` | Kapso aceptó el mensaje | Terminal |
+| E. `SEND_UNKNOWN` | `COMPLETED`/`FAILED` / `UNKNOWN` | Resultado desconocido (`SEND_OUTCOME_UNKNOWN`) | Terminal: conciliación o revisión humana |
+| F. `NEEDS_ATTENTION` | `FAILED` / `NOT_APPLICABLE` | Abandonada antes de enviar (`ABANDONED_BEFORE_SEND`) | Terminal: revisión humana |
+| — `CLOSED_NO_SEND` | `IGNORED`,`COMPLETED` / `NOT_APPLICABLE`,`CANCELLED` | Sin respuesta por diseño (imagen enorme) o bloqueada | Terminal |
+
+Las corridas anteriores a F1.3 (sin lease) conservan el contrato de F1.2, aparecen como `LEGACY_IN_PROGRESS` y **nunca se reabren**.
+
+**Puntos de interrupción y qué pasa:** (1) antes de que el claim llegue a la base: no queda rastro; (2) tras el claim, durante la descarga/análisis o antes de la evidencia: fase A, la reanuda un reenvío del webhook con el lease vencido o la cierra el recuperador como `ABANDONED_BEFORE_SEND` (sin responder); (3) tras la evidencia y antes de reservar: fase B, igual que A; (4) tras reservar y antes de llamar a Kapso, durante la llamada, o tras aceptarla y antes de guardar el resultado (caída de Vercel, Supabase caído): fase C, no se reenvía; el recuperador la marca `UNKNOWN`; (5) tras guardar el resultado: terminal.
+
+**Riesgo residual de duplicados y su mitigación**
+- *Dos webhooks del mismo mensaje*: claim atómico; el segundo ve `busy`/`in_doubt`/`finished` y se ignora.
+- *Ejecución antigua que revive*: fencing (410) en evidencia, cierre, reserva y resultado; sin reserva no hay envío.
+- *Timeout al reservar*: la reserva es idempotente para el mismo propietario; si tampoco hay respuesta, **no se envía**.
+- *Kapso aceptó pero no se guardó el resultado*: queda `RESERVED`; el recuperador lo marca `UNKNOWN` y no se reenvía. No se asume que la API de WhatsApp/Kapso ofrezca exactly-once ni claves de idempotencia: no hay ninguna documentada que este proyecto use.
+- *Residual*: el claim es la primera escritura; si la base no responde en ese momento no hay lease. Por defecto (política heredada) se responde igual y se registra `audit_unavailable stage=claim`; `requireAuditGuard: true` en `QuoteDeps` lo impide. Un duplicado solo es posible si, mientras la base está caída, Kapso entrega el mismo mensaje dos veces (el webhook responde 200 de inmediato, así que no reintenta).
+- *Residual*: una ejecución a la que el recuperador marcó `UNKNOWN` mientras seguía viva puede enviar su mensaje (el único); su registro se rechaza y la corrida queda `UNKNOWN` (honesto: no se pudo confirmar).
+
+**Recuperación sin depender del webhook.** `plusmedik_audit_recover_stale` (RPC) cierra de forma segura lo interrumpido: `RESERVED` con lease vencido (+60 s) → `UNKNOWN`; `NOT_RESERVED` con lease vencido hace más de 15 min → `ABANDONED_BEFORE_SEND`. **No envía nada**, usa `FOR UPDATE SKIP LOCKED` (dos recuperadores no pisan la misma corrida) y sube el fence. Como la base no guarda teléfono ni imagen (privacidad), el recuperador no puede responder al paciente; una reanudación automática con respuesta solo ocurre si el mensaje se vuelve a entregar. Reanudar sin reenvío exigiría guardar el destinatario y acceso a la imagen: **no implementado** a la espera de una decisión explícita de privacidad.
+
+**Activación futura (no configurada):** el endpoint `GET|POST /api/audit/recover` (`src/audit-recovery.ts`) está **inerte**: sin `CRON_SECRET` responde 503. Para activarlo: (1) aplicar las cuatro migraciones; (2) definir `CRON_SECRET` en Vercel (secreto aleatorio largo); (3) agregar a `vercel.json` `"crons": [{ "path": "/api/audit/recover", "schedule": "*/10 * * * *" }]` (Vercel Cron llama por GET con `Authorization: Bearer $CRON_SECRET`; verifique los límites de crons de su plan de Vercel: según su documentación en el plan Hobby solo se permite una ejecución diaria, y un intervalo de minutos requiere un plan superior); (4) vigilar los logs `audit_recovery` y la consulta `select * from plusmedik_audit_run_phase where phase in ('SEND_UNKNOWN','NEEDS_ATTENTION')`. Alternativa sin HTTP si se habilita `pg_cron`: `select cron.schedule('plusmedik-audit-recovery', '*/10 * * * *', $$select public.plusmedik_audit_recover_stale()$$);`.
+
+**Conciliación de `SEND_UNKNOWN`:** compare con la conversación en Kapso si existe un mensaje saliente posterior a `send_reserved_at`. No hay una consulta automática (la API no se asume); hoy es una revisión humana.
+
+**Preparación para intervención humana (sin integrar):** `plusmedik_audit_block_send(message_id, motivo)` impide una respuesta pendiente si aún no se reservó (`blocked`) o informa `too_late` si ya se reservó. La comprobación real ocurre en `reserve_send`, bajo el mismo bloqueo de fila: un bloqueo y una reserva no se pueden cruzar. No conoce ninguna tabla de otros sistemas. Un bloqueo que llegue **antes** de que exista la corrida no se puede registrar aquí (requeriría una clave de conversación que esta fase no introduce).
+
+### Atención humana: apagado automático de la IA (F2.1) — migración NO aplicada, función APAGADA por defecto
+
+Cuando una persona del laboratorio escribe al paciente desde **WhatsApp Business**, la IA deja de responder a ese contacto hasta que se reactive de forma explícita. Se reutiliza el criterio de La Fija (un mensaje saliente con `message.kapso.origin === "business_app"`), sin copiar sus tablas ni su lógica de restaurante.
+
+**Eventos de Kapso reconocidos** (formato v2 verificado en https://docs.kapso.ai/docs/platform/webhooks/message-events; `src/human-control.ts`): se clasifica por `direction` + `origin` + estado, no solo por el nombre del evento (`X-Webhook-Event`).
+
+| Clase | Cómo se reconoce | Efecto |
+| --- | --- | --- |
+| Paciente | `direction: inbound` (o `whatsapp.message.received`) | Imágenes → motor de recetas; el origin de un entrante (`cloud_api`) no se usa |
+| **Intervención humana** | `direction: outbound` + `origin: business_app`, evento de creación (`sent`) | **Pausa** al contacto |
+| Bot propio | `outbound` + `origin: cloud_api` (lo enviado por la API de Kapso) | Ninguno: el bot jamás se apaga a sí mismo |
+| Estados de entrega | `delivered`, `read`, `failed` (cabecera o `message.kapso.status`); comparten `message.id` con el mensaje original | Ninguno: **nunca** son una intervención |
+| Historial importado | `origin: history_sync` | Ninguno |
+| Otra app / agente de Meta | `other_app`, `meta_business_agent` | Solo se registra (no se interpreta como humano) |
+| **Origen desconocido** | saliente sin `origin` o con uno no reconocido | Se registra como `UNKNOWN_ORIGIN`; no se inventa que fue humano |
+| Otros | eventos de conversación/contacto/thread, sin mensaje, dirección ausente | Ninguno |
+
+Kapso no documenta en qué evento llega exactamente un eco de `business_app` (solo que lleva ese origen); por eso el criterio no depende del nombre del evento. El webhook de La Fija solo mira `direction`/`origin`, no valida firma ni distingue estados: aquí se conserva la verificación de firma (`x-webhook-signature`) y se descartan los estados de entrega.
+
+**Estado persistente (única fuente de verdad):** tabla `plusmedik_attention_contacts` (`ACTIVE` | `HUMAN_PAUSED`, `revision`, `paused_at`, `pause_reason = HUMAN_WHATSAPP_BUSINESS_APP`, `pause_source`, `resumed_at`, `last_human_event_at`, `updated_at`). La fila se crea si no existe (incluso sin ningún análisis previo). Tabla `plusmedik_attention_events` (inmutable; `event_key` único deduplica). El contacto se identifica con `contact_key = HMAC-SHA256(PLUSMEDIK_CONTACT_HMAC_KEY, "plusmedik-contact-v1|<KAPSO_PHONE_NUMBER_ID>|<dígitos del teléfono>")`: estable entre conversaciones, acotado al número del laboratorio y sin guardar el teléfono. Los procesamientos (`plusmedik_audit_runs`) guardan la misma clave (`contact_key`), que es lo que permite bloquear los pendientes de un contacto.
+
+**Máquina de estados:** `ACTIVE` → (mensaje humano posterior a la última reactivación) → `HUMAN_PAUSED` → (`plusmedik_attention_resume`, explícita) → `ACTIVE`. La revisión sube exactamente con cada cambio de estado. Un evento humano repetido es `duplicate`; otro mientras está pausado es `ALREADY_PAUSED` (solo adelanta `last_human_event_at`); uno **anterior a la última reactivación** es `STALE_IGNORED` y no vuelve a pausar. No hay reactivación por tiempo.
+
+**Coordinación con el envío (todo en la base, orden de bloqueo fijo contacto → corrida):**
+1. *Antes del análisis*: `plusmedik_audit_claim_run` no procesa a un contacto pausado (registra `PATIENT_SUPPRESSED`).
+2. *Al pausar*: se bloquean los procesamientos pendientes del contacto (los que aún no reservaron envío).
+3. *En la reserva* (`reserve_send`): bajo el bloqueo de la corrida se vuelve a consultar el bloqueo y el estado del contacto (respaldo ante un claim concurrente que la pausa no pudo ver).
+4. *Comprobación final* (`plusmedik_audit_confirm_send`, justo antes de llamar a Kapso): si el contacto se pausó tras la reserva, la reserva (aún sin usar) se libera y no se envía.
+
+**Lo que NO se puede garantizar:** un evento humano que llega después de la comprobación final, o mientras la llamada a Kapso está en curso, **no puede cancelar ese envío**; tampoco se puede retirar un mensaje ya entregado a Kapso, ni se asume exactly-once. Esa carrera se registra como evento auditable (`late_reserved_runs` y `replied_after_event_runs` en el evento, y `attention_reason = HUMAN_PAUSE_AFTER_RESERVATION | BOT_REPLIED_AFTER_HUMAN_EVENT` en la corrida). Tampoco se recupera un evento humano que Kapso no entregue (o que agote sus reintentos).
+
+**Falla cerrada.** Con el control activo no se responde si: no hay clave estable del contacto (clave dedicada ausente o teléfono ausente), no hay auditoría, el claim falla (aunque `requireAuditGuard` no esté definido: el control lo implica), o la reserva o la comprobación final no obtienen respuesta. Un evento humano que no se pudo registrar responde **503** para que Kapso reintente (a los 10 s y 40 s, máximo 3 intentos; el registro es idempotente).
+
+**Política de ACK (explicación y consecuencias).** *Imágenes*: sin cambios — se responde 200 de inmediato y se procesa en segundo plano (`waitUntil`). Consecuencia heredada: si el claim falla después del 200, Kapso **no** reintentará una entrega ya confirmada; con el control activo el paciente no recibe respuesta automática (puede reenviar la foto) y queda `reply_withheld`. Esperar el claim antes del 200 sería una mejora para otra fase. *Eventos humanos*: se registra la pausa **antes** de responder, con plazos cortos (2 intentos de 3 s) por debajo de los 10 s que Kapso concede; si falla, 503 y reintento de Kapso. Riesgo residual: si se agotan los 3 intentos, el evento se pierde.
+
+**Configuración (documentada; NO configurada en producción):** `PLUSMEDIK_HUMAN_CONTROL=on` activa el control (apagado si falta); `PLUSMEDIK_CONTACT_HMAC_KEY` (≥ 32 caracteres, clave **dedicada**, distinta de `WEBHOOK_SECRET` y de cualquier otra); `KAPSO_PHONE_NUMBER_ID` (ya existente) acota las claves; `REQUIRE_AUDIT_GUARD=on` exige el claim aunque el control esté apagado (requisito de producción recomendado). Las pruebas usan valores simulados. Para activarlo: aplicar las cinco migraciones (previo ensayo), definir las variables en Vercel y verificar en un número piloto (`ALLOWED_PHONES`) con una pausa y una reactivación reales.
+
+**Reactivación:** `plusmedik_attention_resume(contact_key, motivo, actor)` (solo `service_role`). No hay pantallas ni endpoint de control manual todavía. Reactivar no desbloquea lo ya cancelado: el paciente puede reenviar su foto.
