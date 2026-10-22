@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { AnalysisResult } from "./analyze.js";
-import { categorizeProcessingError, type AuditRepository } from "./audit.js";
+import { catalogFingerprint, processingFailureCode, type AuditRepository, type ProcessingPhase } from "./audit.js";
 import { withAiCallObserver, type AiCallEvent } from "./cache.js";
 import type { PublicQuote } from "./partial-auto.js";
 import type { CatalogStudy } from "./types.js";
@@ -210,8 +210,11 @@ export async function handleImageMessage(image: IncomingImage, deps: QuoteDeps):
   let result: QuoteResult;
   let processingStatus: "COMPLETED" | "FAILED" = "COMPLETED";
   const aiCalls: AiCallEvent[] = [];
+  // Etapa en curso: el código de fallo de la auditoría sale de DÓNDE falló el flujo, no del texto del error.
+  let phase: ProcessingPhase = "MEDIA_DOWNLOAD";
   try {
     const { bytes } = await deps.downloadImage(image);
+    phase = "OTHER";
     if (bytes.length === 0 || bytes.length > MAX_IMAGE_BYTES) {
       deps.log("image_rejected_size", { messageId: image.messageId, phone: who, bytes: bytes.length });
       await persist("image", () => deps.audit!.recordIgnored(auditRunId!, "IMAGE_SIZE"));
@@ -224,14 +227,17 @@ export async function handleImageMessage(image: IncomingImage, deps: QuoteDeps):
       reply = NO_QUOTE_MESSAGE;
       result = "no_quote";
     } else {
+      phase = "CATALOG_LOAD";
       const catalog = await deps.loadCatalog();
+      phase = "AI_ANALYSIS";
       const analysis = await withAiCallObserver(
         (event) => aiCalls.push(event),
         () => deps.analyze({ imageBase64: Buffer.from(bytes).toString("base64"), mimeType, catalog })
       );
+      phase = "OTHER";
       // Registro INTERNO (solo en el log del servidor, minimizado): lo pendiente y por qué. Nunca va al paciente.
       deps.log("analysis", { messageId: image.messageId, phone: who, ...buildAnalysisLog(analysis) });
-      await persist("analysis", () => deps.audit!.recordAnalysis(auditRunId!, analysis));
+      await persist("analysis", () => deps.audit!.recordAnalysis(auditRunId!, analysis, { catalog: catalogFingerprint(catalog) }));
       await persist("model_calls", () => deps.audit!.recordAiCalls(auditRunId!, aiCalls));
       if (analysis.publicQuote && analysis.outcome !== "HUMAN_REVIEW") {
         reply = formatQuoteMessage(analysis.publicQuote);
@@ -242,7 +248,7 @@ export async function handleImageMessage(image: IncomingImage, deps: QuoteDeps):
       }
     }
   } catch (error) {
-    const errorCode = categorizeProcessingError(error);
+    const errorCode = processingFailureCode(phase);
     deps.log("processing_failed", { messageId: image.messageId, phone: who, errorCode });
     await persist("model_calls", () => deps.audit!.recordAiCalls(auditRunId!, aiCalls));
     await persist("failure", () => deps.audit!.recordFailure(auditRunId!, errorCode));

@@ -24,9 +24,12 @@ function phoneNumberId(): string {
   return id;
 }
 
+// Banderas del motor en producción: una sola fuente para el análisis y para el registro de auditoría (qué configuración produjo cada análisis).
+const ENGINE_FLAGS = { semanticPrimary: true, semanticAuto: true, partialAuto: true, handwrittenAuto: "on" } as const;
+
 let auditRepository: AuditRepository | undefined;
 function audit(): AuditRepository {
-  return auditRepository ??= createSupabaseAuditRepository();
+  return auditRepository ??= createSupabaseAuditRepository({ runtime: { flags: ENGINE_FLAGS } });
 }
 
 const realDeps: QuoteDeps = {
@@ -45,7 +48,7 @@ const realDeps: QuoteDeps = {
   loadCatalog: () => loadActiveCatalog(),
   // Motor actual de PlusMedik, con las banderas ya validadas pasadas por argumento (no se modifica el AUTO MATCH).
   analyze: ({ imageBase64, mimeType, catalog }) =>
-    analyzeImage({ imageBase64, mimeType, catalog, semanticPrimary: true, semanticAuto: true, partialAuto: true, handwrittenAuto: "on" }),
+    analyzeImage({ imageBase64, mimeType, catalog, ...ENGINE_FLAGS }),
   async sendText(to, body) {
     const response = await kapsoClient().messages.sendText({ phoneNumberId: phoneNumberId(), to, body });
     return { providerMessageId: response.messages[0]?.id };

@@ -281,9 +281,9 @@ export async function readImageWithGeminiViaOpenRouter(
         const choice = response.choices[0];
         const usage = usageFromChatCompletions(response.usage);
         try {
-          return { value: readingSchema.parse(JSON.parse(choice?.message.content ?? "{}")), usage };
+          return { value: readingSchema.parse(JSON.parse(choice?.message.content ?? "{}")), usage, reasoningEffort: effort };
         } catch (error) {
-          await recordAiUsage({ label: "gemini-openrouter", provider: "openrouter", model, usage, invalid: true });
+          await recordAiUsage({ label: "gemini-openrouter", provider: "openrouter", model, usage, invalid: true, reasoningEffort: effort });
           const detail = `finish_reason=${choice?.finish_reason}, completion_tokens=${response.usage?.completion_tokens}, max_tokens=${maxTokens}, reasoning=${effort}`;
           const tail = `Final del contenido: ${JSON.stringify((choice?.message.content ?? "").slice(-200))}`;
           if (choice?.finish_reason === "length") {
