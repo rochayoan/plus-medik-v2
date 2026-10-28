@@ -68,7 +68,9 @@ describe.skipIf(!bin)("pausa manual desde el CRM contra PostgreSQL real", () => 
       expect(await eventsOf(key)).toBe("CRM_MANUAL_PAUSE:PAUSED");
       const event = JSON.parse(await db.ok(`select to_json(e) from public.plusmedik_attention_events e where event_key = 'crm:${operation}'`));
       expect(event.detail).toEqual({ action: "pause", reason: "CRM_MANUAL_PAUSE", source: "crm_server", actor: "crm:3f2a9c" });
-      expect(JSON.stringify(event)).not.toMatch(/phone|telefono|591/i);
+      // Determinista (un patrón sobre el JSON podía coincidir por azar con dígitos del hash, del UUID o de un timestamp): la fila solo tiene las columnas de siempre, ninguna de teléfono ni de texto.
+      expect(Object.keys(event).sort()).toEqual(["blocked_runs", "contact_key", "detail", "event_key", "id", "kind", "late_reserved_runs", "occurred_at", "outcome", "received_at", "replied_after_event_runs", "state_revision"]);
+      expect(Object.keys(event).join(",")).not.toMatch(/phone|telefono|text|body|content|message/i);
     });
 
     it("NO es un mensaje humano de WhatsApp: no usa kind HUMAN_BUSINESS_APP, no guarda last_human_event_at y la fuente es distinta", async () => {
