@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { AnalysisResult } from "./analyze.js";
 import type { AiCallEvent } from "./cache.js";
+import type { QuoteBeginResult, QuoteCloseInput, QuoteCloseResult, QuoteReadResult, ItemResult } from "./quote-session.js";
+import type { ReplyGuardRequest } from "./reply-guard.js";
 import type { CatalogStudy } from "./types.js";
 import type { IncomingImage, QuoteResult } from "./whatsapp-quote.js";
 
@@ -17,32 +19,75 @@ export interface AuditLease {
 //   claimed    esta ejecución posee el lease (takeover = lo reclamó de una ejecución anterior cuyo lease había vencido, sin envío reservado).
 //   duplicate  NO se procesa: BUSY (otra ejecución con lease vigente), IN_DOUBT (hay o pudo haber un envío en curso: nunca se reabre),
 //              FINISHED (ya terminó), EXHAUSTED (demasiados intentos; lo cierra el recuperador) o HUMAN_PAUSED (atención humana activa para el contacto).
+//   seq        (solo en modo turnos) número del turno dentro de su contacto, en orden de llegada a la base.
 export type AuditClaim =
-  | { kind: "claimed"; runId: string; lease: AuditLease; takeover: boolean }
+  | { kind: "claimed"; runId: string; lease: AuditLease; takeover: boolean; seq?: number }
   | { kind: "duplicate"; processingStatus: string; reason?: "BUSY" | "IN_DOUBT" | "FINISHED" | "EXHAUSTED" | "HUMAN_PAUSED" };
 
 export type ReplyAuditState = "ACCEPTED" | "UNKNOWN";
 
+// Referencia a un registro de conocimiento APROBADO que respalda la respuesta de un turno (sin texto de pacientes ni de respuestas).
+export interface FactRefRecord {
+  kind: "SAMPLE" | "TURNAROUND";
+  labTestId: string;
+  version: number;
+  contentHash: string;
+}
+export interface KnowledgeRefRecord {
+  kind: string;
+  key: string;
+  version: number;
+  contentHash: string;
+}
+
+// Turnos conversacionales (G2.0, migración 6): un turno es un mensaje entrante de un contacto y ES una corrida de auditoría.
+//   TurnKind     tipo del mensaje entrante.
+//   StalePolicy  qué hacer con la respuesta de un turno cuando un turno MÁS NUEVO del mismo contacto ya reservó o envió la suya:
+//                NONE = se envía igual (p. ej. una cotización nunca se descarta en silencio); NEWER_TURN = se descarta (llegaría después de la nueva).
+export type TurnKind = "IMAGE" | "TEXT" | "OTHER";
+export type StalePolicy = "NONE" | "NEWER_TURN";
+
 // Resultado de pedir autorización para llamar a Kapso. SOLO "reserved" autoriza el envío; cualquier otro resultado (o un error) significa NO enviar.
-export type SendReservation = "reserved" | "blocked" | "lost";
+// busy y superseded solo existen en modo turnos: busy = otro envío del mismo contacto está en vuelo (esperar y reintentar); superseded = respuesta obsoleta (descartada).
+// limited (G3.2, solo con la guarda de respuestas): tope de respuestas por contacto o sospecha de bucle; la respuesta se descarta y la corrida queda cerrada con su motivo.
+export type SendReservation = "reserved" | "blocked" | "lost" | "busy" | "superseded" | "limited";
 // Comprobación final antes de llamar a Kapso: "proceed" es la única que permite enviar.
 export type SendConfirmation = "proceed" | "blocked" | "lost";
-export type SendableResult = Exclude<QuoteResult, "ignored">;
+export type SendableResult = Exclude<QuoteResult, "ignored"> | "conversation";
 
 export interface AuditRepository {
   // contactKey (HMAC del contacto, ver human-control.ts) activa el control de atención humana: un contacto pausado no se procesa.
-  claim(image: Pick<IncomingImage, "messageId" | "mediaId">, options?: { contactKey?: string }): Promise<AuditClaim>;
+  // turnKind (exige contactKey) reclama el mensaje como TURNO del contacto (plusmedik_turn_claim): además de lo anterior le asigna su número de secuencia.
+  claim(image: Pick<IncomingImage, "messageId" | "mediaId">, options?: { contactKey?: string; turnKind?: TurnKind }): Promise<AuditClaim>;
   // false = el lease se perdió (otra ejecución lo reclamó o el recuperador cerró la corrida). Un fallo de red NO es "perdido": lanza.
   renewLease(runId: string, lease: AuditLease): Promise<boolean>;
-  recordIgnored(runId: string, reason: "IMAGE_SIZE" | "IMAGE_TYPE", lease: AuditLease): Promise<void>;
+  // NO_REPLY (turno sin respuesta por diseño) y IMAGE_SIZE son cierres finales; IMAGE_TYPE sigue con un aviso que debe reservarse.
+  recordIgnored(runId: string, reason: "IMAGE_SIZE" | "IMAGE_TYPE" | "NO_REPLY", lease: AuditLease): Promise<void>;
   // TODAS las evidencias del procesamiento (resumen del análisis, estudios, llamadas de IA y verificaciones) en UNA transacción idempotente (ver AuditWriteError).
   recordEvidence(runId: string, evidence: AnalysisEvidence, lease: AuditLease): Promise<void>;
   recordFailure(runId: string, errorCode: AuditErrorCode, lease: AuditLease): Promise<void>;
   // Reserva de envío bajo bloqueo de fila: debe concederse ANTES de llamar a Kapso y es la comprobación de pausa (ver block_send en la migración).
-  reserveSend(runId: string, kind: SendableResult, lease: AuditLease): Promise<SendReservation>;
+  // options.stale (modo turnos) usa plusmedik_turn_reserve_send: además un solo envío en vuelo por contacto y el descarte de respuestas obsoletas.
+  // options.guard (G3.2) usa plusmedik_turn_reserve_send_guarded: además el tope por contacto y ventana y las señales de bucle, atómicos con la reserva.
+  reserveSend(runId: string, kind: SendableResult, lease: AuditLease, options?: { stale: StalePolicy; guard?: ReplyGuardRequest }): Promise<SendReservation>;
   // Comprobación final, lo más cerca posible de la llamada a Kapso: si el contacto se pausó, la reserva (aún sin usar) se libera. No elimina la carrera residual
   // entre esta respuesta y la llamada externa.
   confirmSend(runId: string, lease: AuditLease): Promise<SendConfirmation>;
+  // Modo turnos: desiste de esperar un envío en vuelo (BUSY_TIMEOUT). Vence el lease del turno y lo marca para atención, de modo que un reenvío del mensaje pueda
+  // reclamarlo de nuevo; NUNCA envía, reserva ni cierra nada. Opcional: un repositorio que no lo implemente deja el comportamiento anterior (el lease vence solo).
+  releaseTurn?(runId: string, reason: "BUSY_TIMEOUT", lease: AuditLease): Promise<void>;
+  // Modo turnos: registra, ANTES de reservar el envío, qué versiones aprobadas de conocimiento respaldan la respuesta. 'closed' = ya no se puede (el envío se reservó o el turno se
+  // cerró). Opcional: sin él, una respuesta basada en conocimiento no se puede enviar (no hay rastro).
+  recordKnowledgeRefs?(runId: string, refs: readonly KnowledgeRefRecord[], lease: AuditLease): Promise<"recorded" | "closed">;
+  // G4.1 (migración 12): lo mismo para los datos por estudio aprobados (tipo de muestra / requisitos y plazo de entrega). Opcional: sin él, una respuesta con esos datos no se puede enviar.
+  recordFactRefs?(runId: string, refs: readonly FactRefRecord[], lease: AuditLease): Promise<"recorded" | "closed">;
+  // G4.1: ids (sin precios) de los estudios de la última cotización entregada al contacto del turno, si es más nueva que maxAgeSeconds. Solo lectura, con owner + fence.
+  quoteLastStudies?(runId: string, lease: AuditLease, maxAgeSeconds: number): Promise<string[]>;
+  // Sesiones de cotización (G4.0, migración 11). Opcionales: sin ellos el modo sesiones no puede funcionar (falla cerrado). Todas con owner + fence e idempotentes por corrida.
+  quoteBegin?(runId: string, lease: AuditLease, input: { kind: "IMAGE" | "TEXT"; imageHash?: string; result?: ItemResult; ttlSeconds: number; maxItems: number }): Promise<QuoteBeginResult>;
+  quoteFinish?(runId: string, lease: AuditLease, result: ItemResult): Promise<void>;
+  quoteRead?(runId: string, lease: AuditLease): Promise<QuoteReadResult>;
+  quoteClose?(runId: string, lease: AuditLease, input: QuoteCloseInput): Promise<QuoteCloseResult>;
   recordReply(runId: string, reply: { state: ReplyAuditState; result: SendableResult; processingStatus: "COMPLETED" | "FAILED"; providerMessageId?: string }, lease: AuditLease): Promise<void>;
 }
 
@@ -403,7 +448,10 @@ export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}
     async claim(image, claimOptions) {
       // Cada ejecución tiene su propio propietario. La reclamación es atómica en la base (inserta, reconoce un duplicado o reclama un lease vencido).
       const owner = randomUUID();
-      const result = await rpc("plusmedik_audit_claim_run", {
+      const turnKind = claimOptions?.turnKind;
+      // Un turno exige la clave del contacto (la secuencia es por contacto): sin ella no se llama a la base.
+      if (turnKind && !claimOptions?.contactKey) throw new AuditWriteError("REJECTED");
+      const result = await rpc(turnKind ? "plusmedik_turn_claim" : "plusmedik_audit_claim_run", {
         p_message_id: image.messageId,
         p_media_id: image.mediaId ?? null,
         p_owner: owner,
@@ -411,12 +459,19 @@ export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}
         p_schema_version: AUDIT_SCHEMA_VERSION,
         p_engine_version: engineVersion,
         p_flags: flags,
-        ...(claimOptions?.contactKey ? { p_contact_key: claimOptions.contactKey } : {})
+        ...(claimOptions?.contactKey ? { p_contact_key: claimOptions.contactKey } : {}),
+        ...(turnKind ? { p_turn_kind: turnKind } : {})
       });
       const outcome = str(result.outcome);
       if (outcome === "paused") return { kind: "duplicate", processingStatus: "HUMAN_PAUSED", reason: "HUMAN_PAUSED" };
       if ((outcome === "claimed" || outcome === "taken_over") && str(result.run_id) && typeof result.fence === "number") {
-        return { kind: "claimed", runId: str(result.run_id)!, lease: { owner, fence: result.fence }, takeover: outcome === "taken_over" };
+        return {
+          kind: "claimed",
+          runId: str(result.run_id)!,
+          lease: { owner, fence: result.fence },
+          takeover: outcome === "taken_over",
+          ...(typeof result.seq === "number" ? { seq: result.seq } : {})
+        };
       }
       const reasons = { busy: "BUSY", in_doubt: "IN_DOUBT", finished: "FINISHED", exhausted: "EXHAUSTED" } as const;
       return { kind: "duplicate", processingStatus: str(result.status) ?? "UNKNOWN", reason: reasons[outcome as keyof typeof reasons] };
@@ -432,7 +487,8 @@ export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}
     },
     async recordIgnored(runId, reason, lease) {
       // Imagen demasiado grande o vacía: no habrá respuesta (cierre final). Tipo no soportado: se cierra el análisis y sigue un aviso, que debe reservarse.
-      await rpc("plusmedik_audit_fenced_close", { ...leaseArgs(runId, lease), p_close: { status: "IGNORED", error_code: reason, final: reason === "IMAGE_SIZE" } });
+      // Un turno que no genera respuesta (NO_REPLY) también es un cierre final.
+      await rpc("plusmedik_audit_fenced_close", { ...leaseArgs(runId, lease), p_close: { status: "IGNORED", error_code: reason, final: reason === "IMAGE_SIZE" || reason === "NO_REPLY" } });
     },
     async recordEvidence(runId, evidence, lease) {
       const payload = buildEvidencePayload(evidence, { engineVersion, flags });
@@ -441,10 +497,19 @@ export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}
     async recordFailure(runId, errorCode, lease) {
       await rpc("plusmedik_audit_fenced_close", { ...leaseArgs(runId, lease), p_close: { status: "FAILED", error_code: errorCode, final: false } });
     },
-    async reserveSend(runId, kind, lease) {
+    async reserveSend(runId, kind, lease, reserveOptions) {
       try {
-        const result = await rpc("plusmedik_audit_reserve_send", { ...leaseArgs(runId, lease), p_kind: kind, p_lease_seconds: sendLeaseSeconds });
-        return result.status === "reserved" ? "reserved" : result.status === "blocked" ? "blocked" : "lost";
+        // Modo turnos: la función de turnos envuelve a la de siempre (misma pausa humana y mismo fencing) y agrega 'busy' y 'superseded'.
+        const turnArgs = { ...leaseArgs(runId, lease), p_kind: kind, p_lease_seconds: sendLeaseSeconds, p_stale_policy: reserveOptions?.stale };
+        const result = reserveOptions?.guard
+          ? await rpc("plusmedik_turn_reserve_send_guarded", { ...turnArgs, p_guard: { ...reserveOptions.guard.config, ...(reserveOptions.guard.signature ? { signature: reserveOptions.guard.signature } : {}) } })
+          : reserveOptions
+            ? await rpc("plusmedik_turn_reserve_send", turnArgs)
+            : await rpc("plusmedik_audit_reserve_send", { ...leaseArgs(runId, lease), p_kind: kind, p_lease_seconds: sendLeaseSeconds });
+        if (result.status === "reserved" || result.status === "blocked") return result.status;
+        if (reserveOptions && (result.status === "busy" || result.status === "superseded")) return result.status;
+        if (reserveOptions?.guard && result.status === "limited") return "limited";
+        return "lost";
       } catch (error) {
         if (error instanceof AuditWriteError && error.kind === "LEASE_LOST") return "lost";
         throw error; // CONFLICT / REJECTED / UNKNOWN_OUTCOME: quien llama NO envía
@@ -465,6 +530,82 @@ export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}
         ...leaseArgs(runId, lease),
         p_reply: { state: reply.state, result: reply.result, processing_status: reply.processingStatus, ...(reply.providerMessageId ? { provider_message_id: reply.providerMessageId } : {}) }
       });
+    },
+    async recordKnowledgeRefs(runId, refs, lease) {
+      const result = await rpc("plusmedik_turn_record_knowledge", { ...leaseArgs(runId, lease), p_refs: refs });
+      return result.status === "recorded" ? "recorded" : "closed";
+    },
+    async quoteBegin(runId, lease, input) {
+      const result = await rpc("plusmedik_quote_item_begin", {
+        ...leaseArgs(runId, lease),
+        p_kind: input.kind,
+        p_image_hash: input.imageHash ?? null,
+        p_result: input.result ?? null,
+        p_ttl_seconds: input.ttlSeconds,
+        p_max_items: input.maxItems
+      });
+      const sessionId = str(result.sessionId);
+      if (!sessionId) throw new AuditWriteError("REJECTED");
+      if (result.status === "full") return { status: "full", sessionId, count: Number(result.count ?? 0) };
+      const itemId = str(result.itemId);
+      if ((result.status !== "created" && result.status !== "exists" && result.status !== "duplicate") || !itemId) throw new AuditWriteError("REJECTED");
+      return {
+        status: result.status,
+        itemId,
+        sessionId,
+        itemStatus: (str(result.itemStatus) ?? "PROCESSING") as never,
+        position: Number(result.position ?? 1),
+        studyIds: Array.isArray(result.studyIds) ? result.studyIds.filter((id): id is string => typeof id === "string") : [],
+        unresolved: Number(result.unresolved ?? 0),
+        ambiguousGroups: Number(result.ambiguousGroups ?? 0)
+      };
+    },
+    async quoteFinish(runId, lease, result) {
+      await rpc("plusmedik_quote_item_finish", { ...leaseArgs(runId, lease), p_result: result });
+    },
+    async quoteRead(runId, lease) {
+      const result = await rpc("plusmedik_quote_session_read", leaseArgs(runId, lease));
+      const state = str(result.state);
+      if (state === "none") return { state: "none" };
+      if (state === "pending") return { state: "pending", pending: Number(result.pending ?? 1) };
+      const sessionId = str(result.sessionId);
+      if (state === "ready" && sessionId && Array.isArray(result.items)) return { state: "ready", sessionId, items: result.items as never };
+      if (state === "replay" && sessionId) {
+        return {
+          state: "replay",
+          sessionId,
+          outcome: str(result.outcome) as never,
+          reasons: Array.isArray(result.reasons) ? result.reasons.filter((reason): reason is string => typeof reason === "string") : [],
+          ...(Array.isArray(result.lines) ? { lines: result.lines as never, totalBs: Number(result.totalBs) } : {})
+        };
+      }
+      throw new AuditWriteError("REJECTED");
+    },
+    async quoteClose(runId, lease, input) {
+      const result = await rpc("plusmedik_quote_session_close", {
+        ...leaseArgs(runId, lease),
+        p_session_id: input.sessionId,
+        p_outcome: input.outcome,
+        p_lines: input.outcome === "QUOTED" ? input.lines : null,
+        p_total: input.outcome === "QUOTED" ? input.totalBs : null,
+        p_reasons: input.outcome === "NEEDS_REVIEW" ? input.reasons : null,
+        p_catalog_fingerprint: input.outcome === "QUOTED" ? input.catalogFingerprint : null
+      });
+      const status = str(result.status);
+      if (status === "closed" || status === "replayed") return { status, outcome: str(result.outcome) ?? input.outcome };
+      if (status === "pending" || status === "not_open") return { status };
+      throw new AuditWriteError("REJECTED");
+    },
+    async recordFactRefs(runId, refs, lease) {
+      const result = await rpc("plusmedik_turn_record_facts", { ...leaseArgs(runId, lease), p_refs: refs });
+      return result.status === "recorded" ? "recorded" : "closed";
+    },
+    async quoteLastStudies(runId, lease, maxAgeSeconds) {
+      const result = await rpc("plusmedik_quote_last_studies", { ...leaseArgs(runId, lease), p_max_age_seconds: maxAgeSeconds });
+      return Array.isArray(result.studyIds) ? result.studyIds.filter((id): id is string => typeof id === "string") : [];
+    },
+    async releaseTurn(runId, reason, lease) {
+      await rpc("plusmedik_turn_release", { ...leaseArgs(runId, lease), p_reason: reason });
     },
     async recoverStale(recovery = {}) {
       const result = await rpc("plusmedik_audit_recover_stale", {

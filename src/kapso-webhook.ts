@@ -1,5 +1,6 @@
 import { AuditWriteError } from "./audit.js";
 import { classifyKapsoEvent, eventsOf, type AttentionRepository, type ClassifiedKapsoEvent, type KapsoEventKind } from "./human-control.js";
+import { extractIncomingTurns, hasProcessableTurns, processTurns } from "./turns.js";
 import { extractIncomingImages, handleImageMessage, isAllowedPhone, maskPhone, verifyWebhookSignature, type QuoteDeps } from "./whatsapp-quote.js";
 
 // POST /api/kapso/webhook (lógica, sin acoplarse a Vercel): verifica la firma, clasifica los eventos de Kapso y
@@ -75,6 +76,15 @@ export async function handleKapsoWebhook(request: Request, deps: KapsoWebhookDep
   }
   // Un evento humano que no se pudo registrar se reintenta: se responde 503 y NO se arranca ningún procesamiento de este envío (el reintento lo hará).
   if (humanFailed) return text(503, "retry");
+
+  // Modo turnos (deps.quote.turns, apagado por defecto): imágenes y, si hay manejador, texto u otros mensajes se procesan como turnos del contacto (ver turns.ts).
+  // La política de ACK no cambia: 200 de inmediato y el trabajo en segundo plano.
+  if (deps.quote.turns) {
+    const turns = extractIncomingTurns(payload, request.headers.get("x-webhook-batch"), { eventName: eventName, nowSeconds: Date.now() / 1000 }).filter((turn) => isAllowedPhone(turn.from, deps.allowedPhones));
+    if (!hasProcessableTurns(turns, deps.quote)) return text(200, "ignored");
+    deps.schedule(processTurns(turns, deps.quote));
+    return text(200, "ok");
+  }
 
   const images = extractIncomingImages(payload, request.headers.get("x-webhook-batch")).filter((image) => isAllowedPhone(image.from, deps.allowedPhones));
   if (images.length === 0) return text(200, "ignored");
