@@ -579,7 +579,7 @@ describe.skipIf(!bin)("guarda de respuestas contra PostgreSQL real (migración 1
 
     it("es la décima (las siguientes: sesiones de cotización G4.0 y datos por estudio G4.1) y las nueve anteriores no se modificaron (hashes fijados)", () => {
       expect(MIGRATIONS[9]).toBe(GUARD);
-      expect(MIGRATIONS).toHaveLength(14);
+      expect(MIGRATIONS).toHaveLength(15);
       expect(sha("20261028000000_plusmedik_knowledge_refs.sql")).toBe("aa0b8644dc0f4a2ac98c84ae4c123b03c5e261c41618f4d45ec7dc9245690021");
     });
 

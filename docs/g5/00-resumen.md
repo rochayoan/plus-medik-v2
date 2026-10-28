@@ -6,7 +6,7 @@ Fecha: 2026-10-25. Rama `feat/g2-turnos` (worktree `plus-medik-v2-g2`), **sin co
 | --- | --- |
 | [10-g50-derivacion-segura-al-crm.md](10-g50-derivacion-segura-al-crm.md) | Auditoría del contrato con el CRM, contratos faltantes, reglas de oro, flujo, datos, archivos |
 | [11-g50-bloqueos-y-activacion.md](11-g50-bloqueos-y-activacion.md) | Resultados de pruebas y mutación, bloqueos, riesgos y condiciones de activación |
-| [20-g51-aplicacion-de-migraciones.md](20-g51-aplicacion-de-migraciones.md) | G5.1: preparación y procedimiento manual para aplicar las 14 migraciones (orden, dependencias, riesgos, bloqueos, verificaciones de solo lectura en `supabase/preflight/`) |
+| [20-g51-aplicacion-de-migraciones.md](20-g51-aplicacion-de-migraciones.md) | G5.1: preparación y procedimiento manual para aplicar las 15 migraciones (orden, dependencias, riesgos, bloqueos, verificaciones de solo lectura en `supabase/preflight/`) |
 | [30-g52-integracion-y-configuracion-del-agente.md](30-g52-integracion-y-configuracion-del-agente.md) | G5.2: integración documental y de configuración de G2–G5, y preparación de la configuración del agente (`agent-config/`: prompt, plantilla de datos del laboratorio, textos a aprobar) |
 | [40-g53-conversacion-con-openai.md](40-g53-conversacion-con-openai.md) | G5.3: conversación natural con OpenAI preparada y APAGADA (el modelo conversa y clasifica; precios y datos siguen sujetos al catálogo y al conocimiento aprobado) |
 | [50-g55-archivo-unico-de-configuracion.md](50-g55-archivo-unico-de-configuracion.md) | G5.5: `agent-config/laboratorio.json` como único archivo editable (negocio, estilo, sucursales, horarios, servicios, pagos, políticas), integración sin duplicar y lista de datos por completar *(reemplazado por G5.6)* |

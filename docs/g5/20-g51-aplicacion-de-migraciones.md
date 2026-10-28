@@ -1,4 +1,4 @@
-# G5.1 · Preparación para aplicar las 14 migraciones SQL (procedimiento manual)
+# G5.1 · Preparación para aplicar las 15 migraciones SQL (procedimiento manual)
 
 Fecha: 2026-10-25. **No se ejecutó SQL remoto, no se modificó ningún dato, no se activó ninguna bandera, no hubo commit, push ni despliegue.** Todo lo de este documento se verificó contra archivos locales y contra un PostgreSQL 18 efímero. La cuenta de Supabase conectada a esta sesión **no tiene permiso sobre el proyecto** (la consulta de metadatos del proyecto devolvió «no tienes permiso»), de modo que ni siquiera una lectura remota fue posible: lo que está **aplicado hoy** solo lo puede decir la verificación previa de §5, ejecutada por una persona.
 
@@ -23,7 +23,7 @@ Evidencia disponible en el repositorio y la documentación (ninguna prueba remot
 - Migraciones 06-14 existen **solo** en este worktree, **sin commit**; nunca se enviaron a ningún lado.
 - Del lado del CRM, su documento `SUPABASE_APPLY_ORDER.md` confirma que **sus** migraciones 1-12 se aplicaron a mano en el SQL Editor (salvo la última, pendiente); nada de eso incluye objetos `plusmedik_*`.
 
-⇒ Lo esperado es **las 14 pendientes**. Pero «esperado» no es «verificado»: la verificación previa (§5) clasifica cada migración como pendiente (`NOT_APPLIED`), aplicada (`APPLIED`) o parcial (`PARTIAL`, bloqueo) mirando los catálogos de PostgreSQL, **no** el registro `supabase_migrations` (el SQL Editor no escribe en él, así que no sirve como prueba).
+⇒ Lo esperado es **las 15 pendientes**. Pero «esperado» no es «verificado»: la verificación previa (§5) clasifica cada migración como pendiente (`NOT_APPLIED`), aplicada (`APPLIED`) o parcial (`PARTIAL`, bloqueo) mirando los catálogos de PostgreSQL, **no** el registro `supabase_migrations` (el SQL Editor no escribe en él, así que no sirve como prueba).
 
 ## 3. Orden obligatorio, dependencias y contenido
 
@@ -45,8 +45,9 @@ Orden = orden de nombre de archivo (el prefijo numérico es la versión). Depend
 | 12 | `20261031000000_plusmedik_study_facts.sql` | 597 | 3 | 0 | 15 | 7 | 6 | 0+0 | `0958eb09426a…` | 01, 03, 04, 06, 08, 11 (y `lab_tests`) |
 | 13 | `20261101000000_plusmedik_crm_outbox.sql` | 407 | 2 | 0 | 10 | 5 | 5 | 0+0 | `97567b010912…` | 01, 03, 04, 06, 11 |
 | 14 | `20261102000000_plusmedik_quote_text_flow.sql` | 197 | 0 | 0 | 1 | 0 | 0 | 0+0 | `2094f3708548…` | 11 (agrega una función de apoyo y reemplaza dos suyas) |
+| 15 | `20261103000000_plusmedik_crm_attention_control.sql` | 158 | 0 | 0 | 1 | 0 | 0 | 0+2 | `0f14159a903f…` | 05 (agrega la pausa/reactivación manual del CRM y amplía dos restricciones de `plusmedik_attention_events`) |
 
-Totales: **25 tablas, 1 vista, 251 objetos en el manifiesto, 58 funciones con `EXECUTE` para `service_role`**. El sha256 completo de cada archivo (con saltos de línea LF) está en el encabezado de ambos SQL de verificación.
+Totales: **25 tablas, 1 vista, 254 objetos en el manifiesto, 59 funciones con `EXECUTE` para `service_role`**. El sha256 completo de cada archivo (con saltos de línea LF) está en el encabezado de ambos SQL de verificación.
 
 **Funciones que el orden redefine** (el orden decide la versión final; saltarse una deja una versión vieja): `plusmedik_audit_runs_guard` (03→04→05), `plusmedik_audit_reserve_send` (04→05→06), `plusmedik_audit_claim_run` (04→05; la 05 **elimina** la firma anterior y deja una con `p_contact_key` opcional, de modo que los llamadores antiguos siguen funcionando), `plusmedik_audit_record_reply` (03→06). `plusmedik_quote_session_read` y `plusmedik_quote_session_close` (11→14: el turno que cierra puede traer su propio ítem y una ambigüedad aclarada se puede cotizar; ver `docs/g5/80-g59-cotizacion-por-texto.md`). La restricción `plusmedik_audit_runs_lease_check` se elimina y se vuelve a crear en la 06.
 
@@ -94,7 +95,7 @@ Se regeneran con `npx tsx scripts/migration-manifest.ts` y una prueba falla si l
    2. **No** agregar `begin`/`commit`. Ejecutar **una sola vez**. Las migraciones 05 y 06 contienen `drop function`/`drop constraint`: el panel puede pedir confirmar una «operación destructiva»; es lo esperado (la 05 elimina la firma antigua de `claim_run` y crea la nueva en la misma ejecución; la 06 elimina y recrea `plusmedik_audit_runs_lease_check`).
    3. El resultado esperado es éxito sin filas. Ante **cualquier** error: **parar**, copiar el mensaje completo; no avanzar a la siguiente. Como cada archivo es repetible, puede volver a ejecutarse el mismo (nunca saltarlo ni editarlo a mano) una vez entendida la causa.
    4. Ejecutar **`v2_post_apply_read_only.sql`**. Condiciones: ninguna fila `BLOCK`; las migraciones 1..N en `OK` («completa»); las N+1..14 en `INFO` («aún no aplicada»). Anotar fecha, persona, archivo y resultado.
-10. Terminada la 14: ejecutar otra vez **`v2_pre_apply_read_only.sql`** (debe mostrar las 14 como «YA APLICADA» sin `BLOCK`) y **`v2_post_apply_read_only.sql`** (`VEREDICTO = OK`). **Comparar las filas `INSTANTANEA` con las guardadas en el paso 8: deben ser idénticas** (catálogo y esquema `crm` sin cambios). Cualquier diferencia es un bloqueo.
+10. Terminada la 15: ejecutar otra vez **`v2_pre_apply_read_only.sql`** (debe mostrar las 15 como «YA APLICADA» sin `BLOCK`) y **`v2_post_apply_read_only.sql`** (`VEREDICTO = OK`). **Comparar las filas `INSTANTANEA` con las guardadas en el paso 8: deben ser idénticas** (catálogo y esquema `crm` sin cambios). Cualquier diferencia es un bloqueo.
 11. Si el API de Supabase devolviera «function not found» para alguna función nueva, esperar unos segundos (PostgREST recarga su caché al detectar DDL); como último recurso, el panel permite recargar el esquema. No es parte de las migraciones.
 12. **Dejar todas las banderas apagadas.** Aplicar las migraciones no activa nada. La activación sigue el orden y las condiciones de `docs/g2/11`, `docs/g3/11`, `docs/g3/13`, `docs/g4/11`, `docs/g4/13` y `docs/g5/11`.
 
@@ -108,7 +109,7 @@ Se regeneran con `npx tsx scripts/migration-manifest.ts` y una prueba falla si l
 | R2 | **Versiones de longitud distinta en el mismo registro** (CRM de 12 dígitos, V2 de 14): el orden de texto no refleja el orden real | Media si se usara un registro | Misma mitigación: aplicación manual; el estado se decide por objetos, no por el registro |
 | R3 | **Recorte de privilegios de `service_role`** en las tablas de auditoría (03) | Media | No hay escritores ajenos conocidos; el piloto sin las migraciones ya degrada a «sin auditoría» |
 | R4 | **Ventana intermedia insegura entre 01 y 03**: la 01 deja a `service_role` con permisos completos «provisionales» sobre tablas aún vacías | Baja | Aplicar 01-03 seguidas; las tablas están vacías; `anon`/`authenticated` no tienen acceso |
-| R5 | **Estado intermedio de las funciones redefinidas** si se aplica solo una parte | Media | Aplicar las 14 en la misma ventana; la verificación posterior solo exige la versión final cuando la migración correspondiente ya está aplicada |
+| R5 | **Estado intermedio de las funciones redefinidas** si se aplica solo una parte | Media | Aplicar las 15 en la misma ventana; la verificación posterior solo exige la versión final cuando la migración correspondiente ya está aplicada |
 | R6 | **Bloqueos de tabla**: `ALTER TABLE plusmedik_audit_runs` toma bloqueo exclusivo breve (02-06) | Baja | Ventana de bajo tráfico; la verificación previa avisa de transacciones largas |
 | R7 | **Filas previas en `plusmedik_audit_runs`**: las restricciones nuevas se validan contra ellas y podrían fallar | Baja (esperado vacío) | La verificación previa cuenta filas y avisa |
 | R8 | **PostgreSQL < 14 o con diferencias**: solo se probó en 18 | Media | La verificación previa bloquea < 14 y muestra la versión; ideal probar antes en una copia (ver bloqueos) |
@@ -134,6 +135,6 @@ Se regeneran con `npx tsx scripts/migration-manifest.ts` y una prueba falla si l
 
 | Dato | Valor |
 | --- | --- |
-| `tests/migration-preflight-db.test.ts` | **19 pruebas** (6 estáticas y 13 contra PostgreSQL 18 efímero; aplican las 14 migraciones) |
-| Cubre | base limpia; aplicar las 14 de una vez y **de a una** (tras cada una, lo aplicado completo y lo siguiente pendiente); reintento de las 14; parcial; hueco de orden; catálogo ausente, id de otro tipo, columna o privilegio de `service_role` faltante; relación de otro tipo, restricción o índice homónimo en otra tabla, objeto de V2 en `crm`; 12 permisos o ajustes de más (anon, authenticated, public, columna, RLS, EXECUTE, `search_path`, propietario, trigger deshabilitado, lectura de la carga cifrada); versiones viejas de las funciones redefinidas; registro de migraciones; filas previas; rol ausente; ejecución dentro de `begin read only`; instantánea idéntica antes/después |
+| `tests/migration-preflight-db.test.ts` | **19 pruebas** (6 estáticas y 13 contra PostgreSQL 18 efímero; aplican las 15 migraciones) |
+| Cubre | base limpia; aplicar las 15 de una vez y **de a una** (tras cada una, lo aplicado completo y lo siguiente pendiente); reintento de las 15; parcial; hueco de orden; catálogo ausente, id de otro tipo, columna o privilegio de `service_role` faltante; relación de otro tipo, restricción o índice homónimo en otra tabla, objeto de V2 en `crm`; 12 permisos o ajustes de más (anon, authenticated, public, columna, RLS, EXECUTE, `search_path`, propietario, trigger deshabilitado, lectura de la carga cifrada); versiones viejas de las funciones redefinidas; registro de migraciones; filas previas; rol ausente; ejecución dentro de `begin read only`; instantánea idéntica antes/después |
 | Gasto / red | cero llamadas remotas |

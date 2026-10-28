@@ -5,7 +5,7 @@
 -- con el rol administrativo del SQL Editor. Es seguro ejecutarla dentro de una transacción de solo lectura.
 -- Esperado: VEREDICTO = OK, las 13 migraciones APPLIED, ninguna fila BLOCK, y las filas INSTANTANEA idénticas a las de la verificación previa.
 -- También sirve después de CADA migración: las posteriores aparecerán como pendientes (INFO) y las aplicadas deben estar completas.
--- Funciones con EXECUTE para service_role esperadas por las migraciones: 58.
+-- Funciones con EXECUTE para service_role esperadas por las migraciones: 59.
 --
 -- Migraciones cubiertas (sha256 del archivo con saltos de línea LF):
 --   01  20261020000000_plusmedik_persistent_audit.sql  1110edc1e1b3f6c4961b87bdb763ecea535ef5b1d6ba9086ff314a86b88ad61a
@@ -22,6 +22,7 @@
 --   12  20261031000000_plusmedik_study_facts.sql  0958eb09426a1b56305f0988c97c21163ea44dd71108bb66e48d52fc6aae8391
 --   13  20261101000000_plusmedik_crm_outbox.sql  97567b01091229f081f070f4990eb6e0859c5a9ae4ac849e424c8f903137feb5
 --   14  20261102000000_plusmedik_quote_text_flow.sql  2094f37085484e0c889f3fa46a563539b7f7ba61049ffb332064a7059d17d9f5
+--   15  20261103000000_plusmedik_crm_attention_control.sql  0f14159a903f1e50d3666923fa0e46edc06d36b752ec7ef6348923b5e43c3bc9
 --
 -- Resultado: una tabla (orden, seccion, comprobacion, estado, detalle). Estados: OK · INFO · WARN (revisar) · BLOCK (detenerse).
 -- La primera fila es el VEREDICTO. Guardar el resultado completo: las filas INSTANTANEA deben ser IDÉNTICAS antes y después.
@@ -279,7 +280,10 @@ manifest(mig, kind, name, parent) as (
     (13, 'trigger', 'plusmedik_crm_outbox_guard', 'plusmedik_crm_outbox'),
     (13, 'trigger', 'plusmedik_crm_outbox_no_delete', 'plusmedik_crm_outbox'),
     (13, 'trigger', 'plusmedik_crm_outbox_no_truncate', 'plusmedik_crm_outbox'),
-    (14, 'function', 'plusmedik_quote_ambiguity_state', '')
+    (14, 'function', 'plusmedik_quote_ambiguity_state', ''),
+    (15, 'constraint', 'plusmedik_attention_events_kind_crm_check', 'plusmedik_attention_events'),
+    (15, 'constraint', 'plusmedik_attention_events_outcome_crm_check', 'plusmedik_attention_events'),
+    (15, 'function', 'plusmedik_attention_crm_action', '')
 ),
 migration_files(mig, file) as (
   values
@@ -296,10 +300,12 @@ migration_files(mig, file) as (
     (11, '20261030000000_plusmedik_quote_sessions.sql'),
     (12, '20261031000000_plusmedik_study_facts.sql'),
     (13, '20261101000000_plusmedik_crm_outbox.sql'),
-    (14, '20261102000000_plusmedik_quote_text_flow.sql')
+    (14, '20261102000000_plusmedik_quote_text_flow.sql'),
+    (15, '20261103000000_plusmedik_crm_attention_control.sql')
 ),
 service_functions(name) as (
   values
+    ('plusmedik_attention_crm_action'),
     ('plusmedik_attention_record_event'),
     ('plusmedik_attention_register_human_message'),
     ('plusmedik_attention_resume'),
@@ -420,7 +426,7 @@ checks(ord, section, item, status, detail) as (
     from v2_functions f cross join roles r
     where has_function_privilege(r.anon, f.oid, 'EXECUTE') or has_function_privilege(r.authenticated, f.oid, 'EXECUTE')
        or exists (select 1 from aclexplode(coalesce(f.proacl, acldefault('f', f.proowner))) a where a.grantee = 0 and a.privilege_type = 'EXECUTE')
-  union all select 31, 'FUNCIONES', 'service_role_ejecuta_las_esperadas', case when count(*) = 0 then 'OK' else 'BLOCK' end, coalesce('sin EXECUTE: ' || string_agg(distinct f.proname, ', '), 'las 58 funciones de servicio tienen EXECUTE para service_role')
+  union all select 31, 'FUNCIONES', 'service_role_ejecuta_las_esperadas', case when count(*) = 0 then 'OK' else 'BLOCK' end, coalesce('sin EXECUTE: ' || string_agg(distinct f.proname, ', '), 'las 59 funciones de servicio tienen EXECUTE para service_role')
     from v2_functions f cross join roles r where f.expects_service and not coalesce(has_function_privilege(r.service, f.oid, 'EXECUTE'), false)
   union all select 32, 'FUNCIONES', 'security_definer_sin_search_path_fijo', case when count(*) = 0 then 'OK' else 'BLOCK' end, coalesce(string_agg(distinct f.proname, ', '), 'todas fijan search_path')
     from v2_functions f where f.prosecdef and not coalesce(array_to_string(f.proconfig, ',') like '%search_path=%', false)

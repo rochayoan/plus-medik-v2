@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // entorno sin ninguna bandera, con Kapso simulado y sin red.
 
 const SECRET = "whsec-simulado-solo-para-pruebas";
-const FLAGS = ["PLUSMEDIK_TURNS", "PLUSMEDIK_TEXT_HANDLER", "PLUSMEDIK_KNOWLEDGE_ANSWERS", "PLUSMEDIK_REPLY_GUARD", "PLUSMEDIK_REPLY_GUARD_CONFIG", "PLUSMEDIK_QUOTE_SESSIONS", "PLUSMEDIK_STUDY_INFO", "PLUSMEDIK_ATTENTION_FILTER", "PLUSMEDIK_ATTENTION_REPEAT_SECONDS", "PLUSMEDIK_ATTENTION_SETTLE_MS", "PLUSMEDIK_CRM_HANDOFF", "PLUSMEDIK_CRM_REVIEW_URL", "PLUSMEDIK_CRM_REVIEW_TOKEN", "PLUSMEDIK_OUTBOX_KEY", "PLUSMEDIK_HUMAN_CONTROL", "REQUIRE_AUDIT_GUARD", "PLUSMEDIK_CONTACT_HMAC_KEY", "ALLOWED_PHONES", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "KAPSO_API_KEY", "KAPSO_PHONE_NUMBER_ID"];
+const FLAGS = ["PLUSMEDIK_TURNS", "PLUSMEDIK_TEXT_HANDLER", "PLUSMEDIK_KNOWLEDGE_ANSWERS", "PLUSMEDIK_REPLY_GUARD", "PLUSMEDIK_REPLY_GUARD_CONFIG", "PLUSMEDIK_QUOTE_SESSIONS", "PLUSMEDIK_STUDY_INFO", "PLUSMEDIK_ATTENTION_FILTER", "PLUSMEDIK_ATTENTION_REPEAT_SECONDS", "PLUSMEDIK_ATTENTION_SETTLE_MS", "PLUSMEDIK_AGENT_CONTROL", "PLUSMEDIK_AGENT_CONTROL_TOKEN", "PLUSMEDIK_CRM_HANDOFF", "PLUSMEDIK_CRM_REVIEW_URL", "PLUSMEDIK_CRM_REVIEW_TOKEN", "PLUSMEDIK_OUTBOX_KEY", "PLUSMEDIK_HUMAN_CONTROL", "REQUIRE_AUDIT_GUARD", "PLUSMEDIK_CONTACT_HMAC_KEY", "ALLOWED_PHONES", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "KAPSO_API_KEY", "KAPSO_PHONE_NUMBER_ID"];
 const saved: Record<string, string | undefined> = {};
 
 const sendText = vi.fn(async () => ({ messages: [{ id: "wamid.out" }] }));
@@ -39,7 +39,7 @@ describe("valores por defecto de producción", () => {
 
   it("las banderas nuevas están en blanco en .env.example (apagadas) y documentadas", () => {
     const example = readFileSync(join(__dirname, "..", ".env.example"), "utf8");
-    for (const name of ["PLUSMEDIK_TURNS", "PLUSMEDIK_TEXT_HANDLER", "PLUSMEDIK_KNOWLEDGE_ANSWERS", "PLUSMEDIK_REPLY_GUARD", "PLUSMEDIK_REPLY_GUARD_CONFIG", "PLUSMEDIK_QUOTE_SESSIONS", "PLUSMEDIK_STUDY_INFO", "PLUSMEDIK_ATTENTION_FILTER", "PLUSMEDIK_ATTENTION_REPEAT_SECONDS", "PLUSMEDIK_ATTENTION_SETTLE_MS"]) {
+    for (const name of ["PLUSMEDIK_TURNS", "PLUSMEDIK_TEXT_HANDLER", "PLUSMEDIK_KNOWLEDGE_ANSWERS", "PLUSMEDIK_REPLY_GUARD", "PLUSMEDIK_REPLY_GUARD_CONFIG", "PLUSMEDIK_QUOTE_SESSIONS", "PLUSMEDIK_STUDY_INFO", "PLUSMEDIK_ATTENTION_FILTER", "PLUSMEDIK_ATTENTION_REPEAT_SECONDS", "PLUSMEDIK_ATTENTION_SETTLE_MS", "PLUSMEDIK_AGENT_CONTROL", "PLUSMEDIK_AGENT_CONTROL_TOKEN"]) {
       expect(example, name).toMatch(new RegExp(`^${name}=\\r?$`, "m"));
     }
     // y no hay ninguna variable que habilite la derivación a una persona: está bloqueada en código
@@ -266,6 +266,65 @@ describe("valores por defecto de producción", () => {
     const drain = (await import("../api/outbox/drain.js")) as { GET(request: Request): Promise<Response> };
     const response = await drain.GET(new Request("https://example.test/api/outbox/drain", { headers: { authorization: "Bearer cualquiera" } }));
     expect(response.status).toBe(503);
+  });
+
+  it("Fase 1: las rutas del CRM (attention/status y attention/action) están APAGADAS sin configuración: 503 sin consultar la base ni enviar nada, con cualquier cabecera", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    try {
+      for (const route of ["status", "action"] as const) {
+        vi.resetModules();
+        const module = (route === "status" ? await import("../api/internal/crm/attention/status.js") : await import("../api/internal/crm/attention/action.js")) as { POST(request: Request): Promise<Response> };
+        const response = await module.POST(new Request(`https://agente.example.test/api/internal/crm/attention/${route}`, { method: "POST", headers: { authorization: "Bearer cualquiera", "content-type": "application/json" }, body: "{}" }));
+        expect(response.status).toBe(503);
+        expect(await response.json()).toEqual({ ok: false, available: false, error: "not_configured" });
+      }
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it("Fase 1: PLUSMEDIK_AGENT_CONTROL=on sin token válido deja las rutas apagadas (503) y avisa con un CÓDIGO, nunca con el valor", async () => {
+    process.env.PLUSMEDIK_AGENT_CONTROL = "on";
+    process.env.PLUSMEDIK_AGENT_CONTROL_TOKEN = "demasiado-corto";
+    process.env.KAPSO_PHONE_NUMBER_ID = "123";
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((line: unknown) => { lines.push(String(line)); });
+    try {
+      vi.resetModules();
+      const module = (await import("../api/internal/crm/attention/action.js")) as { POST(request: Request): Promise<Response> };
+      const response = await module.POST(new Request("https://agente.example.test/api/internal/crm/attention/action", { method: "POST", headers: { authorization: "Bearer demasiado-corto", "content-type": "application/json" }, body: "{}" }));
+      expect(response.status).toBe(503);
+    } finally {
+      spy.mockRestore();
+      delete process.env.PLUSMEDIK_AGENT_CONTROL;
+      delete process.env.PLUSMEDIK_AGENT_CONTROL_TOKEN;
+    }
+    expect(lines.map((line) => JSON.parse(line))).toContainEqual({ app: "plusmedik", event: "crm_attention_config_invalid", error: "INVALID_TOKEN" });
+    expect(lines.join("")).not.toContain("demasiado-corto");
+  });
+
+  it("Fase 1: configuradas pero con el control de atención humana APAGADO, las rutas no mutan: status available:false y action no confirma", async () => {
+    process.env.PLUSMEDIK_AGENT_CONTROL = "on";
+    process.env.PLUSMEDIK_AGENT_CONTROL_TOKEN = "token-de-prueba-solo-para-tests-0123456789";
+    process.env.KAPSO_PHONE_NUMBER_ID = "123456789012345";
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    try {
+      vi.resetModules();
+      const status = (await import("../api/internal/crm/attention/status.js")) as { POST(request: Request): Promise<Response> };
+      const action = (await import("../api/internal/crm/attention/action.js")) as { POST(request: Request): Promise<Response> };
+      const headers = { authorization: "Bearer token-de-prueba-solo-para-tests-0123456789", "content-type": "application/json" };
+      const one = await status.POST(new Request("https://agente.example.test/api/internal/crm/attention/status", { method: "POST", headers, body: JSON.stringify({ contactPhone: "59170000000", phoneNumberId: "123456789012345" }) }));
+      expect(await one.json()).toEqual({ ok: true, available: false, reason: "control_disabled" });
+      const two = await action.POST(new Request("https://agente.example.test/api/internal/crm/attention/action", { method: "POST", headers, body: JSON.stringify({ operationId: "op-valido-0001", action: "pause", contactPhone: "59170000000", phoneNumberId: "123456789012345", reasonCode: "CRM_MANUAL_PAUSE", actor: "crm:system" }) }));
+      expect(await two.json()).toEqual({ ok: true, available: false, confirmed: false, reason: "control_disabled" });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+      delete process.env.PLUSMEDIK_AGENT_CONTROL;
+      delete process.env.PLUSMEDIK_AGENT_CONTROL_TOKEN;
+    }
   });
 
   it("firma inválida: 401 en cualquier configuración", async () => {

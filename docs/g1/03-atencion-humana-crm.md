@@ -31,6 +31,8 @@ Defensa en profundidad propuesta (cada capa es independiente):
 
 Recomendación: **L1 + L3 como obligatorias; L2 como respaldo** (cubre el caso en que el CRM falle en pausar, o se use otra herramienta con la API de Kapso). L5 solo con decisión expresa.
 
+> **Actualización (Fase 1 de la integración con el CRM, rama `feat/crm-attention-control`):** los endpoints `attention/status` y `attention/action`, la función SQL de pausa manual idempotente (migración 15) y la capa L1 del lado del agente ya están **implementados y probados, sin aplicar ni activar**. La tabla siguiente describe el estado ANTERIOR (G1); ver [`docs/integracion-crm/01-fase1-control-de-atencion.md`](../integracion-crm/01-fase1-control-de-atencion.md). Siguen pendientes L2 (autoría del mensaje), L5, la confirmación de eventos salientes de Kapso y el cierre del canal B.
+
 ## 3. Diferencias entre el contrato del CRM y lo que existe en el agente
 
 | Punto del contrato | Estado en el agente | Trabajo pendiente |
