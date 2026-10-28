@@ -21,6 +21,7 @@
 --   11  20261030000000_plusmedik_quote_sessions.sql  af0b7ed8399ccda325b343b07b025a8e7978317659a533b2a2fb7eb2a68ad314
 --   12  20261031000000_plusmedik_study_facts.sql  0958eb09426a1b56305f0988c97c21163ea44dd71108bb66e48d52fc6aae8391
 --   13  20261101000000_plusmedik_crm_outbox.sql  97567b01091229f081f070f4990eb6e0859c5a9ae4ac849e424c8f903137feb5
+--   14  20261102000000_plusmedik_quote_text_flow.sql  2094f37085484e0c889f3fa46a563539b7f7ba61049ffb332064a7059d17d9f5
 --
 -- Resultado: una tabla (orden, seccion, comprobacion, estado, detalle). Estados: OK · INFO · WARN (revisar) · BLOCK (detenerse).
 -- La primera fila es el VEREDICTO. Guardar el resultado completo: las filas INSTANTANEA deben ser IDÉNTICAS antes y después.
@@ -277,7 +278,8 @@ manifest(mig, kind, name, parent) as (
     (13, 'trigger', 'plusmedik_crm_outbox_attempts_no_truncate', 'plusmedik_crm_outbox_attempts'),
     (13, 'trigger', 'plusmedik_crm_outbox_guard', 'plusmedik_crm_outbox'),
     (13, 'trigger', 'plusmedik_crm_outbox_no_delete', 'plusmedik_crm_outbox'),
-    (13, 'trigger', 'plusmedik_crm_outbox_no_truncate', 'plusmedik_crm_outbox')
+    (13, 'trigger', 'plusmedik_crm_outbox_no_truncate', 'plusmedik_crm_outbox'),
+    (14, 'function', 'plusmedik_quote_ambiguity_state', '')
 ),
 migration_files(mig, file) as (
   values
@@ -293,7 +295,8 @@ migration_files(mig, file) as (
     (10, '20261029000000_plusmedik_reply_guard.sql'),
     (11, '20261030000000_plusmedik_quote_sessions.sql'),
     (12, '20261031000000_plusmedik_study_facts.sql'),
-    (13, '20261101000000_plusmedik_crm_outbox.sql')
+    (13, '20261101000000_plusmedik_crm_outbox.sql'),
+    (14, '20261102000000_plusmedik_quote_text_flow.sql')
 ),
 service_functions(name) as (
   values
