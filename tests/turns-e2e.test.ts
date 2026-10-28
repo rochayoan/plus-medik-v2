@@ -291,9 +291,13 @@ describe.skipIf(!bin)("turnos consecutivos de un contacto (extremo a extremo con
       const b = patient();
       let active = 0;
       let maxActive = 0;
+      // Punto de encuentro en vez de un tiempo fijo: cada envío espera a que el OTRO también haya empezado. Si los contactos se esperaran entre sí, el segundo nunca empezaría mientras el
+      // primero espera y el tope (5 s) se agotaría con maxActive = 1. Así la prueba no depende de cuánto tarden en arrancar los procesos de la base bajo carga.
+      let bothSending!: () => void;
+      const meeting = new Promise<void>((resolve) => { bothSending = resolve; });
       const w = setup({
         handlers: reply(),
-        quote: { sendText: vi.fn(async (to: string, body: string) => { active++; maxActive = Math.max(maxActive, active); await sleep(250); active--; w.sends.push({ to, body }); }) }
+        quote: { sendText: vi.fn(async (to: string, body: string) => { active++; maxActive = Math.max(maxActive, active); if (active >= 2) bothSending(); await Promise.race([meeting, sleep(5000)]); active--; w.sends.push({ to, body }); }) }
       });
       await Promise.all([w.hook(signedPost(textEvent(id("txt"), a.phone), RECEIVED)), w.hook(signedPost(textEvent(id("txt"), b.phone), RECEIVED))]);
       await w.settle();
