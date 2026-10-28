@@ -14,6 +14,7 @@ vi.setConfig({ testTimeout: 120_000, hookTimeout: 180_000 });
 const dir = join(__dirname, "..", "supabase", "migrations");
 const MIGRATIONS = readdirSync(dir).filter((name) => name.endsWith(".sql")).sort();
 const SESSIONS = "20261030000000_plusmedik_quote_sessions.sql";
+const TEXT_FLOW = "20261102000000_plusmedik_quote_text_flow.sql";
 type Json = Record<string, any>;
 const read = (name: string) => readFileSync(join(dir, name), "utf8").replaceAll("\r\n", "\n");
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -91,6 +92,8 @@ describe.skipIf(!bin)("sesiones de cotización contra PostgreSQL real (migració
       const t = await turn(contact);
       const b = await begin(t, "TEXT", resolved(1));
       await db.applyFile(join(dir, SESSIONS));
+      // las migraciones posteriores que redefinen funciones de esta se vuelven a aplicar en su orden (si no, quedarían las versiones de la 11)
+      await db.applyFile(join(dir, TEXT_FLOW));
       expect((await items(b.sessionId))).toHaveLength(1);
     });
 
@@ -487,13 +490,133 @@ describe.skipIf(!bin)("sesiones de cotización contra PostgreSQL real (migració
     });
   });
 
+  describe("flujo por texto (migración 14): el turno que cierra puede traer su propio ítem, y una ambigüedad aclarada se puede cotizar", () => {
+    const own = async (contact: string, result: Json) => {
+      const t = await turn(contact);
+      const b = await begin(t, "TEXT", result);
+      return { t, b };
+    };
+    const group = (...ids: number[][]): Json => ({ status: "AMBIGUOUS", studyIds: [], ambiguous: ids.map((g) => g.map(uuid)), unresolved: 0, reasons: ["AMBIGUOUS_STUDY"] });
+    const rejects = async (t: Turn, sessionId: string, lines: unknown[], total: number) => expect(await db.fails(asService(closeSql(t, sessionId, "QUOTED", { lines, total, fp: FP })))).toMatch(/PT409/);
+
+    it("un mensaje que trae sus estudios Y pide cotizar cierra en el mismo turno: la lectura incluye el ítem propio y la cotización debe incluirlo", async () => {
+      const contact = newContact();
+      const earlier = await turn(contact);
+      const first = await begin(earlier, "TEXT", resolved(1));
+      await finish(earlier);
+      const { t } = await own(contact, resolved(2));
+      const state = await readState(t);
+      expect(state).toMatchObject({ state: "ready", sessionId: first.sessionId });
+      expect(state.items.map((item: Json) => item.studyIds[0])).toEqual([uuid(1), uuid(2)]);
+      // sin el ítem propio la base la rechaza: lo cotizado debe ser EXACTAMENTE lo identificado
+      await rejects(t, first.sessionId, [line(1, 10)], 10);
+      const closed = await closeIt(t, first.sessionId, "QUOTED", { lines: [line(1, 10), line(2, 20)], total: 30, fp: FP });
+      expect(closed).toMatchObject({ status: "closed", outcome: "QUOTED" });
+      expect((await sessionRow(first.sessionId)).status).toBe("QUOTED");
+      expect(await items(first.sessionId)).toHaveLength(2);
+    });
+
+    it("una solicitud nueva con un solo mensaje se cotiza en ese mismo turno; repetir el cierre del turno es idempotente", async () => {
+      const contact = newContact();
+      const { t, b } = await own(contact, resolved(3));
+      expect(await readState(t)).toMatchObject({ state: "ready", sessionId: b.sessionId });
+      expect(await closeIt(t, b.sessionId, "QUOTED", { lines: [line(3, 7)], total: 7, fp: FP })).toMatchObject({ status: "closed" });
+      expect(await closeIt(t, b.sessionId, "QUOTED", { lines: [line(3, 7)], total: 7, fp: FP })).toMatchObject({ status: "replayed" });
+      expect(await readState(t)).toMatchObject({ state: "replay", outcome: "QUOTED" });
+    });
+
+    it("el turno que cierra sigue esperando a los turnos anteriores aún en proceso", async () => {
+      const contact = newContact();
+      const photo = await turn(contact, "IMAGE");
+      await begin(photo, "IMAGE", null, "b".repeat(64));
+      const { t, b } = await own(contact, resolved(1));
+      expect(await readState(t)).toMatchObject({ state: "pending" });
+      expect(await closeIt(t, b.sessionId, "QUOTED", { lines: [line(1, 10)], total: 10, fp: FP })).toMatchObject({ status: "pending" });
+    });
+
+    it("una ambigüedad ACLARADA por un mensaje de texto posterior se cotiza: aporta lo que había identificado y la opción elegida, y solo esa", async () => {
+      const contact = newContact();
+      const a = await turn(contact);
+      const first = await begin(a, "TEXT", { status: "AMBIGUOUS", studyIds: [uuid(1)], ambiguous: [[uuid(7), uuid(8)]], unresolved: 0, reasons: ["AMBIGUOUS_STUDY"] });
+      await finish(a);
+      const answer = await turn(contact);
+      await begin(answer, "TEXT", resolved(8));
+      await finish(answer);
+      const closer = await turn(contact);
+      // la opción no elegida no puede colarse en la cotización
+      await rejects(closer, first.sessionId, [line(1, 10), line(7, 21), line(8, 22)], 53);
+      expect(await closeIt(closer, first.sessionId, "QUOTED", { lines: [line(1, 10), line(8, 22)], total: 32, fp: FP })).toMatchObject({ status: "closed" });
+    });
+
+    it("sin aclarar sigue bloqueando la cotización (PT409), pero sí puede ir a revisión", async () => {
+      const { sessionId, closer } = await sessionWith(newContact(), [resolved(1), group([7, 8])]);
+      await rejects(closer, sessionId, [line(1, 10)], 10);
+      expect(await closeIt(closer, sessionId, "NEEDS_REVIEW", { reasons: ["AMBIGUOUS_STUDY"] })).toMatchObject({ status: "closed" });
+    });
+
+    it("solo aclara un mensaje de TEXTO POSTERIOR: ni uno anterior a la duda, ni una foto, ni una opción de otro grupo", async () => {
+      // la respuesta llegó ANTES que la pregunta
+      const before = await sessionWith(newContact(), [resolved(8), group([7, 8])]);
+      await rejects(before.closer, before.sessionId, [line(8, 22)], 22);
+      // la opción la trae una FOTO
+      const contact = newContact();
+      const t1 = await turn(contact);
+      const b1 = await begin(t1, "TEXT", group([7, 8]));
+      await finish(t1);
+      const t2 = await turn(contact, "IMAGE");
+      await begin(t2, "IMAGE", resolved(8), "c".repeat(64));
+      await finish(t2);
+      await rejects(await turn(contact), b1.sessionId, [line(8, 22)], 22);
+      // dos grupos y solo se aclara uno
+      const partial = await sessionWith(newContact(), [group([7, 8], [9, 10]), resolved(8)]);
+      await rejects(partial.closer, partial.sessionId, [line(8, 22)], 22);
+      // con los dos aclarados sí
+      const both = await sessionWith(newContact(), [group([7, 8], [9, 10]), resolved(8), resolved(10)]);
+      expect(await closeIt(both.closer, both.sessionId, "QUOTED", { lines: [line(8, 22), line(10, 5)], total: 27, fp: FP })).toMatchObject({ status: "closed" });
+    });
+
+    it("lo no identificado (sin resolver, incierto) y lo ilegible siguen bloqueando la cotización aunque haya respuestas posteriores", async () => {
+      const a = await sessionWith(newContact(), [unresolvedItem, resolved(1)]);
+      await rejects(a.closer, a.sessionId, [line(1, 10)], 10);
+      const b = await sessionWith(newContact(), [uncertain, resolved(2)]);
+      await rejects(b.closer, b.sessionId, [line(1, 10), line(2, 20)], 30);
+    });
+
+    it("al pedir reenviar fotos, el ítem legible del PROPIO turno también pasa a la solicitud nueva", async () => {
+      const contact = newContact();
+      const t1 = await turn(contact, "IMAGE");
+      const b1 = await begin(t1, "IMAGE", unreadable, "d".repeat(64));
+      await finish(t1);
+      const { t } = await own(contact, resolved(3));
+      expect(await closeIt(t, b1.sessionId, "NEEDS_RESEND")).toMatchObject({ status: "closed", outcome: "NEEDS_RESEND" });
+      await finish(t);
+      const carried = await readState(await turn(contact));
+      expect(carried).toMatchObject({ state: "ready" });
+      expect(carried.items.map((item: Json) => item.studyIds[0])).toEqual([uuid(3)]);
+    });
+
+    it("sin ítem propio (el «listo» de siempre) nada cambia: no ve ítems de turnos posteriores y lo posterior pasa a una sesión nueva", async () => {
+      const contact = newContact();
+      const { sessionId, closer } = await sessionWith(contact, [resolved(1)]);
+      const later = await turn(contact);
+      await begin(later, "TEXT", resolved(2));
+      expect((await readState(closer)).items).toHaveLength(1);
+      expect(await closeIt(closer, sessionId, "QUOTED", { lines: [line(1, 10)], total: 10, fp: FP })).toMatchObject({ status: "closed" });
+      expect(await items(sessionId)).toHaveLength(1);
+      await finish(closer);
+      await finish(later);
+      expect((await readState(await turn(contact))).items).toHaveLength(1);
+    });
+  });
+
   describe("la migración es aditiva", () => {
     const sha = (name: string) => createHash("sha256").update(read(name)).digest("hex");
     const code = read(SESSIONS).replace(/--.*$/gm, "");
 
-    it("es la undécima (la 12 son los datos por estudio, G4.1) y las diez anteriores no se modificaron (hash de la 10 fijado)", () => {
+    it("es la undécima (la 12 son los datos por estudio, G4.1; la 14 es el flujo por texto, G5.9) y las diez anteriores no se modificaron (hash de la 10 fijado)", () => {
       expect(MIGRATIONS[10]).toBe(SESSIONS);
-      expect(MIGRATIONS).toHaveLength(13);
+      expect(MIGRATIONS[13]).toBe(TEXT_FLOW);
+      expect(MIGRATIONS).toHaveLength(14);
       expect(sha("20261029000000_plusmedik_reply_guard.sql")).toBe("689c71aa2de466a38cf93fdfeb853a90a8f4ac3bca232995df194014456aec3f");
     });
 
@@ -510,6 +633,16 @@ describe.skipIf(!bin)("sesiones de cotización contra PostgreSQL real (migració
       expect(code).not.toMatch(/\binsert\s+into\s+public\.(?!plusmedik_quote_)/i);
       expect(code).not.toMatch(/\bupdate\s+public\.(?!plusmedik_quote_)/i);
       expect(code.match(/security definer/gi)).toHaveLength(4);
+    });
+
+    it("la migración 14 solo agrega una función de apoyo y REEMPLAZA las de lectura y cierre: sin tablas, columnas ni datos, y conserva sus privilegios", () => {
+      const flow = read(TEXT_FLOW).replace(/--.*$/gm, "");
+      expect([...flow.matchAll(/create or replace function public\.(\w+)/gi)].map((m) => m[1])).toEqual(["plusmedik_quote_ambiguity_state", "plusmedik_quote_session_read", "plusmedik_quote_session_close"]);
+      expect(flow).not.toMatch(/\bcreate\s+table\b|\balter\s+table\b|\bdrop\b|\bdelete\s+from\b|\btruncate\b|\bexecute\s+(format|'|\$)|\blab_tests\b|\bcrm\b/i);
+      expect(flow).not.toMatch(/\binsert\s+into\s+public\.(?!plusmedik_quote_)/i);
+      expect(flow.match(/security definer/gi)).toHaveLength(2);
+      expect(flow).toMatch(/grant execute on function public\.plusmedik_quote_session_read\(uuid, text, bigint\) to service_role;/);
+      expect(flow).toMatch(/grant execute on function public\.plusmedik_quote_session_close\(uuid, text, bigint, uuid, text, jsonb, numeric, text\[\], text\) to service_role;/);
     });
   });
 });
