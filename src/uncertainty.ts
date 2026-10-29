@@ -16,6 +16,7 @@ export const UNCERTAINTY_OF: Record<AnalysisReason, UncertaintyKind> = {
   no_requested_studies: "READING",
   non_high_certainty_study: "READING",
   readers_variant_mismatch: "READING",
+  line_readers_isotype_mismatch: "READING",
   line_item_unrepresented: "READING",
 
   catalog_unmatched: "IDENTITY",

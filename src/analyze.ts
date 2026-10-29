@@ -1,7 +1,7 @@
 import { readImageWithGemini, readImageWithOpenAI, type SimpleReading } from "./ai.js";
 import { ExactAliasCatalogResolver, uniqueMatchedStudies } from "./catalog.js";
 import { buildSimpleConsensus, isTruncationOf, normalizeStudyKey, normalizeVisibleKey, sameVisibleText, type SimpleConsensus, type SimpleStudy } from "./consensus.js";
-import { collapseExplicitPackages, droppedLineItemDetails, inheritAnalyteFromLine, heldPackageGroups, lineServiceGap, reliableLineText, withoutSelectionX } from "./line-groups.js";
+import { collapseExplicitPackages, droppedLineItemDetails, inheritAnalyteFromLine, heldPackageGroups, lineServiceGap, lineIsotopeReadersDisagree, reliableLineText, withoutSelectionX } from "./line-groups.js";
 import { activeCatalog, GENERIC_PROFILE_WORDS, identityTokens, isPackageComponent, qualifiersOf, shadowMatch, type Outcome, type ShadowBatch, type Support } from "./catalog-shadow.js";
 import type { AiUsage } from "./cache.js";
 import { readDocumentSignal, type DocumentSignal } from "./document-signal.js";
@@ -28,6 +28,8 @@ export interface FinalVisualStudy extends SimpleStudy {
   lineText?: string;
   // Si la línea es un paquete aprobado y las filas leídas no lo reconstruyen sin ambigüedad: qué pasó (el estudio queda pendiente).
   lineProblem?: string;
+  // Los lectores vieron diferentes isotipos en el contexto original de la MISMA fila.
+  lineVariantMismatch?: boolean;
   // Si varias filas de una línea se reunieron en el paquete aprobado que la línea nombra: los textos originales.
   collapsedFrom?: string[];
   // Si el texto era solo una variante ("IgG") y heredó el analito de otra fila de su misma línea: el texto original.
@@ -107,6 +109,7 @@ export type AnalysisReason =
   | "document_not_complete"
   | "visual_disputes_unresolved"
   | "visual_partial_transcription"
+  | "line_readers_isotype_mismatch"
   | "no_requested_studies"
   | "non_high_certainty_study"
   | "catalog_unmatched"
@@ -439,10 +442,15 @@ export function judgeResolvedConfidence(resolved: ResolvedStudy, consensus: Simp
 
 export function finalVisualStudiesOf(consensus: SimpleConsensus, judgement: SimpleJudgement, catalog?: CatalogStudy[]): FinalVisualStudy[] {
   const pairOf = (study: SimpleStudy) => consensus.agreedPairs?.find((candidate) => candidate.a === study);
-  const withLine = <T extends SimpleStudy>(study: T, a?: SimpleStudy, b?: SimpleStudy): T & { lineText?: string } => {
+  const withLine = <T extends SimpleStudy>(study: T, a?: SimpleStudy, b?: SimpleStudy): T & { lineText?: string; lineVariantMismatch?: boolean } => {
     const lineText = reliableLineText(a, b);
+    const lineVariantMismatch = lineIsotopeReadersDisagree(a, b);
     const { lineText: _own, ...rest } = study;
-    return (lineText ? { ...rest, lineText } : rest) as T & { lineText?: string };
+    return {
+      ...rest,
+      ...(lineText ? { lineText } : {}),
+      ...(lineVariantMismatch ? { lineVariantMismatch: true } : {})
+    } as T & { lineText?: string; lineVariantMismatch?: boolean };
   };
   const all = [
     ...consensus.agreedStudies.map((study) => {
@@ -604,6 +612,7 @@ export function assembleAnalysis(args: {
   if (document && !document.completeDocumentVisible) reasons.push("document_not_complete");
   if (unresolvedDisputes.length > 0) reasons.push("visual_disputes_unresolved");
   if (partialOf.size > 0) reasons.push("visual_partial_transcription");
+  if (finalVisualStudies.some((study) => study.lineVariantMismatch)) reasons.push("line_readers_isotype_mismatch");
   if (finalVisualStudies.length === 0) reasons.push("no_requested_studies");
   if (finalVisualStudies.some((study) => study.confidence !== "high")) reasons.push("non_high_certainty_study");
   // Con la integración semántica principal el contraste por estudio reemplaza los motivos de catálogo del flujo clásico.
