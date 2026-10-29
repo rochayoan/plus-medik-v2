@@ -3,6 +3,7 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createSupabaseAuditRepository } from "../src/audit.js";
+import { appendApprovedQuotePreparations } from "../src/quote-preparation.js";
 import type { AnalysisResult } from "../src/analyze.js";
 import { normalizeStudyKey } from "../src/consensus.js";
 import { contactKeyOf, createAttentionRepository } from "../src/human-control.js";
@@ -31,6 +32,7 @@ const HMAC_KEY = "clave-hmac-simulada-solo-para-pruebas-0123456789";
 const LAB = "123456789012345";
 const SENTINEL = "TEXTO_CLINICO_SENTINELA_3157";
 const STUDY = "11111111-1111-4111-8111-111111111111";
+const PILOT_STUDY = "33333333-3333-4333-8333-333333333333";
 const ED: KnowledgeActor = { id: "crm:editor-1", type: "HUMAN", role: "EDITOR" };
 const AA: KnowledgeActor = { id: "crm:admin-1", type: "HUMAN", role: "ADMIN_APPROVER" };
 const AA2: KnowledgeActor = { id: "crm:admin-2", type: "HUMAN", role: "ADMIN_APPROVER" };
@@ -64,7 +66,7 @@ describe.skipIf(!bin)("respuestas con conocimiento aprobado (extremo a extremo c
     server = await startEphemeralPostgres(bin!);
     db = await server.createDatabase("knowledge_answers");
     await db.ok(SUPABASE_BOOTSTRAP_SQL);
-    await db.ok(`create table public.lab_tests (id uuid primary key, name text not null, price_bs numeric not null, active boolean not null); insert into public.lab_tests values ('${STUDY}', 'ESTUDIO ALFA DE PRUEBA', 1, true);`);
+    await db.ok(`create table public.lab_tests (id uuid primary key, name text not null, price_bs numeric not null, active boolean not null); insert into public.lab_tests values ('${STUDY}', 'ESTUDIO ALFA DE PRUEBA', 1, true), ('${PILOT_STUDY}', 'ESTUDIO PILOTO FICTICIO', 45, true);`);
     for (const file of MIGRATIONS) await db.applyFile(join(dir, file));
     admin = createKnowledgeAdminRepository(rpcOptions());
     catalog = [{ id: STUDY, code: null, name: "ESTUDIO ALFA DE PRUEBA", normalizedName: normalizeStudyKey("ESTUDIO ALFA DE PRUEBA"), normalizedAliases: ["alfa"], priceBs: 1, active: true }];
@@ -216,6 +218,81 @@ describe.skipIf(!bin)("respuestas con conocimiento aprobado (extremo a extremo c
     // sin estudio identificable: se pregunta
     await ask(w, p.phone, "¿necesito ayuno?");
     expect(w.sends.at(-1)!.body).toBe(ANSWER_TEXTS.askStudy);
+  });
+
+  it("G4.2 piloto íntegro: foto -> cotización; solo tras aprobación clínica adjunta instrucciones ficticias y registra el rastro", async () => {
+    const pilotCatalog: CatalogStudy[] = [{
+      id: PILOT_STUDY, code: null, name: "ESTUDIO PILOTO FICTICIO",
+      normalizedName: normalizeStudyKey("ESTUDIO PILOTO FICTICIO"),
+      normalizedAliases: [], priceBs: 45, active: true
+    }];
+    const reading = new KnowledgeService({
+      store: createSupabaseKnowledgeStore(rpcOptions()),
+      revisionCheckMs: 0,
+      maxStaleMs: 0
+    });
+    const w = setup({ quote: {
+      loadCatalog: async () => pilotCatalog,
+      analyze: async () => ({
+        ...okAnalysis(),
+        publicQuote: {
+          studies: [{ name: "ESTUDIO PILOTO FICTICIO", priceBs: 45 }],
+          totalBs: 45, totalLabel: "Total de los estudios cotizados", tariff: "PACIENTE"
+        },
+        // El motor entrega el UUID y la cotización; no se extrae ningún estudio del texto clínico.
+        quote: { lines: [{ id: PILOT_STUDY, code: null, name: "ESTUDIO PILOTO FICTICIO", priceBs: 45 }], totalBs: 45 }
+      }) as unknown as AnalysisResult,
+      quotePreparations: (quote, studyIds, catalog, ctx) => appendApprovedQuotePreparations({
+        quote, studyIds, catalog, knowledge: reading,
+        trace: (refs) => ctx.persist("quote_preparation", async (repo, runId, lease) => {
+          if ((await repo.recordKnowledgeRefs?.(runId, refs, lease)) !== "recorded") throw new Error("trace unavailable");
+        })
+      })
+    } });
+    const sendPilotPhoto = async (phone: string) => {
+      const message = id("pilot-photo");
+      expect((await w.hook(signedPost(imageEvent(message, phone), RECEIVED))).status).toBe(200);
+      await w.settle();
+      return message;
+    };
+
+    const draft = await admin.createDraft({
+      kind: "STUDY_PREPARATION", key: `study:${PILOT_STUDY}`,
+      payload: {
+        labTestId: PILOT_STUDY, prepState: "HAS_PREPARATION",
+        instructions: "CONTENIDO FICTICIO PARA PRUEBA AUTOMATIZADA - SIN RECOMENDACIONES MEDICAS."
+      },
+      sourceRef: "test:fixture", validUntil: days(60)
+    }, ED);
+    await admin.submit(draft.versionId, ED);
+
+    const pendingMessage = await sendPilotPhoto(patient().phone);
+    expect(w.sends).toHaveLength(1);
+    expect(w.sends[0]!.body).toContain("ESTUDIO PILOTO FICTICIO — Bs 45");
+    expect(w.sends[0]!.body).not.toContain("CONTENIDO FICTICIO");
+    expect(await refsOf(pendingMessage)).toEqual([]);
+
+    await admin.approve(draft.versionId, CA); // aprobador distinto; SOLO en la DB de prueba
+    const approvedMessage = await sendPilotPhoto(patient().phone);
+    expect(w.sends).toHaveLength(2);
+    expect(w.sends[1]!.body).toContain("ESTUDIO PILOTO FICTICIO — Bs 45");
+    expect(w.sends[1]!.body).toContain("CONTENIDO FICTICIO PARA PRUEBA AUTOMATIZADA");
+    const refs = await refsOf(approvedMessage);
+    expect(refs).toHaveLength(1);
+    expect(refs[0]).toMatchObject({ kind: "STUDY_PREPARATION", key: `study:${PILOT_STUDY}`, version: 1 });
+    expect(await run(approvedMessage)).toMatchObject({ send_state: "ACCEPTED" });
+
+    network.downFor.add("plusmedik_turn_record_knowledge");
+    let failedTraceMessage = "";
+    try {
+      failedTraceMessage = await sendPilotPhoto(patient().phone);
+    } finally {
+      network.downFor.delete("plusmedik_turn_record_knowledge");
+    }
+    expect(w.sends).toHaveLength(3);
+    expect(w.sends[2]!.body).toContain("ESTUDIO PILOTO FICTICIO — Bs 45");
+    expect(w.sends[2]!.body).not.toContain("CONTENIDO FICTICIO");
+    expect(await refsOf(failedTraceMessage)).toEqual([]);
   });
 
   describe("trazabilidad y fallos", () => {
