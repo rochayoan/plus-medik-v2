@@ -110,6 +110,18 @@ describe("mensaje al paciente", () => {
     expect(formatBs(45.5)).toBe("Bs 45,50");
     expect(formatBs(0)).toBe("Bs 0");
   });
+  it("un AUTO_PARTIAL informa la limitación sin alterar importe, estudios o el pie", () => {
+    const quote = { studies: [{ name: "ANTICARDIOLIPINA IgM", priceBs: 180 }, { name: "ANTICARDIOLIPINA IgG", priceBs: 180 }], totalBs: 360, totalLabel: "Total de los estudios cotizados", tariff: "PACIENTE" as const };
+    const partial = formatQuoteMessage(quote, { partial: true });
+    expect(partial).toContain("ANTICARDIOLIPINA IgM — Bs 180");
+    expect(partial).toContain("ANTICARDIOLIPINA IgG — Bs 180");
+    expect(partial).toContain("Total de los estudios cotizados: Bs 360");
+    expect(partial).toContain("⚠️ *Cotización parcial:*");
+    expect(partial).toContain("no necesariamente toda la solicitud");
+    expect(partial.endsWith("Respóndenos por este chat para continuar. 😊")).toBe(true);
+    expect(formatQuoteMessage(quote)).not.toContain("⚠️ *Cotización parcial:*");
+  });
+
   it("lista cada estudio con su precio y el total de los estudios cotizados, sin afirmar que cubre toda la receta", () => {
     const text = formatQuoteMessage({ studies: [{ name: "HEMOGRAMA COMPLETO AUTOMATIZADO", priceBs: 45 }, { name: "CREATININA", priceBs: 30 }], totalBs: 75, totalLabel: "Total de los estudios cotizados", tariff: "PACIENTE" });
     expect(text).toContain("🩸 HEMOGRAMA COMPLETO AUTOMATIZADO — Bs 45");
@@ -148,6 +160,29 @@ function makeDeps(overrides: Partial<QuoteDeps> & { analysis?: AnalysisResult } 
   return { deps, sent, logs };
 }
 
+describe("diagnóstico opcional sin impacto en WhatsApp", () => {
+  it("solo registra la huella en el número piloto y no cambia la cotización", async () => {
+    vi.stubEnv("PLUSMEDIK_VISION_DIAGNOSTICS", "on");
+    vi.stubEnv("PLUSMEDIK_VISION_DIAGNOSTICS_KEY", "test-only-diagnostic-key-" + "K".repeat(40));
+    vi.stubEnv("PLUSMEDIK_VISION_DIAGNOSTICS_PHONES", "59171234567");
+    try {
+      const pilot = makeDeps();
+      expect(await handleImageMessage(incoming, pilot.deps)).toBe("quoted");
+      expect(pilot.sent).toHaveLength(1);
+      const diag = pilot.logs.filter((entry) => entry.event === "vision_diagnostic");
+      expect(diag).toHaveLength(1);
+      expect(diag[0]?.data).toMatchObject({ version: 1, imageBytes: JPEG.byteLength, mimeType: "image/jpeg" });
+      expect(JSON.stringify(diag)).not.toContain("test-only-diagnostic-key-");
+
+      const other = makeDeps();
+      expect(await handleImageMessage({ ...incoming, from: "59179999999", messageId: "wamid.other" }, other.deps)).toBe("quoted");
+      expect(other.logs.some((entry) => entry.event === "vision_diagnostic")).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
 describe("handleImageMessage", () => {
   it("receta completa: una sola respuesta con cada estudio, su precio y el total", async () => {
     const { deps, sent } = makeDeps({ analysis: analysisOf("Hemograma completo", "Creatinina") });
@@ -159,7 +194,39 @@ describe("handleImageMessage", () => {
     expect(sent[0]?.body).toContain("Total de los estudios cotizados: Bs 75");
   });
 
-  it("4 de 5 estudios: cotiza los 4 con su total y el pendiente NO se menciona al paciente, pero queda en el registro interno", async () => {
+  it("receta manuscrita sintética: un isotipo explícito no extraído queda pendiente y WhatsApp advierte subtotal, sin inventar precio", async () => {
+    const variants = [study("am", "ANTI-LAMBDA IGM", 180), study("ag", "ANTI-LAMBDA IGG", 190)];
+    // Simula la salida de AMBOS lectores; no usa fotografía real ni afirma validar OCR.
+    const reading: SimpleReading = {
+      requestedStudies: [{ ...row("ANTI-LAMBDA IGM"), lineText: "ANTI-LAMBDA IGM, IGG" }],
+      uncertainStudies: [],
+      notes: ""
+    };
+    const analysis = assembleAnalysis({
+      consensus: buildSimpleConsensus(reading, reading),
+      judgement: { resolvedStudies: [], unresolvedDisputes: [] },
+      catalog: variants,
+      partialAuto: true,
+      handwrittenAllowed: true,
+      document: { documentType: "HANDWRITTEN_REQUEST", completeDocumentVisible: true, agreement: true, integrityProblems: [], integrityKinds: [] }
+    });
+    expect(analysis.outcome).toBe("AUTO_PARTIAL");
+    expect(analysis.internal?.pending).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "STUDY", text: "IGG", blockers: ["line_item_unrepresented"] })
+    ]));
+    expect(analysis.publicQuote?.totalBs).toBe(180);
+    const { deps, sent } = makeDeps({ analysis });
+    expect(await handleImageMessage(incoming, deps)).toBe("quoted");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.body).toContain("ANTI-LAMBDA IGM — Bs 180");
+    expect(sent[0]!.body).toContain("Total de los estudios cotizados: Bs 180");
+    expect(sent[0]!.body).toContain("⚠️ *Cotización parcial:*");
+    expect(sent[0]!.body).toContain("Este importe incluye solo los estudios listados");
+    expect(sent[0]!.body).not.toContain("ANTI-LAMBDA IGG —");
+    expect(sent[0]!.body).not.toContain("Bs 370");
+  });
+
+  it("4 de 5 estudios: advierte que la cotización es parcial sin revelar nombres dudosos", async () => {
     const analysis = analysisOf("Hemograma completo", "Creatinina", "Urea", "Glucosa", "Estudio que no existe en el catalogo");
     expect(analysis.outcome).toBe("AUTO_PARTIAL");
     const { deps, sent, logs } = makeDeps({ analysis });
@@ -167,7 +234,10 @@ describe("handleImageMessage", () => {
     const body = sent[0]!.body;
     for (const name of ["HEMOGRAMA COMPLETO", "CREATININA", "UREA", "GLUCOSA"]) expect(body).toContain(name);
     expect(body).toContain("Bs 125");
-    expect(body).not.toMatch(/Estudio que no existe|pendiente|revisi[oó]n|HUMAN|\bAUTO\b|no pudimos|falta|incompleta/i);
+    expect(body).toContain("⚠️ *Cotización parcial:*");
+    expect(body).toContain("Este importe incluye solo los estudios listados");
+    expect(body).toContain("Para intentar completar la cotización");
+    expect(body).not.toContain("Estudio que no existe");
     const log = logs.find((entry) => entry.event === "analysis")!;
     expect(log.data.pending).toEqual([expect.objectContaining({ kind: "STUDY" })]);
     expect(JSON.stringify(log.data)).not.toContain("Estudio que no existe");

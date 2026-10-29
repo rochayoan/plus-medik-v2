@@ -149,6 +149,7 @@ function baseBlockers(input: PartialInput): AnalysisReason[][] {
     const lines = linesOf(match);
     // La línea original (lineText) no se pierde: un paquete nombrado que las filas no reconstruyen, o un servicio pedido que el estudio no cubre.
     if (study.lineProblem) blockers.add("package_line_unreconstructable");
+    if (study.lineVariantMismatch) blockers.add("line_readers_isotype_mismatch");
     const chosen = lines.map((line) => input.catalogById.get(line.id)).filter((candidate): candidate is CatalogStudy => Boolean(candidate));
     if (chosen.length > 0 && lineServiceGap(study, chosen).length > 0) blockers.add("line_service_not_covered");
     if (lines.length === 0 && blockers.size === 0) blockers.add("catalog_unmatched");

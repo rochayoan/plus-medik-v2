@@ -27,10 +27,35 @@ export function reliableLineText(a?: SimpleStudy, b?: SimpleStudy): string | und
   return x === y ? first : undefined;
 }
 
-const SEPARATORS = /\s*(?:\+|\/|;)\s*/;
+// Comas y conjunciones solo separan una variante Ig explícita (IgG/IgM/IgA/IgE).
+// No se dividen otras frases clínicas con coma o "y" que pueden formar parte del nombre.
+const SEPARATORS = /\s*(?:\+|\/|;|,(?=\s*Ig\s*[AGME]\b))\s*|\s+(?:y|e)\s+(?=Ig\s*[AGME]\b)/i;
 
+const EXPLICIT_IG_ISOTYPES = new Set(["igg", "igm", "iga", "ige"]);
+
+// El desacuerdo ENTRE lectores sobre un isotipo explícito en la misma línea no
+// autoriza asumir que la línea más corta está completa. Si ambas lecturas de
+// lineText existen y una menciona IgG donde la otra no, el estudio afectado se
+// retiene para revisión (sin inferir el isotipo que falta ni asignarle precio).
+// No aplica cuando falta lineText: ahí no existe contraste suficiente.
+export function lineIsotopeReadersDisagree(a?: SimpleStudy, b?: SimpleStudy): boolean {
+  const first = a?.lineText?.trim();
+  const second = b?.lineText?.trim();
+  if (!first || !second) return false;
+  const isotopes = (text: string): Set<string> =>
+    new Set(identityTokens(text).filter((token) => EXPLICIT_IG_ISOTYPES.has(token)));
+  const left = isotopes(first);
+  const right = isotopes(second);
+  return left.size !== right.size || [...left].some((variant) => !right.has(variant));
+}
+
+// itemKey quita los calificadores (incluidos los isotipos) para reconocer el analito.
+// Aquí necesitamos conservar los isotipos escritos explícitamente: de lo contrario,
+// una fila IgM parecería representar también IgG cuando la línea enumera ambas.
 function tokensOf(text: string): string[] {
-  return itemKey(text).split(" ").filter(Boolean);
+  const analyte = itemKey(text).split(" ").filter(Boolean);
+  const isotopes = identityTokens(text).filter((token) => EXPLICIT_IG_ISOTYPES.has(token));
+  return [...analyte, ...isotopes];
 }
 
 // Las filas de una línea que es un paquete aprobado, si lo reconstruyen EXACTAMENTE (un estudio por componente y ninguno de más).

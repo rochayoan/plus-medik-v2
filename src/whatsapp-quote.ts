@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import type { AnalysisResult } from "./analyze.js";
 import { catalogFingerprint, processingFailureCode, type AuditRepository, type ProcessingPhase } from "./audit.js";
 import { withAiCallObserver, type AiCallEvent } from "./cache.js";
+import { buildVisionDiagnostic, visionDiagnosticKeyFor } from "./vision-diagnostics.js";
 import { runGuardedTurn, type Produced, type TurnContext, type TurnProducer, type TurnsConfig } from "./guarded-turn.js";
 import type { PublicQuote } from "./partial-auto.js";
 import type { CatalogStudy } from "./types.js";
@@ -95,8 +96,9 @@ export function emojiFor(name: string): string {
 
 export const formatBs = (amount: number): string => `Bs ${Number.isInteger(amount) ? amount : amount.toFixed(2).replace(".", ",")}`;
 
-// Recibe SOLO la salida pública: estudios, precios y el total de los estudios cotizados. No afirma que el importe cubra toda la receta.
-export function formatQuoteMessage(quote: PublicQuote): string {
+// Recibe SOLO la salida pública: estudios, precios y el subtotal cotizado.
+// AUTO_PARTIAL se comunica al paciente SIN exponer textos dudosos, candidatos ni datos clínicos.
+export function formatQuoteMessage(quote: PublicQuote, options: { partial?: boolean } = {}): string {
   const lines = quote.studies.map((study) => `${emojiFor(study.name)} ${study.name} — ${formatBs(study.priceBs)}`);
   return [
     "🩺 *PlusMedik* · Cotización de tu receta",
@@ -104,6 +106,11 @@ export function formatQuoteMessage(quote: PublicQuote): string {
     ...lines,
     "",
     `💰 *${quote.totalLabel}: ${formatBs(quote.totalBs)}*`,
+    ...(options.partial ? [
+      "",
+      "⚠️ *Cotización parcial:* hay estudios o detalles de la receta que no pudimos confirmar. Este importe incluye solo los estudios listados, no necesariamente toda la solicitud.",
+      "Para intentar completar la cotización, envía otra foto completa y más clara de la receta, o consulta directamente al laboratorio por los estudios no incluidos."
+    ] : []),
     "",
     "Respóndenos por este chat para continuar. 😊"
   ].join("\n");
@@ -235,13 +242,24 @@ export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProduc
           () => deps.analyze({ imageBase64: Buffer.from(bytes).toString("base64"), mimeType, catalog })
         );
         phase = "OTHER";
+        // Diagnóstico opt-in, solo para números de prueba. Usa HMAC con secreto
+        // independiente: ninguna imagen ni transcripción se copia al log.
+        // Una falla de diagnóstico no debe alterar el resultado del paciente.
+        const diagnosticKey = visionDiagnosticKeyFor(process.env, image.from);
+        if (diagnosticKey) {
+          try {
+            deps.log("vision_diagnostic", buildVisionDiagnostic(bytes, mimeType, aiCalls, diagnosticKey));
+          } catch {
+            // Observabilidad de mejor esfuerzo, nunca parte de la decisión clínica.
+          }
+        }
         // Registro INTERNO (solo en el log del servidor, minimizado): lo pendiente y por qué. Nunca va al paciente.
         deps.log("analysis", { messageId: image.messageId, phone: who, ...buildAnalysisLog(analysis) });
         // Todas las evidencias del análisis se confirman juntas o ninguna (una transacción en la base). Si falla, el envío al paciente sigue igual.
         evidenceAttempted = true;
         await ctx.persist("evidence", (audit, runId, lease) => audit.recordEvidence(runId, { analysis, aiCalls, catalog: catalogFingerprint(catalog) }, lease));
         if (analysis.publicQuote && analysis.outcome !== "HUMAN_REVIEW") {
-          reply = formatQuoteMessage(analysis.publicQuote);
+          reply = formatQuoteMessage(analysis.publicQuote, { partial: analysis.outcome === "AUTO_PARTIAL" });
           if (deps.quotePreparations) {
             // Solo los estudios realmente MOSTRADOS al paciente (AUTO parcial puede excluir otros).
             const visible = new Set(analysis.publicQuote.studies.map((item) => `${item.name}|${item.priceBs}`));
