@@ -160,6 +160,29 @@ function makeDeps(overrides: Partial<QuoteDeps> & { analysis?: AnalysisResult } 
   return { deps, sent, logs };
 }
 
+describe("diagnóstico opcional sin impacto en WhatsApp", () => {
+  it("solo registra la huella en el número piloto y no cambia la cotización", async () => {
+    vi.stubEnv("PLUSMEDIK_VISION_DIAGNOSTICS", "on");
+    vi.stubEnv("PLUSMEDIK_VISION_DIAGNOSTICS_KEY", "test-only-diagnostic-key-" + "K".repeat(40));
+    vi.stubEnv("PLUSMEDIK_VISION_DIAGNOSTICS_PHONES", "59171234567");
+    try {
+      const pilot = makeDeps();
+      expect(await handleImageMessage(incoming, pilot.deps)).toBe("quoted");
+      expect(pilot.sent).toHaveLength(1);
+      const diag = pilot.logs.filter((entry) => entry.event === "vision_diagnostic");
+      expect(diag).toHaveLength(1);
+      expect(diag[0]?.data).toMatchObject({ version: 1, imageBytes: JPEG.byteLength, mimeType: "image/jpeg" });
+      expect(JSON.stringify(diag)).not.toContain("test-only-diagnostic-key-");
+
+      const other = makeDeps();
+      expect(await handleImageMessage({ ...incoming, from: "59179999999", messageId: "wamid.other" }, other.deps)).toBe("quoted");
+      expect(other.logs.some((entry) => entry.event === "vision_diagnostic")).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
 describe("handleImageMessage", () => {
   it("receta completa: una sola respuesta con cada estudio, su precio y el total", async () => {
     const { deps, sent } = makeDeps({ analysis: analysisOf("Hemograma completo", "Creatinina") });
