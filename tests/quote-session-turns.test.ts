@@ -421,3 +421,57 @@ describe("G5.9 · texto en modo sesión: cotizar sin «listo», acumular y pregu
     expect(audit.reserveSend).toHaveBeenCalledWith("run-1", "conversation", LEASE, expect.objectContaining({ guard: expect.objectContaining({ signature: "QUOTE_ASK:2" }) }));
   });
 });
+
+describe("G4.2: integración del apéndice de preparación con los turnos", () => {
+  it("al cotizar una sesión por texto anexa la preparación al MISMO mensaje después del cierre", async () => {
+    const item: SessionItem = {
+      id: "i1", seq: 1, kind: "TEXT", status: "RESOLVED",
+      studyIds: [uuid(1)], ambiguous: [], unresolved: 0, reasons: []
+    };
+    const w = setup({ audit: fakeAudit({ read: async () => ({ state: "ready", sessionId: "s1", items: [item] }) }) });
+    const append = vi.fn(async (body: string) => `${body}\n\nPREPARACIÓN VERIFICADA`);
+    w.deps.quotePreparations = append;
+    await processTurns([text("listo")], w.deps);
+    expect(w.sends).toHaveLength(1);
+    expect(w.sends[0]).toContain("HEMOGRAMA COMPLETO — Bs 45");
+    expect(w.sends[0]).toContain("PREPARACIÓN VERIFICADA");
+    expect(append).toHaveBeenCalledOnce();
+    expect(append.mock.calls[0]?.[1]).toEqual([uuid(1)]);
+    expect(w.audit.quoteClose).toHaveBeenCalled();
+  });
+
+  it("foto independiente mantiene el matching/precio y anexa solo los UUID cotizados", async () => {
+    const analysis = {
+      decision: "AUTO_SAFE", outcome: "AUTO_COMPLETE", reasons: [],
+      finalVisualStudies: [], disputes: [], judgeResolved: [], unresolvedDisputes: [],
+      publicQuote: { studies: [{ name: "HEMOGRAMA COMPLETO", priceBs: 45 }], totalBs: 45, totalLabel: "Total de los estudios cotizados", tariff: "PACIENTE" },
+      internal: {
+        quoted: { lines: [{ id: uuid(1), code: null, name: "HEMOGRAMA COMPLETO", priceBs: 45 }] },
+        studies: [], pending: [], recipeStops: [], advisories: [], document: { zones: [] }
+      }
+    } as unknown as AnalysisResult;
+    const w = setup({ analysis });
+    delete w.deps.turns;
+    const append = vi.fn(async (body: string) => `${body}\n\nPREPARACIÓN VERIFICADA`);
+    w.deps.quotePreparations = append;
+    await processTurns([image()], w.deps);
+    expect(w.sends).toHaveLength(1);
+    expect(w.sends[0]).toContain("HEMOGRAMA COMPLETO — Bs 45");
+    expect(w.sends[0]).toContain("PREPARACIÓN VERIFICADA");
+    expect(append.mock.calls[0]?.[1]).toEqual([uuid(1)]);
+  });
+
+  it("si falla el anexo, sigue saliendo solo la cotización y no un aviso técnico", async () => {
+    const item: SessionItem = {
+      id: "i1", seq: 1, kind: "TEXT", status: "RESOLVED",
+      studyIds: [uuid(1)], ambiguous: [], unresolved: 0, reasons: []
+    };
+    const w = setup({ audit: fakeAudit({ read: async () => ({ state: "ready", sessionId: "s1", items: [item] }) }) });
+    w.deps.quotePreparations = vi.fn(async () => { throw new Error("store unavailable"); });
+    await processTurns([text("listo")], w.deps);
+    expect(w.sends).toHaveLength(1);
+    expect(w.sends[0]).toContain("HEMOGRAMA COMPLETO — Bs 45");
+    expect(w.sends[0]).not.toContain("PREPARACIÓN VERIFICADA");
+    expect(w.sends[0]).not.toBe(TECHNICAL_ISSUE_MESSAGE);
+  });
+});
