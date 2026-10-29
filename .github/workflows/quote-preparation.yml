@@ -41,3 +41,10 @@ jobs:
       - name: Full regression suite
         # Cada suite de integración inicia su propio clúster PostgreSQL temporal. Evitar arranques simultáneos.
         run: npx vitest run --maxWorkers=2 --no-file-parallelism
+      - name: Diagnose temporary PostgreSQL startup (synthetic test clusters only)
+        if: failure()
+        run: |
+          find /tmp -maxdepth 2 -path '*/plusmedik-pg-*/server.log' -type f -print 2>/dev/null | head -n 3 | while IFS= read -r logfile; do
+            echo "== PostgreSQL startup diagnostic =="
+            tail -n 40 "$logfile"
+          done
