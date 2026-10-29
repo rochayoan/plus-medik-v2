@@ -108,7 +108,7 @@ export function formatQuoteMessage(quote: PublicQuote, options: { partial?: bool
     ...(options.partial ? [
       "",
       "⚠️ *Cotización parcial:* hay estudios o detalles de la receta que no pudimos confirmar. Este importe incluye solo los estudios listados, no necesariamente toda la solicitud.",
-      "Para completar la cotización, envía una foto más clara de esa parte de la receta o escribe los estudios que faltan."
+      "Para intentar completar la cotización, envía otra foto completa y más clara de la receta, o consulta directamente al laboratorio por los estudios no incluidos."
     ] : []),
     "",
     "Respóndenos por este chat para continuar. 😊"
