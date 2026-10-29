@@ -15,6 +15,46 @@ const make = (items: unknown[], options: { revision?: number; clock?: { now: Dat
 const advance = (clock: { now: Date }, ms: number) => { clock.now = new Date(clock.now.getTime() + ms); };
 const unavailableReason = (result: KnowledgeResult<unknown>) => (result.status === "UNAVAILABLE" ? result.reason : `AVAILABLE`);
 
+describe("revalidación estricta de preparaciones: cero tolerancia a caché vieja", () => {
+  const strict = (store: MemoryStore) => {
+    let tick = 0;
+    return new KnowledgeService({
+      store,
+      now: () => new Date(T0.getTime() + tick++), // el reloj avanza incluso después de un fetch exitoso
+      revisionCheckMs: 0,
+      maxStaleMs: 0
+    });
+  };
+
+  it("una instantánea recién descargada es válida aunque pasen milisegundos hasta comprobarla", async () => {
+    const store = new MemoryStore({ revision: 1, items: [branch()] });
+    const service = strict(store);
+    expect((await service.getBranches()).status).toBe("AVAILABLE");
+    expect(store.snapshotCalls).toBe(1);
+    expect((await service.getBranches()).status).toBe("AVAILABLE"); // revalidó la revisión
+    expect(store.revisionCalls).toBeGreaterThan(0);
+  });
+
+  it("ante caída de revisión NO reutiliza caché con maxStaleMs=0, aunque antes haya sido válida", async () => {
+    const store = new MemoryStore({ revision: 1, items: [branch()] });
+    const service = strict(store);
+    expect((await service.getBranches()).status).toBe("AVAILABLE");
+    store.failRevision = true;
+    expect(await service.getBranches()).toMatchObject({ status: "UNAVAILABLE", reason: "STORE_UNAVAILABLE" });
+    store.failRevision = false;
+    expect((await service.getBranches()).status).toBe("AVAILABLE");
+  });
+
+  it("varios lectores de la misma verificación reciben su resultado, sin caducar por el tick del reloj", async () => {
+    const store = new MemoryStore({ revision: 1, items: [branch()] });
+    store.snapshotDelayMs = 5;
+    const service = strict(store);
+    const results = await Promise.all(Array.from({ length: 4 }, () => service.getBranches()));
+    expect(results.map((r) => r.status)).toEqual(["AVAILABLE", "AVAILABLE", "AVAILABLE", "AVAILABLE"]);
+    expect(store.snapshotCalls).toBe(1);
+  });
+});
+
 describe("conocimiento no disponible: nunca se inventa", () => {
   it("sin ninguna versión aprobada, TODA consulta devuelve un resultado estructurado 'no disponible'", async () => {
     const { service } = make([]);
