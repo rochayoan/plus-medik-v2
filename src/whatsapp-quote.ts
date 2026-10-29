@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import type { AnalysisResult } from "./analyze.js";
 import { catalogFingerprint, processingFailureCode, type AuditRepository, type ProcessingPhase } from "./audit.js";
 import { withAiCallObserver, type AiCallEvent } from "./cache.js";
+import { buildVisionDiagnostic, visionDiagnosticKeyFor } from "./vision-diagnostics.js";
 import { runGuardedTurn, type Produced, type TurnContext, type TurnProducer, type TurnsConfig } from "./guarded-turn.js";
 import type { PublicQuote } from "./partial-auto.js";
 import type { CatalogStudy } from "./types.js";
@@ -241,6 +242,17 @@ export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProduc
           () => deps.analyze({ imageBase64: Buffer.from(bytes).toString("base64"), mimeType, catalog })
         );
         phase = "OTHER";
+        // Diagnóstico opt-in, solo para números de prueba. Usa HMAC con secreto
+        // independiente: ninguna imagen ni transcripción se copia al log.
+        // Una falla de diagnóstico no debe alterar el resultado del paciente.
+        const diagnosticKey = visionDiagnosticKeyFor(process.env, image.from);
+        if (diagnosticKey) {
+          try {
+            deps.log("vision_diagnostic", buildVisionDiagnostic(bytes, mimeType, aiCalls, diagnosticKey));
+          } catch {
+            // Observabilidad de mejor esfuerzo, nunca parte de la decisión clínica.
+          }
+        }
         // Registro INTERNO (solo en el log del servidor, minimizado): lo pendiente y por qué. Nunca va al paciente.
         deps.log("analysis", { messageId: image.messageId, phone: who, ...buildAnalysisLog(analysis) });
         // Todas las evidencias del análisis se confirman juntas o ninguna (una transacción en la base). Si falla, el envío al paciente sigue igual.
