@@ -181,7 +181,7 @@ describe("handleImageMessage", () => {
     expect(body).toContain("Bs 125");
     expect(body).toContain("⚠️ *Cotización parcial:*");
     expect(body).toContain("Este importe incluye solo los estudios listados");
-    expect(body).toContain("Para completar la cotización");
+    expect(body).toContain("Para intentar completar la cotización");
     expect(body).not.toContain("Estudio que no existe");
     const log = logs.find((entry) => entry.event === "analysis")!;
     expect(log.data.pending).toEqual([expect.objectContaining({ kind: "STUDY" })]);
