@@ -110,6 +110,18 @@ describe("mensaje al paciente", () => {
     expect(formatBs(45.5)).toBe("Bs 45,50");
     expect(formatBs(0)).toBe("Bs 0");
   });
+  it("un AUTO_PARTIAL informa la limitación sin alterar importe, estudios o el pie", () => {
+    const quote = { studies: [{ name: "ANTICARDIOLIPINA IgM", priceBs: 180 }, { name: "ANTICARDIOLIPINA IgG", priceBs: 180 }], totalBs: 360, totalLabel: "Total de los estudios cotizados", tariff: "PACIENTE" as const };
+    const partial = formatQuoteMessage(quote, { partial: true });
+    expect(partial).toContain("ANTICARDIOLIPINA IgM — Bs 180");
+    expect(partial).toContain("ANTICARDIOLIPINA IgG — Bs 180");
+    expect(partial).toContain("Total de los estudios cotizados: Bs 360");
+    expect(partial).toContain("⚠️ *Cotización parcial:*");
+    expect(partial).toContain("no necesariamente toda la solicitud");
+    expect(partial.endsWith("Respóndenos por este chat para continuar. 😊")).toBe(true);
+    expect(formatQuoteMessage(quote)).not.toContain("⚠️ *Cotización parcial:*");
+  });
+
   it("lista cada estudio con su precio y el total de los estudios cotizados, sin afirmar que cubre toda la receta", () => {
     const text = formatQuoteMessage({ studies: [{ name: "HEMOGRAMA COMPLETO AUTOMATIZADO", priceBs: 45 }, { name: "CREATININA", priceBs: 30 }], totalBs: 75, totalLabel: "Total de los estudios cotizados", tariff: "PACIENTE" });
     expect(text).toContain("🩸 HEMOGRAMA COMPLETO AUTOMATIZADO — Bs 45");
@@ -159,7 +171,7 @@ describe("handleImageMessage", () => {
     expect(sent[0]?.body).toContain("Total de los estudios cotizados: Bs 75");
   });
 
-  it("4 de 5 estudios: cotiza los 4 con su total y el pendiente NO se menciona al paciente, pero queda en el registro interno", async () => {
+  it("4 de 5 estudios: advierte que la cotización es parcial sin revelar nombres dudosos", async () => {
     const analysis = analysisOf("Hemograma completo", "Creatinina", "Urea", "Glucosa", "Estudio que no existe en el catalogo");
     expect(analysis.outcome).toBe("AUTO_PARTIAL");
     const { deps, sent, logs } = makeDeps({ analysis });
@@ -167,7 +179,10 @@ describe("handleImageMessage", () => {
     const body = sent[0]!.body;
     for (const name of ["HEMOGRAMA COMPLETO", "CREATININA", "UREA", "GLUCOSA"]) expect(body).toContain(name);
     expect(body).toContain("Bs 125");
-    expect(body).not.toMatch(/Estudio que no existe|pendiente|revisi[oó]n|HUMAN|\bAUTO\b|no pudimos|falta|incompleta/i);
+    expect(body).toContain("⚠️ *Cotización parcial:*");
+    expect(body).toContain("Este importe incluye solo los estudios listados");
+    expect(body).toContain("Para completar la cotización");
+    expect(body).not.toContain("Estudio que no existe");
     const log = logs.find((entry) => entry.event === "analysis")!;
     expect(log.data.pending).toEqual([expect.objectContaining({ kind: "STUDY" })]);
     expect(JSON.stringify(log.data)).not.toContain("Estudio que no existe");
