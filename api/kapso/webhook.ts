@@ -13,6 +13,7 @@ import { resolveConversationModel } from "../../src/conversation-openai.js";
 import { resolveCrmOutbox } from "../../src/crm-outbox/config.js";
 import { createCrmHandoffSink } from "../../src/crm-outbox/handoff-sink.js";
 import { QUOTE_TEXTS } from "../../src/quote-session.js";
+import { appendApprovedQuotePreparations } from "../../src/quote-preparation.js";
 import { createSupabaseStudyFactsStore, StudyFactsService } from "../../src/study-facts/index.js";
 import { resolveQuoteSessionsConfig } from "../../src/quote-session-turns.js";
 import { resolveReplyGuard } from "../../src/reply-guard.js";
@@ -47,6 +48,9 @@ const replyGuardInvalid = replyGuard.enabled && "error" in replyGuard;
 // nadie podría escribir «listo» y las fotos quedarían sin cotización: por eso, sin él, las fotos siguen cotizándose una por una como siempre). Exige la ONCEAVA migración aplicada;
 // sin ella las fotos y los textos de cotización responden con el aviso técnico (falla cerrado). Los estudios y precios son SIEMPRE los de lab_tests al momento de cotizar.
 const quoteSessionsEnabled = on("PLUSMEDIK_QUOTE_SESSIONS") && turnsEnabled && textHandlerEnabled;
+// Opt-in: anexar preparaciones clínicas aprobadas a la cotización, sin llamadas al modelo.
+// Exige turnos auditables, respuesta de texto y conocimiento (falla cerrado si falta cualquiera).
+const quotePreparationsEnabled = on("PLUSMEDIK_QUOTE_PREPARATIONS") && turnsEnabled && textHandlerEnabled && knowledgeAnswersEnabled && replyGuard.enabled && !replyGuardInvalid;
 // Datos aprobados por estudio (G4.1, APAGADOS por defecto): PLUSMEDIK_STUDY_INFO=on solo tiene efecto con PLUSMEDIK_TURNS, PLUSMEDIK_TEXT_HANDLER y PLUSMEDIK_KNOWLEDGE_ANSWERS en on.
 // Permite consultar el plazo de entrega (en horas o días según el estudio) y el tipo de muestra/requisitos SOLO con datos aprobados y vigentes. Exige la DOCEAVA migración; sin ella
 // o sin datos aprobados el bot dice que no tiene el dato (nunca inventa un plazo). Los estudios salen de la última cotización o del nombre que escriba el paciente.
@@ -99,6 +103,11 @@ function audit(): AuditRepository {
   return auditRepository ??= createSupabaseAuditRepository({ runtime: { flags: ENGINE_FLAGS } });
 }
 
+let quotePreparationKnowledge: KnowledgeService | undefined;
+const quotePreparationReader = () => (quotePreparationKnowledge ??= new KnowledgeService({
+  store: createSupabaseKnowledgeStore({ requestTimeoutMs: 3000, retryDelayMs: 200 })
+}));
+
 const realDeps: QuoteDeps = {
   async downloadImage(image: IncomingImage) {
     const client = kapsoClient();
@@ -116,6 +125,19 @@ const realDeps: QuoteDeps = {
   // Motor actual de PlusMedik, con las banderas ya validadas pasadas por argumento (no se modifica el AUTO MATCH).
   analyze: ({ imageBase64, mimeType, catalog }) =>
     analyzeImage({ imageBase64, mimeType, catalog, ...ENGINE_FLAGS }),
+  quotePreparations: quotePreparationsEnabled
+    ? (quote, studyIds, catalog, ctx) => appendApprovedQuotePreparations({
+        quote,
+        studyIds,
+        catalog,
+        knowledge: quotePreparationReader(),
+        trace: (refs) => ctx.persist("quote_preparation", async (repo, runId, lease) => {
+          if ((await repo.recordKnowledgeRefs?.(runId, refs, lease)) !== "recorded") {
+            throw new Error("QUOTE_PREPARATION_TRACE_UNAVAILABLE");
+          }
+        })
+      })
+    : undefined,
   async sendText(to, body) {
     const response = await kapsoClient().messages.sendText({ phoneNumberId: phoneNumberId(), to, body });
     return { providerMessageId: response.messages[0]?.id };
