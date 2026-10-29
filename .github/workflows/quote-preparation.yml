@@ -1,9 +1,6 @@
 name: Quote preparation checks
 
 on:
-  push:
-    branches:
-      - feat/quote-approved-preparations
   pull_request:
     paths:
       - "src/quote-preparation.ts"
@@ -13,6 +10,10 @@ on:
       - "tests/quote-preparation.test.ts"
       - "package.json"
       - "package-lock.json"
+
+concurrency:
+  group: quote-preparation-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
