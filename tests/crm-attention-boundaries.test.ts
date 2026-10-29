@@ -57,7 +57,8 @@ describe("Fase 1: el token es exclusivo y se compara en tiempo constante", () =>
   });
   it("las cabeceras impiden cacheo y se rechazan llamadas de navegador y HTTP plano (salvo localhost)", () => {
     expect(module).toContain('"cache-control": "no-store"');
-    expect(module).toMatch(/request\.headers\.has\("origin"\) \|\| request\.headers\.has\("sec-fetch-site"\) \|\| request\.headers\.has\("sec-fetch-mode"\)/);
+    expect(module).toMatch(/request\.headers\.has\("origin"\) \|\| request\.headers\.has\("sec-fetch-site"\)/);
+    expect(module).not.toMatch(/request\.headers\.has\("sec-fetch-mode"\)/);
     expect(module).toMatch(/proto !== "https" && !isLocalHost\(url\.hostname\)/);
   });
   it("la autenticación ocurre ANTES de leer el cuerpo y antes de cualquier consulta a la base", () => {
