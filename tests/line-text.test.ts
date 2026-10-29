@@ -178,6 +178,28 @@ describe("la línea completa no deja que se pierda parte de lo pedido", () => {
     const [withText] = finals(reading(row("Cultivo de alfa con antibiograma", "Cultivo de alfa con antibiograma")), undefined, []);
     expect(lineServiceGap(withText!, [cultAlfa])).toEqual([]);
   });
+  it("un isotipo Ig explícito omitido en una línea fiable queda pendiente, nunca se cobra por inferencia", () => {
+    const variants = [study("am", "ANTI-LAMBDA IGM", 180), study("ag", "ANTI-LAMBDA IGG", 190)];
+    for (const connector of [",", " y"]) {
+      const fullLine = `ANTI-LAMBDA IGM${connector} IGG`;
+      const onlyIgm = reading(row("ANTI-LAMBDA IGM", fullLine));
+      const result = analyze(onlyIgm, onlyIgm, variants);
+      expect(result.outcome).toBe("AUTO_PARTIAL");
+      expect(result.internal?.quoted.lines.map((item) => item.code)).toEqual(["am"]);
+      expect(result.internal?.pending.some((item) =>
+        item.kind === "STUDY" && item.text === "IGG" && item.blockers.includes("line_item_unrepresented")
+      )).toBe(true);
+      expect(result.publicQuote?.totalBs).toBe(180);
+
+      const both = reading(row("ANTI-LAMBDA IGM", fullLine), row("IGG", fullLine));
+      const complete = analyze(both, both, variants);
+      expect(complete.internal?.pending.some((item) => item.blockers.includes("line_item_unrepresented"))).toBe(false);
+      expect(complete.internal?.quoted.lines.map((item) => item.code).sort()).toEqual(["ag", "am"]);
+    }
+    const commaAsDescription = reading(row("ANTI-LAMBDA IGM", "ANTI-LAMBDA IGM, muestra de suero"));
+    expect(analyze(commaAsDescription, commaAsDescription, variants).outcome).toBe("AUTO_COMPLETE");
+  });
+
   it("un elemento de la línea que ninguna fila representa se avisa al CRM (el lector lo dejó fuera)", () => {
     const studies = finals(reading(row("Zetaina", "Zetaina + Omegaina")), undefined, []);
     expect(droppedLineItems(studies)).toEqual(["la línea «Zetaina + Omegaina» menciona «Omegaina» y ninguna fila de esa línea lo representa"]);
