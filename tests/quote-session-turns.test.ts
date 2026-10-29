@@ -429,7 +429,7 @@ describe("G4.2: integración del apéndice de preparación con los turnos", () =
       studyIds: [uuid(1)], ambiguous: [], unresolved: 0, reasons: []
     };
     const w = setup({ audit: fakeAudit({ read: async () => ({ state: "ready", sessionId: "s1", items: [item] }) }) });
-    const append = vi.fn(async (body: string) => `${body}\n\nPREPARACIÓN VERIFICADA`);
+    const append = vi.fn(async (body: string, _ids: readonly string[], _catalog: readonly CatalogStudy[]) => `${body}\n\nPREPARACIÓN VERIFICADA`);
     w.deps.quotePreparations = append;
     await processTurns([text("listo")], w.deps);
     expect(w.sends).toHaveLength(1);
@@ -452,7 +452,7 @@ describe("G4.2: integración del apéndice de preparación con los turnos", () =
     } as unknown as AnalysisResult;
     const w = setup({ analysis });
     delete w.deps.turns;
-    const append = vi.fn(async (body: string) => `${body}\n\nPREPARACIÓN VERIFICADA`);
+    const append = vi.fn(async (body: string, _ids: readonly string[], _catalog: readonly CatalogStudy[]) => `${body}\n\nPREPARACIÓN VERIFICADA`);
     w.deps.quotePreparations = append;
     await processTurns([image()], w.deps);
     expect(w.sends).toHaveLength(1);
