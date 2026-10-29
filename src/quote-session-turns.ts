@@ -251,7 +251,17 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
     const read = await readSession(ctx, true);
     if (!read) return plain(texts.waiting);
     if (read.state === "replay") {
-      if (read.outcome !== "NEEDS_REVIEW") return replayReply(read, texts);
+      if (read.outcome !== "NEEDS_REVIEW") {
+        const reply = replayReply(read, texts);
+        if (reply.kind !== "reply" || reply.result !== "quoted" || !read.lines || !deps.quotePreparations) return reply;
+        try {
+          const catalog = await deps.loadCatalog();
+          const body = await deps.quotePreparations(reply.body, read.lines.map((line) => line.studyId), catalog, ctx);
+          return { ...reply, body };
+        } catch {
+          return reply;
+        }
+      }
       // Ejecución que reclama el turno tras el cierre: el caso se vuelve a presentar (idempotente) para decidir con el estado REAL del CRM qué texto corresponde.
       try {
         return await reviewReply(ctx, read.sessionId, await deps.loadCatalog());
@@ -289,7 +299,17 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
     const closed = await close(ctx, input);
     if (closed.status === "pending") return plain(texts.waiting);
     if (closed.status === "not_open") return plain(texts.empty);
-    if (evaluation.kind === "QUOTE") return { kind: "reply", body: formatSessionQuote(evaluation.lines, evaluation.duplicates, texts), result: "quoted", processingStatus: "COMPLETED", stale: "NONE" };
+    if (evaluation.kind === "QUOTE") {
+      let body = formatSessionQuote(evaluation.lines, evaluation.duplicates, texts);
+      if (deps.quotePreparations) {
+        try {
+          body = await deps.quotePreparations(body, evaluation.lines.map((line) => line.studyId), catalog, ctx);
+        } catch {
+          deps.log("quote_preparation_skipped", { reason: "APPEND_FAILED" });
+        }
+      }
+      return { kind: "reply", body, result: "quoted", processingStatus: "COMPLETED", stale: "NONE" };
+    }
     if (evaluation.kind === "REVIEW") return reviewReply(ctx, read.sessionId, catalog);
     return plain(texts.resend);
   }
