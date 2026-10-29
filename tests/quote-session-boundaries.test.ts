@@ -86,9 +86,12 @@ describe("G4.0: dónde pueden aparecer las sesiones de cotización", () => {
     expect(api).toContain('const ENGINE_FLAGS = { semanticPrimary: true, semanticAuto: true, partialAuto: true, handwrittenAuto: "on" } as const;');
   });
 
-  it(".env.example define UNA variable de sesiones y está en blanco (apagada)", () => {
+  it(".env.example declara únicamente sesiones y preparación anexa, ambas apagadas", () => {
     const example = source(join(root, ".env.example"));
-    expect([...example.matchAll(/^(PLUSMEDIK_QUOTE_[A-Z_]*)=(.*)$/gm)].map((match) => [match[1], match[2]!.trim()])).toEqual([["PLUSMEDIK_QUOTE_SESSIONS", ""]]);
+    expect([...example.matchAll(/^(PLUSMEDIK_QUOTE_[A-Z_]*)=(.*)$/gm)].map((match) => [match[1], match[2]!.trim()])).toEqual([
+      ["PLUSMEDIK_QUOTE_SESSIONS", ""],
+      ["PLUSMEDIK_QUOTE_PREPARATIONS", ""]
+    ]);
   });
 
   it("las sesiones solo mencionan a una persona con el caso YA registrado en el CRM (G5.0): sin la cola configurada, o con algo pendiente, el aviso no promete nada", () => {
