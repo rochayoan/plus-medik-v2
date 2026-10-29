@@ -38,4 +38,5 @@ jobs:
       - name: Quote session regression tests
         run: npx vitest run tests/quote-session.test.ts tests/quote-session-turns.test.ts tests/quote-session-boundaries.test.ts
       - name: Full regression suite
-        run: npm run test
+        # Cada suite de integración inicia su propio clúster PostgreSQL temporal. Evitar arranques simultáneos.
+        run: npx vitest run --maxWorkers=2 --no-file-parallelism
