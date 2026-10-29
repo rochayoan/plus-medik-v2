@@ -71,7 +71,10 @@ export async function startEphemeralPostgres(bin: string): Promise<EphemeralPost
   const data = join(dir, "data");
   const port = await freePort();
   await run(join(bin, exe("initdb")), ["-D", data, "-U", "postgres", "--auth=trust", "-E", "UTF8", "--no-locale"], { windowsHide: true });
-  await runDetached(join(bin, exe("pg_ctl")), ["-D", data, "-o", `-p ${port} -c listen_addresses=127.0.0.1 -c fsync=off -c synchronous_commit=off -c max_connections=30`, "-l", join(dir, "server.log"), "-w", "start"]);
+  // En CI no hay permisos para crear el socket Unix en /var/run/postgresql.
+  // Mantener el socket dentro del mismo directorio temporal aislado del clúster.
+  const localSocket = process.platform === "win32" ? "" : ` -c unix_socket_directories=${dir}`;
+  await runDetached(join(bin, exe("pg_ctl")), ["-D", data, "-o", `-p ${port} -c listen_addresses=127.0.0.1 -c fsync=off -c synchronous_commit=off -c max_connections=30${localSocket}`, "-l", join(dir, "server.log"), "-w", "start"]);
 
   const base = ["-X", "-q", "-t", "-A", "-h", "127.0.0.1", "-p", String(port), "-U", "postgres"];
   const env = { ...process.env, PGCLIENTENCODING: "UTF8", PGCONNECT_TIMEOUT: "15", PGOPTIONS: "" };

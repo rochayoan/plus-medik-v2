@@ -1,0 +1,50 @@
+name: Quote preparation checks
+
+on:
+  pull_request:
+    paths:
+      - "src/quote-preparation.ts"
+      - "src/quote-session-turns.ts"
+      - "src/whatsapp-quote.ts"
+      - "api/kapso/webhook.ts"
+      - "tests/quote-preparation.test.ts"
+      - "package.json"
+      - "package-lock.json"
+
+concurrency:
+  group: quote-preparation-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quote-preparation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+      - name: Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Approved quote preparation tests
+        run: npx vitest run tests/quote-preparation.test.ts
+      - name: Quote session regression tests
+        run: npx vitest run tests/quote-session.test.ts tests/quote-session-turns.test.ts tests/quote-session-boundaries.test.ts
+      - name: Full regression suite
+        # Cada suite de integración inicia su propio clúster PostgreSQL temporal. Evitar arranques simultáneos.
+        run: npx vitest run --maxWorkers=2 --no-file-parallelism
+      - name: Diagnose temporary PostgreSQL startup (synthetic test clusters only)
+        if: failure()
+        run: |
+          find /tmp -maxdepth 2 -path '*/plusmedik-pg-*/server.log' -type f -print 2>/dev/null | head -n 3 | while IFS= read -r logfile; do
+            echo "== PostgreSQL startup diagnostic =="
+            tail -n 40 "$logfile"
+          done

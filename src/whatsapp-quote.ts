@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import type { AnalysisResult } from "./analyze.js";
 import { catalogFingerprint, processingFailureCode, type AuditRepository, type ProcessingPhase } from "./audit.js";
 import { withAiCallObserver, type AiCallEvent } from "./cache.js";
-import { runGuardedTurn, type Produced, type TurnProducer, type TurnsConfig } from "./guarded-turn.js";
+import { runGuardedTurn, type Produced, type TurnContext, type TurnProducer, type TurnsConfig } from "./guarded-turn.js";
 import type { PublicQuote } from "./partial-auto.js";
 import type { CatalogStudy } from "./types.js";
 
@@ -119,6 +119,8 @@ export interface QuoteDeps {
   downloadImage(image: IncomingImage): Promise<{ bytes: Uint8Array; contentType?: string }>;
   loadCatalog(): Promise<CatalogStudy[]>;
   analyze(args: { imageBase64: string; mimeType: string; catalog: CatalogStudy[] }): Promise<AnalysisResult>;
+  // Opt-in: solo apéndice de preparación APROBADA, con rastro antes de envío. No altera el matching ni la cotización.
+  quotePreparations?: (quote: string, studyIds: readonly string[], catalog: readonly CatalogStudy[], ctx: TurnContext) => Promise<string>;
   sendText(to: string, body: string): Promise<void | { providerMessageId?: string }>;
   log(event: string, data: Record<string, unknown>): void;
   audit?: AuditRepository;
@@ -240,6 +242,18 @@ export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProduc
         await ctx.persist("evidence", (audit, runId, lease) => audit.recordEvidence(runId, { analysis, aiCalls, catalog: catalogFingerprint(catalog) }, lease));
         if (analysis.publicQuote && analysis.outcome !== "HUMAN_REVIEW") {
           reply = formatQuoteMessage(analysis.publicQuote);
+          if (deps.quotePreparations) {
+            // Solo los estudios realmente MOSTRADOS al paciente (AUTO parcial puede excluir otros).
+            const visible = new Set(analysis.publicQuote.studies.map((item) => `${item.name}|${item.priceBs}`));
+            const ids = [...new Set((analysis.internal?.quoted.lines ?? analysis.quote?.lines ?? [])
+              .filter((item) => visible.has(`${item.name}|${item.priceBs}`))
+              .map((item) => item.id))];
+            try {
+              reply = await deps.quotePreparations(reply, ids, catalog, ctx);
+            } catch {
+              deps.log("quote_preparation_skipped", { reason: "APPEND_FAILED" });
+            }
+          }
           result = "quoted";
         } else {
           reply = NO_QUOTE_MESSAGE;
