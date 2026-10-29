@@ -31,8 +31,15 @@ export function reliableLineText(a?: SimpleStudy, b?: SimpleStudy): string | und
 // No se dividen otras frases clínicas con coma o "y" que pueden formar parte del nombre.
 const SEPARATORS = /\s*(?:\+|\/|;|,(?=\s*Ig\s*[AGME]\b))\s*|\s+(?:y|e)\s+(?=Ig\s*[AGME]\b)/i;
 
+const EXPLICIT_IG_ISOTYPES = new Set(["igg", "igm", "iga", "ige"]);
+
+// itemKey quita los calificadores (incluidos los isotipos) para reconocer el analito.
+// Aquí necesitamos conservar los isotipos escritos explícitamente: de lo contrario,
+// una fila IgM parecería representar también IgG cuando la línea enumera ambas.
 function tokensOf(text: string): string[] {
-  return itemKey(text).split(" ").filter(Boolean);
+  const analyte = itemKey(text).split(" ").filter(Boolean);
+  const isotopes = identityTokens(text).filter((token) => EXPLICIT_IG_ISOTYPES.has(token));
+  return [...analyte, ...isotopes];
 }
 
 // Las filas de una línea que es un paquete aprobado, si lo reconstruyen EXACTAMENTE (un estudio por componente y ninguno de más).
