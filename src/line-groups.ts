@@ -27,7 +27,9 @@ export function reliableLineText(a?: SimpleStudy, b?: SimpleStudy): string | und
   return x === y ? first : undefined;
 }
 
-const SEPARATORS = /\s*(?:\+|\/|;)\s*/;
+// Comas y conjunciones solo separan una variante Ig explícita (IgG/IgM/IgA/IgE).
+// No se dividen otras frases clínicas con coma o "y" que pueden formar parte del nombre.
+const SEPARATORS = /\s*(?:\+|\/|;|,(?=\s*Ig\s*[AGME]\b))\s*|\s+(?:y|e)\s+(?=Ig\s*[AGME]\b)/i;
 
 function tokensOf(text: string): string[] {
   return itemKey(text).split(" ").filter(Boolean);
