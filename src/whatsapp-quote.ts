@@ -95,8 +95,9 @@ export function emojiFor(name: string): string {
 
 export const formatBs = (amount: number): string => `Bs ${Number.isInteger(amount) ? amount : amount.toFixed(2).replace(".", ",")}`;
 
-// Recibe SOLO la salida pública: estudios, precios y el total de los estudios cotizados. No afirma que el importe cubra toda la receta.
-export function formatQuoteMessage(quote: PublicQuote): string {
+// Recibe SOLO la salida pública: estudios, precios y el subtotal cotizado.
+// AUTO_PARTIAL se comunica al paciente SIN exponer textos dudosos, candidatos ni datos clínicos.
+export function formatQuoteMessage(quote: PublicQuote, options: { partial?: boolean } = {}): string {
   const lines = quote.studies.map((study) => `${emojiFor(study.name)} ${study.name} — ${formatBs(study.priceBs)}`);
   return [
     "🩺 *PlusMedik* · Cotización de tu receta",
@@ -104,6 +105,11 @@ export function formatQuoteMessage(quote: PublicQuote): string {
     ...lines,
     "",
     `💰 *${quote.totalLabel}: ${formatBs(quote.totalBs)}*`,
+    ...(options.partial ? [
+      "",
+      "⚠️ *Cotización parcial:* hay estudios o detalles de la receta que no pudimos confirmar. Este importe incluye solo los estudios listados, no necesariamente toda la solicitud.",
+      "Para completar la cotización, envía una foto más clara de esa parte de la receta o escribe los estudios que faltan."
+    ] : []),
     "",
     "Respóndenos por este chat para continuar. 😊"
   ].join("\n");
@@ -241,7 +247,7 @@ export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProduc
         evidenceAttempted = true;
         await ctx.persist("evidence", (audit, runId, lease) => audit.recordEvidence(runId, { analysis, aiCalls, catalog: catalogFingerprint(catalog) }, lease));
         if (analysis.publicQuote && analysis.outcome !== "HUMAN_REVIEW") {
-          reply = formatQuoteMessage(analysis.publicQuote);
+          reply = formatQuoteMessage(analysis.publicQuote, { partial: analysis.outcome === "AUTO_PARTIAL" });
           if (deps.quotePreparations) {
             // Solo los estudios realmente MOSTRADOS al paciente (AUTO parcial puede excluir otros).
             const visible = new Set(analysis.publicQuote.studies.map((item) => `${item.name}|${item.priceBs}`));
