@@ -171,6 +171,38 @@ describe("handleImageMessage", () => {
     expect(sent[0]?.body).toContain("Total de los estudios cotizados: Bs 75");
   });
 
+  it("receta manuscrita sintética: un isotipo explícito no extraído queda pendiente y WhatsApp advierte subtotal, sin inventar precio", async () => {
+    const variants = [study("am", "ANTI-LAMBDA IGM", 180), study("ag", "ANTI-LAMBDA IGG", 190)];
+    // Simula la salida de AMBOS lectores; no usa fotografía real ni afirma validar OCR.
+    const reading: SimpleReading = {
+      requestedStudies: [{ ...row("ANTI-LAMBDA IGM"), lineText: "ANTI-LAMBDA IGM, IGG" }],
+      uncertainStudies: [],
+      notes: ""
+    };
+    const analysis = assembleAnalysis({
+      consensus: buildSimpleConsensus(reading, reading),
+      judgement: { resolvedStudies: [], unresolvedDisputes: [] },
+      catalog: variants,
+      partialAuto: true,
+      handwrittenAllowed: true,
+      document: { documentType: "HANDWRITTEN_REQUEST", completeDocumentVisible: true, agreement: true, integrityProblems: [], integrityKinds: [] }
+    });
+    expect(analysis.outcome).toBe("AUTO_PARTIAL");
+    expect(analysis.internal?.pending).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "STUDY", text: "IGG", blockers: ["line_item_unrepresented"] })
+    ]));
+    expect(analysis.publicQuote?.totalBs).toBe(180);
+    const { deps, sent } = makeDeps({ analysis });
+    expect(await handleImageMessage(incoming, deps)).toBe("quoted");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.body).toContain("ANTI-LAMBDA IGM — Bs 180");
+    expect(sent[0]!.body).toContain("Total de los estudios cotizados: Bs 180");
+    expect(sent[0]!.body).toContain("⚠️ *Cotización parcial:*");
+    expect(sent[0]!.body).toContain("Este importe incluye solo los estudios listados");
+    expect(sent[0]!.body).not.toContain("ANTI-LAMBDA IGG —");
+    expect(sent[0]!.body).not.toContain("Bs 370");
+  });
+
   it("4 de 5 estudios: advierte que la cotización es parcial sin revelar nombres dudosos", async () => {
     const analysis = analysisOf("Hemograma completo", "Creatinina", "Urea", "Glucosa", "Estudio que no existe en el catalogo");
     expect(analysis.outcome).toBe("AUTO_PARTIAL");
