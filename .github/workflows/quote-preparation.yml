@@ -4,6 +4,9 @@ on:
   pull_request:
     paths:
       - "src/quote-preparation.ts"
+      - "src/knowledge/service.ts"
+      - "tests/knowledge-service.test.ts"
+      - "tests/knowledge-answers-e2e.test.ts"
       - "src/quote-session-turns.ts"
       - "src/whatsapp-quote.ts"
       - "src/vision-diagnostics.ts"
@@ -46,6 +49,8 @@ jobs:
         run: npm run typecheck
       - name: Approved quote preparation tests
         run: npx vitest run tests/quote-preparation.test.ts
+      - name: Knowledge strict-freshness tests
+        run: npx vitest run tests/knowledge-service.test.ts
       - name: Quote session regression tests
         run: npx vitest run tests/quote-session.test.ts tests/quote-session-turns.test.ts tests/quote-session-boundaries.test.ts
       - name: Full regression suite
