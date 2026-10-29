@@ -71,7 +71,9 @@ export interface StudyPreparationResult {
 
 export class KnowledgeService {
   private cache?: Cache;
-  private inflight?: Promise<void>;
+  // true solo cuando la revisión o instantánea se comprobó contra el almacén.
+  // Compartido entre lectores concurrentes para no tratar una comprobación válida como una caché caducada.
+  private inflight?: Promise<boolean>;
   private forceReload = false;
   private readonly now: () => Date;
   private readonly revisionCheckMs: number;
@@ -134,22 +136,30 @@ export class KnowledgeService {
     const cache = this.cache;
     if (cache && !this.forceReload && nowMs - cache.verifiedAt < this.revisionCheckMs) return true;
     if (!this.inflight) {
-      this.inflight = (async () => {
+      this.inflight = (async (): Promise<boolean> => {
         try {
           if (this.cache && !this.forceReload) {
             const revision = await this.store.revision();
-            if (revision === this.cache.revision) { this.cache.verifiedAt = this.now().getTime(); return; }
+            if (revision === this.cache.revision) {
+              this.cache.verifiedAt = this.now().getTime();
+              return true; // revisión verificada AHORA, aunque el reloj avance antes de retornar
+            }
           }
           this.forceReload = false;
           await this.load();
+          return true; // instantánea descargada AHORA
         } catch {
-          // la base no respondió: se decide abajo según la antigüedad de la copia
+          // La base no respondió: usar caché solo si su antigüedad lo permite.
+          return false;
         }
       })().finally(() => { this.inflight = undefined; });
     }
-    await this.inflight;
+    const verified = await this.inflight;
     const current = this.cache;
-    return current !== undefined && !this.forceReload && this.now().getTime() - current.verifiedAt <= this.maxStaleMs;
+    if (!current || this.forceReload) return false;
+    if (verified) return true;
+    // maxStaleMs=0 es estrictamente fail-closed ante caída de la base.
+    return this.maxStaleMs > 0 && this.now().getTime() - current.verifiedAt <= this.maxStaleMs;
   }
 
   // ───────────────────────── resolución ─────────────────────────
