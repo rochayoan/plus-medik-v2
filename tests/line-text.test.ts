@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { assembleAnalysis, finalVisualStudiesOf, type DocumentGate } from "../src/analyze.js";
 import { legacyReadingSchema, simpleReaderInstructionsFor, simpleReadingSchema, type SimpleReading } from "../src/ai.js";
 import { buildSimpleConsensus, normalizeStudyKey, type SimpleStudy } from "../src/consensus.js";
-import { collapseExplicitPackages, droppedLineItems, heldPackageGroups, lineAnalyte, lineServiceGap, reliableLineText, separatelyRequested, withoutSelectionX } from "../src/line-groups.js";
+import { collapseExplicitPackages, droppedLineItems, heldPackageGroups, lineAnalyte, lineServiceGap, lineIsotopeReadersDisagree, reliableLineText, separatelyRequested, withoutSelectionX } from "../src/line-groups.js";
 import type { CatalogStudy } from "../src/types.js";
 
 // lineText: el texto completo de la línea conserva la agrupación original de los estudios (también con "+", "/" o combinaciones). Analitos inventados.
@@ -66,6 +66,49 @@ describe("reliableLineText: solo cuando las dos lecturas coinciden", () => {
     const consensus = buildSimpleConsensus(a, b);
     const judged = finalVisualStudiesOf(consensus, { resolvedStudies: consensus.disputes.map((d) => ({ key: d.key, verdict: "confirmed" as const, study: d.readerA.requested!, reason: "" })), unresolvedDisputes: [] });
     expect(judged[0]).toMatchObject({ source: "judge_confirmed", lineText: "Glucosa" });
+  });
+});
+
+describe("discrepancia de isotipos en la transcripción de la línea (dos lectores)", () => {
+  const variants = [study("am", "ANTI-LAMBDA IGM", 180), study("ag", "ANTI-LAMBDA IGG", 190), zeta];
+  const a = reading(row("ANTI-LAMBDA IGM", "ANTI-LAMBDA IGM, IGG"));
+  const b = reading(row("ANTI-LAMBDA IGM", "ANTI-LAMBDA IGM"));
+
+  it("retiene el estudio cuando una lectura de la línea incluye IgG y la otra no", () => {
+    expect(lineIsotopeReadersDisagree(a.requestedStudies[0], b.requestedStudies[0])).toBe(true);
+    const result = analyze(a, b, variants);
+    expect(result.decision).toBe("HUMAN_REVIEW");
+    expect(result.reasons).toContain("line_readers_isotype_mismatch");
+    expect(result.outcome).toBe("HUMAN_REVIEW");
+    expect(result.internal?.studies[0]?.blockers).toContain("line_readers_isotype_mismatch");
+    expect(result.internal?.studies[0]?.uncertainty).toContain("READING");
+    expect(result.internal?.quoted.lines).toEqual([]);
+    expect(result.publicQuote).toBeUndefined();
+  });
+
+  it("permite cotizar otra línea independiente; la línea con desacuerdo sigue sin precio", () => {
+    const first = reading(row("ANTI-LAMBDA IGM", "ANTI-LAMBDA IGM, IGG"), row("Zetaina", "Zetaina"));
+    const second = reading(row("ANTI-LAMBDA IGM", "ANTI-LAMBDA IGM"), row("Zetaina", "Zetaina"));
+    const result = analyze(first, second, variants);
+    expect(result.outcome).toBe("AUTO_PARTIAL");
+    expect(result.internal?.quoted.lines.map((item) => item.code)).toEqual(["z"]);
+    expect(result.internal?.pending.some((item) => item.blockers.includes("line_readers_isotype_mismatch"))).toBe(true);
+    expect(result.publicQuote?.totalBs).toBe(30);
+  });
+
+  it("no considera discrepancia cuando cambia la puntuación, no las variantes", () => {
+    const x = row("ANTI-LAMBDA IGM", "ANTI-LAMBDA IGM e IGG");
+    const y = row("ANTI-LAMBDA IGM", "anti-lambda IgM, IgG");
+    expect(lineIsotopeReadersDisagree(x, y)).toBe(false);
+    expect(lineIsotopeReadersDisagree(row("ANTI-LAMBDA IGM"), y)).toBe(false);
+  });
+
+  it("también retiene IgG frente a IgM; no decide qué isotipo es correcto", () => {
+    const left = reading(row("ANTI-LAMBDA IGM", "ANTI-LAMBDA IGG"));
+    const right = reading(row("ANTI-LAMBDA IGM", "ANTI-LAMBDA IGM"));
+    const result = analyze(left, right, variants);
+    expect(result.internal?.studies[0]?.blockers).toContain("line_readers_isotype_mismatch");
+    expect(result.publicQuote).toBeUndefined();
   });
 });
 
