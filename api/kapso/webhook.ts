@@ -105,7 +105,11 @@ function audit(): AuditRepository {
 
 let quotePreparationKnowledge: KnowledgeService | undefined;
 const quotePreparationReader = () => (quotePreparationKnowledge ??= new KnowledgeService({
-  store: createSupabaseKnowledgeStore({ requestTimeoutMs: 3000, retryDelayMs: 200 })
+  store: createSupabaseKnowledgeStore({ requestTimeoutMs: 3000, retryDelayMs: 200 }),
+  // Preparación clínica en cotizaciones: verificar vigencia en cada lectura.
+  // Ante falta de conexión no reutilizar una instantánea potencialmente retirada.
+  revisionCheckMs: 0,
+  maxStaleMs: 0
 }));
 
 const realDeps: QuoteDeps = {
