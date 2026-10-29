@@ -14,7 +14,7 @@ const PHONE = "59170000000";
 const OP = "5d1c3d54-8e0c-4a1f-9a8b-2f6f7d7a1e11";
 const KEY = contactKeyOf({ hmacKey: HMAC, labPhoneNumberId: LAB, contactPhone: PHONE })!;
 
-const config = (over: Partial<CrmControlConfig> = {}): CrmControlConfig => ({ token: TOKEN, labPhoneNumberId: LAB, hmacKey: HMAC, controlReady: true, ...over });
+const config = (over: Partial<CrmControlConfig> = {}): CrmControlConfig => ({ token: TOKEN, labPhoneNumberId: LAB, hmacKey: HMAC, controlReady: true, humanControl: true, scope: undefined, ...over });
 
 function fakeRepository(over: Partial<CrmAttentionRepository> = {}) {
   const repo = {

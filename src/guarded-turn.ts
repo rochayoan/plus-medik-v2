@@ -82,7 +82,9 @@ const realSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(reso
 // luego correr en paralelo. Si el turno no debe procesarse (duplicado, pausa humana, sin clave de contacto, base caída con la guarda obligatoria) devuelve ended.
 export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claimed: ClaimedTurn } | { ended: "ignored" }> {
   // Atención humana / turnos: sin una clave estable del contacto, o sin la auditoría que concede los leases y las reservas, no hay forma de comprobar la pausa -> no se responde.
-  const keySource = deps.turns ?? deps.humanControl;
+  // Control acotado: solo los contactos de la lista explícita se tratan como con control humano; los demás siguen el flujo de siempre (ni clave de contacto ni guarda obligatoria).
+  const scoped = !deps.humanControl && !deps.turns && deps.scopedControl?.covers(ref.from) ? deps.scopedControl : undefined;
+  const keySource = deps.turns ?? deps.humanControl ?? scoped;
   let contactKey: string | undefined;
   if (keySource) {
     contactKey = keySource.contactKeyFor(ref.from);
@@ -112,7 +114,7 @@ export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claime
       // Sin claim no hay lease ni reserva: la exclusión del envío no se puede demostrar. Por defecto se responde igual (política heredada: el webhook ya
       // confirmó la recepción, así que un duplicado exigiría una segunda entrega mientras la base no responde); requireAuditGuard, el control humano y los
       // turnos lo impiden.
-      if (deps.requireAuditGuard || deps.humanControl || deps.turns) {
+      if (deps.requireAuditGuard || deps.humanControl || deps.turns || scoped) {
         deps.log("reply_withheld", { reason: "audit_guard_unavailable" });
         return { ended: "ignored" };
       }

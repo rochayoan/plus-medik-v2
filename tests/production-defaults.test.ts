@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // entorno sin ninguna bandera, con Kapso simulado y sin red.
 
 const SECRET = "whsec-simulado-solo-para-pruebas";
-const FLAGS = ["PLUSMEDIK_TURNS", "PLUSMEDIK_TEXT_HANDLER", "PLUSMEDIK_KNOWLEDGE_ANSWERS", "PLUSMEDIK_REPLY_GUARD", "PLUSMEDIK_REPLY_GUARD_CONFIG", "PLUSMEDIK_QUOTE_SESSIONS", "PLUSMEDIK_STUDY_INFO", "PLUSMEDIK_ATTENTION_FILTER", "PLUSMEDIK_ATTENTION_REPEAT_SECONDS", "PLUSMEDIK_ATTENTION_SETTLE_MS", "PLUSMEDIK_AGENT_CONTROL", "PLUSMEDIK_AGENT_CONTROL_TOKEN", "PLUSMEDIK_CRM_HANDOFF", "PLUSMEDIK_CRM_REVIEW_URL", "PLUSMEDIK_CRM_REVIEW_TOKEN", "PLUSMEDIK_OUTBOX_KEY", "PLUSMEDIK_HUMAN_CONTROL", "REQUIRE_AUDIT_GUARD", "PLUSMEDIK_CONTACT_HMAC_KEY", "ALLOWED_PHONES", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "KAPSO_API_KEY", "KAPSO_PHONE_NUMBER_ID"];
+const FLAGS = ["PLUSMEDIK_TURNS", "PLUSMEDIK_TEXT_HANDLER", "PLUSMEDIK_KNOWLEDGE_ANSWERS", "PLUSMEDIK_REPLY_GUARD", "PLUSMEDIK_REPLY_GUARD_CONFIG", "PLUSMEDIK_QUOTE_SESSIONS", "PLUSMEDIK_STUDY_INFO", "PLUSMEDIK_ATTENTION_FILTER", "PLUSMEDIK_ATTENTION_REPEAT_SECONDS", "PLUSMEDIK_ATTENTION_SETTLE_MS", "PLUSMEDIK_AGENT_CONTROL", "PLUSMEDIK_AGENT_CONTROL_TOKEN", "PLUSMEDIK_AGENT_CONTROL_PHONES", "PLUSMEDIK_CRM_HANDOFF", "PLUSMEDIK_CRM_REVIEW_URL", "PLUSMEDIK_CRM_REVIEW_TOKEN", "PLUSMEDIK_OUTBOX_KEY", "PLUSMEDIK_HUMAN_CONTROL", "REQUIRE_AUDIT_GUARD", "PLUSMEDIK_CONTACT_HMAC_KEY", "ALLOWED_PHONES", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "KAPSO_API_KEY", "KAPSO_PHONE_NUMBER_ID"];
 const saved: Record<string, string | undefined> = {};
 
 const sendText = vi.fn(async () => ({ messages: [{ id: "wamid.out" }] }));
@@ -39,7 +39,7 @@ describe("valores por defecto de producción", () => {
 
   it("las banderas nuevas están en blanco en .env.example (apagadas) y documentadas", () => {
     const example = readFileSync(join(__dirname, "..", ".env.example"), "utf8");
-    for (const name of ["PLUSMEDIK_TURNS", "PLUSMEDIK_TEXT_HANDLER", "PLUSMEDIK_KNOWLEDGE_ANSWERS", "PLUSMEDIK_REPLY_GUARD", "PLUSMEDIK_REPLY_GUARD_CONFIG", "PLUSMEDIK_QUOTE_SESSIONS", "PLUSMEDIK_STUDY_INFO", "PLUSMEDIK_ATTENTION_FILTER", "PLUSMEDIK_ATTENTION_REPEAT_SECONDS", "PLUSMEDIK_ATTENTION_SETTLE_MS", "PLUSMEDIK_AGENT_CONTROL", "PLUSMEDIK_AGENT_CONTROL_TOKEN"]) {
+    for (const name of ["PLUSMEDIK_TURNS", "PLUSMEDIK_TEXT_HANDLER", "PLUSMEDIK_KNOWLEDGE_ANSWERS", "PLUSMEDIK_REPLY_GUARD", "PLUSMEDIK_REPLY_GUARD_CONFIG", "PLUSMEDIK_QUOTE_SESSIONS", "PLUSMEDIK_STUDY_INFO", "PLUSMEDIK_ATTENTION_FILTER", "PLUSMEDIK_ATTENTION_REPEAT_SECONDS", "PLUSMEDIK_ATTENTION_SETTLE_MS", "PLUSMEDIK_AGENT_CONTROL", "PLUSMEDIK_AGENT_CONTROL_TOKEN", "PLUSMEDIK_AGENT_CONTROL_PHONES"]) {
       expect(example, name).toMatch(new RegExp(`^${name}=\\r?$`, "m"));
     }
     // y no hay ninguna variable que habilite la derivación a una persona: está bloqueada en código
@@ -325,6 +325,38 @@ describe("valores por defecto de producción", () => {
       delete process.env.PLUSMEDIK_AGENT_CONTROL;
       delete process.env.PLUSMEDIK_AGENT_CONTROL_TOKEN;
     }
+  });
+
+  it("Fase 2.3: la lista de contactos autorizados, sola o mal formada, no enciende nada: sin PLUSMEDIK_AGENT_CONTROL=on las rutas siguen en 503 y una lista inválida avisa con un CÓDIGO, nunca con los números", async () => {
+    const listed = "59170000123";
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((line: unknown) => { lines.push(String(line)); });
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const request = (route: string) => new Request(`https://agente.example.test/api/internal/crm/attention/${route}`, { method: "POST", headers: { authorization: "Bearer token-de-prueba-solo-para-tests-0123456789", "content-type": "application/json" }, body: "{}" });
+    try {
+      // 1) solo la lista (la funcionalidad sigue apagada): 503 y ni se mira la petición
+      process.env.PLUSMEDIK_AGENT_CONTROL_PHONES = listed;
+      process.env.PLUSMEDIK_CONTACT_HMAC_KEY = "clave-hmac-simulada-solo-para-pruebas-0123456789";
+      process.env.KAPSO_PHONE_NUMBER_ID = "123456789012345";
+      vi.resetModules();
+      const off = (await import("../api/internal/crm/attention/status.js")) as { POST(request: Request): Promise<Response> };
+      expect((await off.POST(request("status"))).status).toBe(503);
+      // 2) lista mal formada con la funcionalidad encendida: 503 y un código de aviso
+      process.env.PLUSMEDIK_AGENT_CONTROL = "on";
+      process.env.PLUSMEDIK_AGENT_CONTROL_TOKEN = "token-de-prueba-solo-para-tests-0123456789";
+      process.env.PLUSMEDIK_AGENT_CONTROL_PHONES = `${listed},esto-no-es-un-numero`;
+      vi.resetModules();
+      const invalid = (await import("../api/internal/crm/attention/action.js")) as { POST(request: Request): Promise<Response> };
+      expect((await invalid.POST(request("action"))).status).toBe(503);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+      fetchSpy.mockRestore();
+      for (const name of ["PLUSMEDIK_AGENT_CONTROL", "PLUSMEDIK_AGENT_CONTROL_TOKEN", "PLUSMEDIK_AGENT_CONTROL_PHONES"]) delete process.env[name];
+    }
+    expect(lines.map((line) => JSON.parse(line))).toContainEqual({ app: "plusmedik", event: "crm_attention_config_invalid", error: "INVALID_SCOPE" });
+    expect(lines.join("")).not.toContain(listed);
+    expect(lines.join("")).not.toContain("esto-no-es-un-numero");
   });
 
   it("firma inválida: 401 en cualquier configuración", async () => {

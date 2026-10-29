@@ -81,7 +81,7 @@ describe.skipIf(!bin)("control de atención desde el CRM, de extremo a extremo c
       turns: { contactKeyFor, busyDelayMs: 20, busyRetries: 100, handlers: { text: createTextHandler({ log }) } }
     };
     const webhook: KapsoWebhookDeps = { secret: SECRET, allowedPhones: undefined, quote, schedule: (task) => { scheduled.push(task); }, humanControl: { labPhoneNumberId: LAB, contactKeyFor, attention: createAttentionRepository(rpcOptions()) }, log };
-    const config: CrmControlConfig | undefined = options.configured === false ? undefined : { token: TOKEN, labPhoneNumberId: LAB, hmacKey: HMAC_KEY, controlReady: options.controlReady ?? true };
+    const config: CrmControlConfig | undefined = options.configured === false ? undefined : { token: TOKEN, labPhoneNumberId: LAB, hmacKey: HMAC_KEY, controlReady: options.controlReady ?? true, humanControl: true, scope: undefined };
     const crm = { config, repository: () => createCrmAttentionRepository(rpcOptions()), log };
     const endpoint = async (route: "status" | "action", body: Record<string, unknown>, token: string | null = TOKEN) => {
       const response = await handleCrmAttention(

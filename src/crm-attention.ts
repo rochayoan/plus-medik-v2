@@ -5,14 +5,23 @@ import { contactKeyOf, createAttentionRepository, MIN_CONTACT_HMAC_KEY_LENGTH, t
 // Control de atención desde el CRM (Fase 1 de la integración con CRM-PLUSMEDIK). Implementa, del lado del agente, el contrato CRM-PLUSMEDIK/docs/AGENT_ATTENTION_CONTROL_CONTRACT.md:
 //   POST /api/internal/crm/attention/status   {contactPhone, phoneNumberId}                                                    -> estado REAL del agente (ACTIVE | HUMAN_PAUSED) y su revisión
 //   POST /api/internal/crm/attention/action   {operationId, action: pause|resume, contactPhone, phoneNumberId, reasonCode, actor} -> pausa/reactivación manual idempotente
-// APAGADO por defecto: sin PLUSMEDIK_AGENT_CONTROL=on y un token exclusivo válido, las rutas responden 503 sin tocar la base. Aunque esté encendido, mientras PLUSMEDIK_HUMAN_CONTROL no esté
-// activo (o falte la clave HMAC de contactos) NO se muta nada: status responde available:false y action no confirma. El agente es la única fuente de verdad del estado; nunca se inventa uno.
+// APAGADO por defecto: sin PLUSMEDIK_AGENT_CONTROL=on y un token exclusivo válido, las rutas responden 503 sin tocar la base. Aunque esté encendido, si el control no está operativo (falta la clave
+// HMAC de contactos, o no hay ni PLUSMEDIK_HUMAN_CONTROL ni una lista de contactos autorizados) NO se muta nada: status responde available:false y action no confirma. El agente es la única fuente de
+// verdad del estado; nunca se inventa uno.
+//
+// Dos formas de operar el control, independientes de la pausa automática por mensajes humanos de WhatsApp Business (esa sigue siendo SOLO de PLUSMEDIK_HUMAN_CONTROL):
+//   - Con PLUSMEDIK_HUMAN_CONTROL=on (como en la Fase 1): el control opera sobre todos los contactos.
+//   - Acotado: con PLUSMEDIK_AGENT_CONTROL_PHONES (lista explícita) y SIN PLUSMEDIK_HUMAN_CONTROL: solo esos números pueden consultarse, pausarse y reactivarse; para ellos (y solo para ellos) el webhook
+//     reclama cada mensaje con su clave de contacto y comprueba la pausa antes de enviar. Los demás contactos conservan EXACTAMENTE el flujo anterior (sin clave, sin pausa, sin exigir la auditoría).
+//     Cualquier número fuera de la lista recibe 403 antes de tocar la base. Una lista mal formada deja las rutas en 503 (falla cerrado). PLUSMEDIK_AGENT_CONTROL_PHONES no sustituye a ALLOWED_PHONES.
 //
 //   PLUSMEDIK_AGENT_CONTROL=on           habilita las rutas
 //   PLUSMEDIK_AGENT_CONTROL_TOKEN        token Bearer EXCLUSIVO CRM -> agente (≥ 32 caracteres; no es la service key, ni la clave HMAC, ni una credencial de Kapso). Es el mismo valor que el CRM
 //                                        tiene en su variable del mismo nombre
 //   KAPSO_PHONE_NUMBER_ID                número de WhatsApp del laboratorio: el phoneNumberId que envía el CRM debe coincidir
-//   PLUSMEDIK_HUMAN_CONTROL, PLUSMEDIK_CONTACT_HMAC_KEY   las mismas del control de atención (el contact_key se calcula AQUÍ; ni la clave ni el hash salen en ninguna respuesta)
+//   PLUSMEDIK_CONTACT_HMAC_KEY           la misma clave dedicada del control de atención (el contact_key se calcula AQUÍ; ni la clave ni el hash salen en ninguna respuesta)
+//   PLUSMEDIK_HUMAN_CONTROL              (opcional) control sobre TODOS los contactos; activa además la pausa automática por mensajes humanos y el claim obligatorio
+//   PLUSMEDIK_AGENT_CONTROL_PHONES       (opcional) lista explícita de números autorizados, separados por coma, solo dígitos con prefijo de país (máx. 10)
 // No se guarda ni se registra el teléfono, el contact_key ni el token: solo códigos.
 
 export type CrmAttentionAction = "pause" | "resume";
@@ -57,14 +66,31 @@ export function createCrmAttentionRepository(options: SupabaseRpcOptions = {}): 
 export interface CrmControlConfig {
   token: string;
   labPhoneNumberId: string;
-  // El control de atención humana está encendido Y se puede identificar a los contactos (clave HMAC válida). Si no, no se muta nada.
+  // Se puede identificar a los contactos (clave HMAC válida) Y el control está habilitado: PLUSMEDIK_HUMAN_CONTROL o una lista explícita de contactos. Si no, no se muta nada.
   controlReady: boolean;
   hmacKey: string | undefined;
+  // PLUSMEDIK_HUMAN_CONTROL activo: el webhook ya reclama TODOS los mensajes con la clave de contacto (no hace falta el modo acotado).
+  humanControl: boolean;
+  // Lista explícita de contactos autorizados (solo dígitos). undefined = sin lista: con PLUSMEDIK_HUMAN_CONTROL el control opera sobre todos los contactos.
+  scope: ReadonlySet<string> | undefined;
 }
-export type CrmControlConfigError = "MISSING_TOKEN" | "INVALID_TOKEN" | "MISSING_PHONE_NUMBER_ID";
+export type CrmControlConfigError = "MISSING_TOKEN" | "INVALID_TOKEN" | "MISSING_PHONE_NUMBER_ID" | "INVALID_SCOPE";
 export type CrmAttentionResolution = { enabled: false } | { enabled: true; config: CrmControlConfig } | { enabled: true; error: CrmControlConfigError };
 
 export const MIN_TOKEN_LENGTH = 32;
+export const MAX_SCOPED_PHONES = 10;
+
+const SCOPED_PHONE = /^\+?[0-9]{8,15}$/;
+const digitsOf = (value: string) => value.replace(/\D/g, "");
+
+// PLUSMEDIK_AGENT_CONTROL_PHONES: "unset" (vacía o ausente) | lista válida | inválida. Cualquier entrada mal formada invalida TODA la lista (nunca se adivina a quién se autoriza).
+export type ScopedPhones = { kind: "unset" } | { kind: "list"; phones: ReadonlySet<string> } | { kind: "invalid" };
+export function parseScopedPhones(raw: string | undefined): ScopedPhones {
+  if (raw === undefined || raw.trim() === "") return { kind: "unset" };
+  const entries = raw.split(",").map((entry) => entry.trim());
+  if (entries.length > MAX_SCOPED_PHONES || entries.some((entry) => !SCOPED_PHONE.test(entry))) return { kind: "invalid" };
+  return { kind: "list", phones: new Set(entries.map(digitsOf)) };
+}
 
 export function resolveCrmAttention(env: Record<string, string | undefined>): CrmAttentionResolution {
   if (env.PLUSMEDIK_AGENT_CONTROL?.trim().toLowerCase() !== "on") return { enabled: false };
@@ -73,9 +99,23 @@ export function resolveCrmAttention(env: Record<string, string | undefined>): Cr
   if (token.length < MIN_TOKEN_LENGTH || /\s/.test(token)) return { enabled: true, error: "INVALID_TOKEN" };
   const labPhoneNumberId = env.KAPSO_PHONE_NUMBER_ID?.trim();
   if (!labPhoneNumberId) return { enabled: true, error: "MISSING_PHONE_NUMBER_ID" };
+  const scoped = parseScopedPhones(env.PLUSMEDIK_AGENT_CONTROL_PHONES);
+  if (scoped.kind === "invalid") return { enabled: true, error: "INVALID_SCOPE" };
   const hmacKey = env.PLUSMEDIK_CONTACT_HMAC_KEY;
   const humanControl = env.PLUSMEDIK_HUMAN_CONTROL?.trim().toLowerCase() === "on";
-  return { enabled: true, config: { token, labPhoneNumberId, hmacKey, controlReady: humanControl && typeof hmacKey === "string" && hmacKey.length >= MIN_CONTACT_HMAC_KEY_LENGTH } };
+  const hmacReady = typeof hmacKey === "string" && hmacKey.length >= MIN_CONTACT_HMAC_KEY_LENGTH;
+  return { enabled: true, config: { token, labPhoneNumberId, hmacKey, humanControl, scope: scoped.kind === "list" ? scoped.phones : undefined, controlReady: hmacReady && (humanControl || scoped.kind === "list") } };
+}
+
+// Modo acotado del webhook: contactos para los que el webhook debe reclamar el mensaje con su clave y comprobar la pausa aunque PLUSMEDIK_HUMAN_CONTROL esté apagado. Solo existe si el control del CRM está
+// operativo, hay lista explícita y no hay control humano global (con él ya se cubre a todos). Para cualquier otra combinación devuelve undefined: el webhook no cambia en nada.
+export function resolveScopedContactControl(env: Record<string, string | undefined>): { covers(phone: string): boolean } | undefined {
+  const resolution = resolveCrmAttention(env);
+  if (!resolution.enabled || !("config" in resolution)) return undefined;
+  const { config } = resolution;
+  if (!config.controlReady || config.humanControl || !config.scope) return undefined;
+  const scope = config.scope;
+  return { covers: (phone) => scope.has(digitsOf(phone)) };
 }
 
 // ───────────────────────────── manejador HTTP ─────────────────────────────
@@ -157,6 +197,12 @@ export async function handleCrmAttention(request: Request, route: "status" | "ac
     operationId = typeof input.operationId === "string" ? input.operationId : "";
     actor = typeof input.actor === "string" ? input.actor : "";
     if (!action || !OPERATION_ID.test(operationId) || !ACTOR.test(actor) || input.reasonCode !== REASON_FOR[action]) return json(400, { ok: false, error: "invalid_request" });
+  }
+
+  // Contacto fuera de la lista explícita: se rechaza antes de calcular su clave y de tocar la base (no se revela ningún estado).
+  if (config.scope && !config.scope.has(digitsOf(phone))) {
+    deps.log("crm_attention", { route, outcome: "CONTACT_NOT_AUTHORIZED" });
+    return json(403, { ok: false, ...(route === "action" ? { confirmed: false } : { available: false }), error: "contact_not_authorized" });
   }
 
   // Control de atención no operativo: no se muta ni se inventa un estado.

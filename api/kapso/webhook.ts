@@ -4,6 +4,7 @@ import { analyzeImage } from "../../src/analyze.js";
 import { resolveAttentionFilter } from "../../src/attention-filter.js";
 import { createSupabaseAuditRepository, type AuditRepository } from "../../src/audit.js";
 import { loadActiveCatalog } from "../../src/supabase-catalog.js";
+import { resolveScopedContactControl } from "../../src/crm-attention.js";
 import { contactKeyOf, createAttentionRepository, type AttentionRepository } from "../../src/human-control.js";
 import { handleKapsoWebhook } from "../../src/kapso-webhook.js";
 import { createSupabaseKnowledgeStore, KnowledgeService } from "../../src/knowledge/index.js";
@@ -69,6 +70,9 @@ const conversationModel = turnsEnabled && textHandlerEnabled ? resolveConversati
 const attentionFilter = turnsEnabled && textHandlerEnabled ? resolveAttentionFilter(process.env) : ({ enabled: false } as const);
 const attentionConfig = attentionFilter.enabled && !("error" in attentionFilter) ? attentionFilter.config : undefined;
 if (attentionFilter.enabled && "error" in attentionFilter) logLine("attention_filter_config_invalid", { error: attentionFilter.error });
+// Control acotado a una lista explícita de contactos (APAGADO por defecto): con PLUSMEDIK_AGENT_CONTROL=on y PLUSMEDIK_AGENT_CONTROL_PHONES (y SIN PLUSMEDIK_HUMAN_CONTROL), solo esos números se reclaman con su clave
+// de contacto y respetan la pausa manual del CRM; los demás pacientes siguen el flujo de siempre. No toca la pausa automática por mensajes humanos (eso es PLUSMEDIK_HUMAN_CONTROL) ni ALLOWED_PHONES.
+const scopedContactControl = humanControlEnabled ? undefined : resolveScopedContactControl(process.env);
 const contactKeyFor = (phone: string) => contactKeyOf({ hmacKey: process.env.PLUSMEDIK_CONTACT_HMAC_KEY, labPhoneNumberId: process.env.KAPSO_PHONE_NUMBER_ID, contactPhone: phone });
 
 // El sistema de archivos de Vercel es de solo lectura: sin caché local (el registro de uso, si se escribe, va a /tmp).
@@ -138,6 +142,7 @@ const realDeps: QuoteDeps = {
   log: logLine,
   requireAuditGuard: humanControlEnabled || turnsEnabled || on("REQUIRE_AUDIT_GUARD"),
   humanControl: humanControlEnabled ? { contactKeyFor } : undefined,
+  scopedControl: scopedContactControl ? { contactKeyFor, covers: scopedContactControl.covers } : undefined,
   turns: turnsEnabled ? { contactKeyFor, replyGuard: replyGuardConfig, attention: attentionConfig,
     crmHandoff: crmOutbox,
     quoteSessions: quoteSessionsEnabled && !replyGuardInvalid

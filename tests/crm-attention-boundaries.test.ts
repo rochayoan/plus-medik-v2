@@ -14,14 +14,21 @@ const importsOf = (path: string) => [...source(path).matchAll(/(?:from|import)\s
 const files = [...walk(join(root, "src")), ...walk(join(root, "api"))].filter((path) => path.endsWith(".ts"));
 const MENTION = /crm-attention|createCrmAttention|handleCrmAttention|resolveCrmAttention|PLUSMEDIK_AGENT_CONTROL(?:_TOKEN)?\b|plusmedik_attention_crm_action/;
 const MIGRATION = join(root, "supabase/migrations/20261103000000_plusmedik_crm_attention_control.sql");
+// Fase 2.3 (control acotado): el webhook usa UNA sola función del módulo, para saber a qué contactos cubre la lista autorizada. Todo lo demás del control del CRM sigue sin existir allí.
+const SCOPED_IMPORT = 'import { resolveScopedContactControl } from "../../src/crm-attention.js";';
+const webhookWithoutScopedUse = () => code(join(root, "api/kapso/webhook.ts")).replace(SCOPED_IMPORT, "").replace("resolveScopedContactControl(process.env)", "");
 
 describe("Fase 1: dónde puede aparecer el control de atención del CRM", () => {
-  it("solo el módulo propio y las dos rutas de Vercel lo nombran: el webhook, el control humano, la auditoría y el motor no lo conocen", () => {
-    const allowed = new Set(["src/crm-attention.ts", "api/internal/crm/attention/status.ts", "api/internal/crm/attention/action.ts"]);
+  it("solo el módulo propio y las dos rutas de Vercel lo nombran: el control humano, la auditoría y el motor no lo conocen (el webhook solo importa el resolutor del modo acotado)", () => {
+    const allowed = new Set(["src/crm-attention.ts", "api/internal/crm/attention/status.ts", "api/internal/crm/attention/action.ts", "api/kapso/webhook.ts"]);
     for (const path of files) {
       if (allowed.has(rel(path))) continue;
       expect(source(path), rel(path)).not.toMatch(MENTION);
     }
+    const webhook = source(join(root, "api/kapso/webhook.ts"));
+    expect(importsOf(join(root, "api/kapso/webhook.ts")).filter((path) => path.includes("crm-attention"))).toEqual(["../../src/crm-attention.js"]);
+    expect(webhook).toContain(SCOPED_IMPORT);
+    expect(webhookWithoutScopedUse()).not.toMatch(MENTION);
   });
 
   it("existen exactamente las dos rutas del contrato y cada una exporta POST", () => {
@@ -45,7 +52,7 @@ describe("Fase 1: el token es exclusivo y se compara en tiempo constante", () =>
   });
   it("no se reutiliza la llave de servicio, la clave de la cola al CRM ni credenciales de Kapso: el único secreto ajeno que lee es la clave HMAC de contactos", () => {
     const envNames = [...module.matchAll(/env\.([A-Z_]+)/g)].map((match) => match[1]);
-    expect([...new Set(envNames)].sort()).toEqual(["KAPSO_PHONE_NUMBER_ID", "PLUSMEDIK_AGENT_CONTROL", "PLUSMEDIK_AGENT_CONTROL_TOKEN", "PLUSMEDIK_CONTACT_HMAC_KEY", "PLUSMEDIK_HUMAN_CONTROL"]);
+    expect([...new Set(envNames)].sort()).toEqual(["KAPSO_PHONE_NUMBER_ID", "PLUSMEDIK_AGENT_CONTROL", "PLUSMEDIK_AGENT_CONTROL_PHONES", "PLUSMEDIK_AGENT_CONTROL_TOKEN", "PLUSMEDIK_CONTACT_HMAC_KEY", "PLUSMEDIK_HUMAN_CONTROL"]);
     expect(module).not.toMatch(/SERVICE_ROLE|OUTBOX_KEY|CRM_REVIEW_TOKEN|KAPSO_API_KEY|WEBHOOK_SECRET|CRON_SECRET/);
   });
   it("las cabeceras impiden cacheo y se rechazan llamadas de navegador y HTTP plano (salvo localhost)", () => {
@@ -122,15 +129,54 @@ describe("Fase 1: apagado por defecto", () => {
     expect(module).toMatch(/PLUSMEDIK_AGENT_CONTROL\?\.trim\(\)\.toLowerCase\(\) !== "on"\) return \{ enabled: false \};/);
     expect(module).toMatch(/if \(!config\) return json\(503, \{ ok: false, available: false, error: "not_configured" \}\);/);
   });
-  it(".env.example define las dos variables nuevas y están en blanco", () => {
+  it(".env.example define las variables nuevas y están en blanco", () => {
     const example = source(join(root, ".env.example"));
-    for (const name of ["PLUSMEDIK_AGENT_CONTROL", "PLUSMEDIK_AGENT_CONTROL_TOKEN"]) {
+    for (const name of ["PLUSMEDIK_AGENT_CONTROL", "PLUSMEDIK_AGENT_CONTROL_TOKEN", "PLUSMEDIK_AGENT_CONTROL_PHONES"]) {
       expect([...example.matchAll(new RegExp(`^${name}=(.*)$`, "gm"))].map((match) => match[1]!.trim()), name).toEqual([""]);
     }
   });
   it("no cambia las banderas del motor de recetas ni agrega nada al webhook", () => {
     const webhook = source(join(root, "api/kapso/webhook.ts"));
     expect(webhook).toContain('const ENGINE_FLAGS = { semanticPrimary: true, semanticAuto: true, partialAuto: true, handwrittenAuto: "on" } as const;');
-    expect(webhook).not.toMatch(MENTION);
+    expect(webhookWithoutScopedUse()).not.toMatch(MENTION);
+  });
+});
+
+describe("Fase 2.3: el control acotado no amplía la exigencia ni el alcance del webhook", () => {
+  const webhook = code(join(root, "api/kapso/webhook.ts"));
+  it("solo se activa SIN el control humano global (que ya cubre a todos) y se entrega al flujo de fotos y de turnos como una dependencia aparte", () => {
+    expect(webhook).toContain("const scopedContactControl = humanControlEnabled ? undefined : resolveScopedContactControl(process.env);");
+    expect(webhook).toContain("scopedControl: scopedContactControl ? { contactKeyFor, covers: scopedContactControl.covers } : undefined,");
+  });
+  it("no cambia la guarda obligatoria ni la pausa automática: requireAuditGuard y humanControl dependen solo de sus banderas de siempre", () => {
+    expect(webhook).toContain('requireAuditGuard: humanControlEnabled || turnsEnabled || on("REQUIRE_AUDIT_GUARD"),');
+    expect(webhook).toContain("humanControl: humanControlEnabled ? { contactKeyFor } : undefined,");
+    expect(webhook).toContain("humanControl: humanControlEnabled ? { labPhoneNumberId: process.env.KAPSO_PHONE_NUMBER_ID, contactKeyFor, attention: attentionProxy } : undefined,");
+    expect(webhook).not.toMatch(/requireAuditGuard:.*scoped/i);
+  });
+  it("ALLOWED_PHONES sigue leyéndose igual y el control acotado no la usa ni la modifica", () => {
+    expect(webhook).toContain("allowedPhones: process.env.ALLOWED_PHONES,");
+    expect(code(join(root, "src/crm-attention.ts"))).not.toMatch(/ALLOWED_PHONES|isAllowedPhone/);
+  });
+  it("en el flujo común, el modo acotado solo se considera sin control humano y sin turnos, y solo para los contactos cubiertos", () => {
+    const guarded = code(join(root, "src/guarded-turn.ts"));
+    expect(guarded).toContain("const scoped = !deps.humanControl && !deps.turns && deps.scopedControl?.covers(ref.from) ? deps.scopedControl : undefined;");
+    expect(guarded).toContain("const keySource = deps.turns ?? deps.humanControl ?? scoped;");
+    expect(guarded).toContain("if (deps.requireAuditGuard || deps.humanControl || deps.turns || scoped) {");
+  });
+  it("la documentación exige reactivar antes de retirar un número de la lista y describe la combinación con turnos", () => {
+    for (const path of ["docs/integracion-crm/02-fase2-3-control-acotado.md", ".env.example"]) {
+      expect(source(join(root, path)), path).toMatch(/reactiv/i);
+    }
+    const doc = source(join(root, "docs/integracion-crm/02-fase2-3-control-acotado.md"));
+    expect(doc).toMatch(/EXIGE reactivación previa/);
+    expect(doc).toMatch(/PLUSMEDIK_TURNS=on.*soportada, sin bypass/);
+  });
+  it("la lista se rechaza antes de calcular la clave del contacto y de crear el repositorio", () => {
+    const handler = code(join(root, "src/crm-attention.ts"));
+    const body = handler.slice(handler.indexOf("export async function handleCrmAttention"));
+    expect(body.indexOf("config.scope && !config.scope.has(")).toBeGreaterThan(body.indexOf("tokenMatches(provided, config.token)"));
+    expect(body.indexOf("config.scope && !config.scope.has(")).toBeLessThan(body.indexOf("contactKeyOf("));
+    expect(body.indexOf("config.scope && !config.scope.has(")).toBeLessThan(body.indexOf("deps.repository()"));
   });
 });

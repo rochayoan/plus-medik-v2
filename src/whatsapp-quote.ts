@@ -130,6 +130,9 @@ export interface QuoteDeps {
   // contacto con la IA pausada no se procesa; la reserva y la comprobación final de envío vuelven a consultar la pausa; y el claim de la auditoría pasa a ser
   // obligatorio (como requireAuditGuard).
   humanControl?: { contactKeyFor(phone: string): string | undefined };
+  // Control acotado a una lista explícita de contactos (sin control humano global): SOLO para los contactos que `covers` reconoce se aplica la misma exigencia que arriba (clave de contacto,
+  // claim obligatorio, pausa comprobada en la reserva y antes de enviar). Para cualquier otro contacto el flujo es EXACTAMENTE el de siempre. Ignorado si humanControl está definido.
+  scopedControl?: { contactKeyFor(phone: string): string | undefined; covers(phone: string): boolean };
   // Modo turnos (G2.0, ver guarded-turn.ts): numeración de turnos por contacto, un solo envío en vuelo por contacto y descarte de respuestas obsoletas. Implica la
   // misma exigencia que el control humano (clave estable del contacto y claim obligatorio). Sin esto el flujo es el de siempre.
   turns?: TurnsConfig;
