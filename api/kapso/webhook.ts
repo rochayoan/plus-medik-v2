@@ -1,18 +1,78 @@
 import { WhatsAppClient } from "@kapso/whatsapp-cloud-api";
 import { waitUntil } from "@vercel/functions";
 import { analyzeImage } from "../../src/analyze.js";
+import { resolveAttentionFilter } from "../../src/attention-filter.js";
 import { createSupabaseAuditRepository, type AuditRepository } from "../../src/audit.js";
 import { loadActiveCatalog } from "../../src/supabase-catalog.js";
+import { resolveScopedContactControl } from "../../src/crm-attention.js";
 import { contactKeyOf, createAttentionRepository, type AttentionRepository } from "../../src/human-control.js";
 import { handleKapsoWebhook } from "../../src/kapso-webhook.js";
+import { createSupabaseKnowledgeStore, KnowledgeService } from "../../src/knowledge/index.js";
+import { ANSWER_TEXTS, detectTopics, lazyKnowledge, ttlCache } from "../../src/knowledge-answers.js";
+import { resolveConversationModel } from "../../src/conversation-openai.js";
+import { resolveCrmOutbox } from "../../src/crm-outbox/config.js";
+import { createCrmHandoffSink } from "../../src/crm-outbox/handoff-sink.js";
+import { QUOTE_TEXTS } from "../../src/quote-session.js";
+import { createSupabaseStudyFactsStore, StudyFactsService } from "../../src/study-facts/index.js";
+import { resolveQuoteSessionsConfig } from "../../src/quote-session-turns.js";
+import { resolveReplyGuard } from "../../src/reply-guard.js";
+import { BLOCKED_HANDOFF, createTextHandler, DRAFT_TEXTS } from "../../src/text-handler.js";
 import type { IncomingImage, QuoteDeps } from "../../src/whatsapp-quote.js";
 
 // POST /api/kapso/webhook: recibe imágenes de WhatsApp (Kapso), las procesa con el motor de PlusMedik y responde con la cotización.
 // Variables: WEBHOOK_SECRET, KAPSO_API_KEY, KAPSO_PHONE_NUMBER_ID, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY (+ opcional ALLOWED_PHONES).
 // Control de atención humana (APAGADO por defecto; ver README): PLUSMEDIK_HUMAN_CONTROL=on lo activa y exige PLUSMEDIK_CONTACT_HMAC_KEY (clave dedicada, >= 32 caracteres).
 // Sin la clave, con el control activo, no se responde a nadie (falla cerrado). REQUIRE_AUDIT_GUARD=on exige el claim aunque el control esté apagado.
+// Turnos (G2.0, APAGADO por defecto): PLUSMEDIK_TURNS=on activa la coordinación de mensajes consecutivos de un mismo contacto (numeración, un solo envío en vuelo por
+// contacto, respuestas obsoletas). Exige las migraciones 01-07 y la misma clave dedicada; sin ella no se responde a nadie. Con PLUSMEDIK_TURNS=on SIN manejador de texto (ver abajo)
+// solo las imágenes pasan por la coordinación; el texto y los demás mensajes se siguen ignorando.
 const on = (name: string) => process.env[name]?.trim().toLowerCase() === "on";
 const humanControlEnabled = on("PLUSMEDIK_HUMAN_CONTROL");
+const turnsEnabled = on("PLUSMEDIK_TURNS");
+// Manejador de texto (G2.1, APAGADO por defecto): PLUSMEDIK_TEXT_HANDLER=on solo tiene efecto con PLUSMEDIK_TURNS=on. Responde con textos fijos BORRADOR (pendientes de
+// aprobación del laboratorio) sin cifras, horarios ni datos médicos. La derivación a una persona permanece BLOQUEADA (BLOCKED_HANDOFF) salvo que la cola hacia el CRM (G5.0, abajo)
+// esté habilitada Y completamente configurada; mientras tanto nunca se le dice al paciente que una persona lo atenderá.
+const textHandlerEnabled = on("PLUSMEDIK_TEXT_HANDLER");
+// Respuestas con conocimiento aprobado del laboratorio (G3.1A, APAGADO por defecto): PLUSMEDIK_KNOWLEDGE_ANSWERS=on solo tiene efecto con PLUSMEDIK_TURNS=on y PLUSMEDIK_TEXT_HANDLER=on.
+// Exige las NUEVE migraciones aplicadas y conocimiento APROBADO cargado; sin datos aprobados y vigentes el bot responde como sin conocimiento (nunca inventa). Las referencias
+// de cada respuesta se registran antes de enviarla; si no se pueden registrar, no se envía esa respuesta.
+const knowledgeAnswersEnabled = on("PLUSMEDIK_KNOWLEDGE_ANSWERS");
+// Protección contra bucles y exceso de respuestas (G3.2, APAGADA por defecto): PLUSMEDIK_REPLY_GUARD=on solo tiene efecto con PLUSMEDIK_TURNS=on y PLUSMEDIK_TEXT_HANDLER=on. Exige la
+// DÉCIMA migración aplicada (sin ella las respuestas de texto no se envían: falla cerrado). Umbrales opcionales en PLUSMEDIK_REPLY_GUARD_CONFIG (JSON); una configuración inválida
+// deja de responder el texto (las imágenes siguen). Se recomienda encenderla ANTES que el manejador de texto.
+const replyGuard = resolveReplyGuard(process.env);
+const replyGuardConfig = replyGuard.enabled && !("error" in replyGuard) ? replyGuard.config : undefined;
+const replyGuardInvalid = replyGuard.enabled && "error" in replyGuard;
+// Sesiones de cotización (G4.0, APAGADAS por defecto): PLUSMEDIK_QUOTE_SESSIONS=on solo tiene efecto con PLUSMEDIK_TURNS=on Y PLUSMEDIK_TEXT_HANDLER=on (sin el manejador de texto
+// nadie podría escribir «listo» y las fotos quedarían sin cotización: por eso, sin él, las fotos siguen cotizándose una por una como siempre). Exige la ONCEAVA migración aplicada;
+// sin ella las fotos y los textos de cotización responden con el aviso técnico (falla cerrado). Los estudios y precios son SIEMPRE los de lab_tests al momento de cotizar.
+const quoteSessionsEnabled = on("PLUSMEDIK_QUOTE_SESSIONS") && turnsEnabled && textHandlerEnabled;
+// Datos aprobados por estudio (G4.1, APAGADOS por defecto): PLUSMEDIK_STUDY_INFO=on solo tiene efecto con PLUSMEDIK_TURNS, PLUSMEDIK_TEXT_HANDLER y PLUSMEDIK_KNOWLEDGE_ANSWERS en on.
+// Permite consultar el plazo de entrega (en horas o días según el estudio) y el tipo de muestra/requisitos SOLO con datos aprobados y vigentes. Exige la DOCEAVA migración; sin ella
+// o sin datos aprobados el bot dice que no tiene el dato (nunca inventa un plazo). Los estudios salen de la última cotización o del nombre que escriba el paciente.
+const studyInfoEnabled = on("PLUSMEDIK_STUDY_INFO") && turnsEnabled && textHandlerEnabled && knowledgeAnswersEnabled;
+// Derivación segura de casos al CRM (G5.0, APAGADA por defecto): PLUSMEDIK_CRM_HANDOFF=on solo tiene efecto con PLUSMEDIK_TURNS=on y PLUSMEDIK_TEXT_HANDLER=on y con TODA la configuración
+// (PLUSMEDIK_CRM_REVIEW_URL, PLUSMEDIK_CRM_REVIEW_TOKEN, PLUSMEDIK_OUTBOX_KEY, KAPSO_PHONE_NUMBER_ID). Exige la TRECEAVA migración. Con ella, la derivación a una persona deja de estar
+// bloqueada, pero SOLO se le confirma al paciente cuando el CRM ya registró el caso. Con cualquier configuración incompleta la derivación sigue BLOQUEADA (y se registra un código).
+let studyFactsService: StudyFactsService | undefined;
+const studyFacts = () => (studyFactsService ??= new StudyFactsService({ store: createSupabaseStudyFactsStore({ requestTimeoutMs: 3000, retryDelayMs: 200 }) }));
+const logLine = (event: string, data: Record<string, unknown>) => console.log(JSON.stringify({ app: "plusmedik", event, ...data }));
+const crmOutbox = turnsEnabled && textHandlerEnabled ? resolveCrmOutbox(process.env, logLine) : undefined;
+if (replyGuard.enabled && "error" in replyGuard) logLine("reply_guard_config_invalid", { error: replyGuard.error });
+// Conversación natural con OpenAI (G5.3, APAGADA por defecto): PLUSMEDIK_LLM_CONVERSATION=on solo tiene efecto con PLUSMEDIK_TURNS=on, PLUSMEDIK_TEXT_HANDLER=on y PLUSMEDIK_REPLY_GUARD=on (válida), con
+// OPENAI_API_KEY y OPENAI_CONVERSATION_MODEL (obligatorio; sin valor por defecto). El modelo solo conversa y clasifica: precios, preparación, resultados y datos del laboratorio siguen saliendo SOLO del
+// catálogo y del conocimiento aprobado, y lo médico, la derivación a una persona y la información nunca dependen de él. Cualquier configuración incompleta la deja apagada (y se registra un código).
+const conversationModel = turnsEnabled && textHandlerEnabled ? resolveConversationModel(process.env, logLine, { responseGuardActive: replyGuard.enabled && !("error" in replyGuard) }) : undefined;
+// Atención selectiva (G6.0, APAGADA por defecto): PLUSMEDIK_ATTENTION_FILTER=on solo tiene efecto con PLUSMEDIK_TURNS=on y PLUSMEDIK_TEXT_HANDLER=on. NO ignora lo médico, pedir a una persona ni nada que pueda ser una
+// solicitud: solo saludos aislados, cortesías, mensajes sin letras y repeticiones literales (sin responder, sin modelo y sin consultas), y agrupa las confirmaciones de varios mensajes seguidos. Con las sesiones de cotización
+// y la conversación con modelo, el modelo recibe además el ESTADO de la conversación (cantidades, no textos). Opcionales: PLUSMEDIK_ATTENTION_REPEAT_SECONDS (5-600) y PLUSMEDIK_ATTENTION_SETTLE_MS (0-10000). Un valor inválido
+// deja el filtro apagado (se procesa todo como antes) y se registra un código. No requiere migración.
+const attentionFilter = turnsEnabled && textHandlerEnabled ? resolveAttentionFilter(process.env) : ({ enabled: false } as const);
+const attentionConfig = attentionFilter.enabled && !("error" in attentionFilter) ? attentionFilter.config : undefined;
+if (attentionFilter.enabled && "error" in attentionFilter) logLine("attention_filter_config_invalid", { error: attentionFilter.error });
+// Control acotado a una lista explícita de contactos (APAGADO por defecto): con PLUSMEDIK_AGENT_CONTROL=on y PLUSMEDIK_AGENT_CONTROL_PHONES (y SIN PLUSMEDIK_HUMAN_CONTROL), solo esos números se reclaman con su clave
+// de contacto y respetan la pausa manual del CRM; los demás pacientes siguen el flujo de siempre. No toca la pausa automática por mensajes humanos (eso es PLUSMEDIK_HUMAN_CONTROL) ni ALLOWED_PHONES.
+const scopedContactControl = humanControlEnabled ? undefined : resolveScopedContactControl(process.env);
 const contactKeyFor = (phone: string) => contactKeyOf({ hmacKey: process.env.PLUSMEDIK_CONTACT_HMAC_KEY, labPhoneNumberId: process.env.KAPSO_PHONE_NUMBER_ID, contactPhone: phone });
 
 // El sistema de archivos de Vercel es de solo lectura: sin caché local (el registro de uso, si se escribe, va a /tmp).
@@ -68,11 +128,37 @@ const realDeps: QuoteDeps = {
     recordFailure: (...args) => audit().recordFailure(...args),
     reserveSend: (...args) => audit().reserveSend(...args),
     confirmSend: (...args) => audit().confirmSend(...args),
-    recordReply: (...args) => audit().recordReply(...args)
+    recordReply: (...args) => audit().recordReply(...args),
+    // Operaciones opcionales del repositorio: sin ellas aquí, el modo turnos / conocimiento / sesiones no podría registrar su rastro y fallaría cerrado (una prueba verifica que no falte ninguna).
+    releaseTurn: (...args) => audit().releaseTurn?.(...args) ?? Promise.resolve(),
+    recordKnowledgeRefs: (...args) => audit().recordKnowledgeRefs!(...args),
+    recordFactRefs: (...args) => audit().recordFactRefs!(...args),
+    quoteLastStudies: (...args) => audit().quoteLastStudies!(...args),
+    quoteBegin: (...args) => audit().quoteBegin!(...args),
+    quoteFinish: (...args) => audit().quoteFinish!(...args),
+    quoteRead: (...args) => audit().quoteRead!(...args),
+    quoteClose: (...args) => audit().quoteClose!(...args)
   },
-  log: (event, data) => console.log(JSON.stringify({ app: "plusmedik", event, ...data })),
-  requireAuditGuard: humanControlEnabled || on("REQUIRE_AUDIT_GUARD"),
-  humanControl: humanControlEnabled ? { contactKeyFor } : undefined
+  log: logLine,
+  requireAuditGuard: humanControlEnabled || turnsEnabled || on("REQUIRE_AUDIT_GUARD"),
+  humanControl: humanControlEnabled ? { contactKeyFor } : undefined,
+  scopedControl: scopedContactControl ? { contactKeyFor, covers: scopedContactControl.covers } : undefined,
+  turns: turnsEnabled ? { contactKeyFor, replyGuard: replyGuardConfig, attention: attentionConfig,
+    crmHandoff: crmOutbox,
+    quoteSessions: quoteSessionsEnabled && !replyGuardInvalid
+      ? resolveQuoteSessionsConfig({ catalogForText: ttlCache(() => loadActiveCatalog(), 60_000), loopProtection: replyGuard.enabled, attention: attentionConfig ? { gate: attentionConfig.gate, settleMs: attentionConfig.settleMs } : undefined, ownTexts: [...Object.values(DRAFT_TEXTS), ...Object.values(ANSWER_TEXTS), ...Object.values(QUOTE_TEXTS)], isInfoQuestion: knowledgeAnswersEnabled ? (text) => detectTopics(text, studyInfoEnabled).length > 0 : undefined })
+      : undefined,
+    handlers: textHandlerEnabled && !replyGuardInvalid ? { text: createTextHandler({
+    handoff: crmOutbox ? createCrmHandoffSink() : BLOCKED_HANDOFF,
+    log: logLine,
+    loopProtection: replyGuard.enabled,
+    attention: attentionConfig !== undefined,
+    conversation: conversationModel,
+    // El servicio se crea al primer uso; el catálogo (solo para identificar el estudio por el que se pregunta) se pide únicamente ante preguntas de preparación y se guarda 5 min.
+    knowledge: knowledgeAnswersEnabled
+      ? { service: lazyKnowledge(() => new KnowledgeService({ store: createSupabaseKnowledgeStore({ requestTimeoutMs: 3000, retryDelayMs: 200 }) })), loadCatalog: ttlCache(() => loadActiveCatalog(), 5 * 60_000), studyFacts: studyInfoEnabled ? { getSample: (...args) => studyFacts().getSample(...args), getTurnaround: (...args) => studyFacts().getTurnaround(...args) } : undefined }
+      : undefined
+  }) } : undefined } : undefined
 };
 
 // Plazos cortos para el registro de la pausa (se hace ANTES de responder; Kapso concede 10 s): 2 intentos de 3 s.

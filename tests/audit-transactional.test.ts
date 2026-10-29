@@ -287,7 +287,7 @@ describe("migraciones: orden y aditividad", () => {
 
   it("la migración de leases no crea tablas ni borra objetos, sin SQL dinámico, y cada función SECURITY DEFINER fija su search_path", async () => {
     const files = (await readdir(dir)).filter((name) => name.endsWith(".sql")).sort();
-    expect(files.slice(-2)).toEqual(["20261023000000_plusmedik_audit_leases.sql", "20261024000000_plusmedik_human_control.sql"]);
+    expect(files.slice(3, 5)).toEqual(["20261023000000_plusmedik_audit_leases.sql", "20261024000000_plusmedik_human_control.sql"]);
     const sql = (await readFile(join(dir, "20261023000000_plusmedik_audit_leases.sql"), "utf8")).replace(/--.*$/gm, "");
     expect(sql).not.toMatch(/\bcreate\s+table\b/i);
     expect(sql).not.toMatch(/\bdrop\s+/i);
@@ -301,7 +301,7 @@ describe("migraciones: orden y aditividad", () => {
 
   it("la migración transaccional es posterior a ambas, no crea tablas ni borra objetos", async () => {
     const files = (await readdir(dir)).filter((name) => name.endsWith(".sql")).sort();
-    expect(files.slice(-5, -2)).toEqual(["20261020000000_plusmedik_persistent_audit.sql", "20261021000000_plusmedik_audit_telemetry.sql", "20261022000000_plusmedik_audit_transactional.sql"]);
+    expect(files.slice(0, 3)).toEqual(["20261020000000_plusmedik_persistent_audit.sql", "20261021000000_plusmedik_audit_telemetry.sql", "20261022000000_plusmedik_audit_transactional.sql"]);
     const sql = (await readFile(join(dir, "20261022000000_plusmedik_audit_transactional.sql"), "utf8")).replace(/--.*$/gm, "");
     expect(sql).not.toMatch(/\bcreate\s+table\b/i);
     expect(sql).not.toMatch(/\bdrop\s+/i);

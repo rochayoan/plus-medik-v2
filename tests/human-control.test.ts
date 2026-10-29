@@ -485,9 +485,9 @@ describe("migración de control de atención humana", () => {
   const dir = join(__dirname, "..", "supabase", "migrations");
   const sha = (text: string) => createHash("sha256").update(text.replace(/\r\n/g, "\n")).digest("hex");
 
-  it("es la última, las anteriores no se modificaron y solo agrega lo necesario", async () => {
+  it("es la quinta (la sexta, de turnos, es posterior), las anteriores no se modificaron y solo agrega lo necesario", async () => {
     const files = (await readdir(dir)).filter((name) => name.endsWith(".sql")).sort();
-    expect(files.slice(-2)).toEqual(["20261023000000_plusmedik_audit_leases.sql", "20261024000000_plusmedik_human_control.sql"]);
+    expect(files.slice(3, 5)).toEqual(["20261023000000_plusmedik_audit_leases.sql", "20261024000000_plusmedik_human_control.sql"]);
     expect(sha(await readFile(join(dir, "20261023000000_plusmedik_audit_leases.sql"), "utf8"))).toBe("1b6546c2a44142a00b771f303dccc43f5ea408cd912a340c3b3e406e63185ee7");
     const sql = (await readFile(join(dir, "20261024000000_plusmedik_human_control.sql"), "utf8")).replace(/--.*$/gm, "");
     // solo dos tablas nuevas (estado por contacto y eventos); el resto reutiliza runs

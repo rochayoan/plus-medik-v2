@@ -370,7 +370,12 @@ describe.skipIf(!bin)("leases y recuperación contra PostgreSQL real", () => {
       expect(await db.ok(`select check_status from public.plusmedik_audit_checks where run_id = '${runId}' and check_kind = 'REPLY'`)).toBe("UNKNOWN");
       expect(await phase(message)).toBe("SEND_UNKNOWN");
       expect((await claim(message, owner(2))).outcome).toBe("finished");
-      expect(await call(recover(0, 0))).toMatchObject({ send_outcome_unknown: 0, abandoned_before_send: 0 }); // idempotente
+      // Idempotente: otra pasada de recuperación no vuelve a tocar ESTA corrida. (Los contadores de recover_stale son de TODA la base compartida: otra prueba cuyo lease venza justo en este
+      // intervalo los alteraría, así que se comprueba la corrida propia y no un cero global.)
+      const settled = await row(message);
+      await call(recover(0, 0));
+      expect(await row(message)).toEqual(settled);
+      expect(await phase(message)).toBe("SEND_UNKNOWN");
     });
 
     it("el ejecutor antiguo que revive después de la recuperación ya no puede registrar nada (PT410)", async () => {

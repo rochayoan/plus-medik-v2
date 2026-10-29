@@ -1,7 +1,8 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { AnalysisResult } from "./analyze.js";
-import { AuditWriteError, catalogFingerprint, processingFailureCode, type AuditLease, type AuditRepository, type ProcessingPhase, type SendableResult, type SendConfirmation, type SendReservation } from "./audit.js";
+import { catalogFingerprint, processingFailureCode, type AuditRepository, type ProcessingPhase } from "./audit.js";
 import { withAiCallObserver, type AiCallEvent } from "./cache.js";
+import { runGuardedTurn, type Produced, type TurnProducer, type TurnsConfig } from "./guarded-turn.js";
 import type { PublicQuote } from "./partial-auto.js";
 import type { CatalogStudy } from "./types.js";
 
@@ -129,6 +130,12 @@ export interface QuoteDeps {
   // contacto con la IA pausada no se procesa; la reserva y la comprobación final de envío vuelven a consultar la pausa; y el claim de la auditoría pasa a ser
   // obligatorio (como requireAuditGuard).
   humanControl?: { contactKeyFor(phone: string): string | undefined };
+  // Control acotado a una lista explícita de contactos (sin control humano global): SOLO para los contactos que `covers` reconoce se aplica la misma exigencia que arriba (clave de contacto,
+  // claim obligatorio, pausa comprobada en la reserva y antes de enviar). Para cualquier otro contacto el flujo es EXACTAMENTE el de siempre. Ignorado si humanControl está definido.
+  scopedControl?: { contactKeyFor(phone: string): string | undefined; covers(phone: string): boolean };
+  // Modo turnos (G2.0, ver guarded-turn.ts): numeración de turnos por contacto, un solo envío en vuelo por contacto y descarte de respuestas obsoletas. Implica la
+  // misma exigencia que el control humano (clave estable del contacto y claim obligatorio). Sin esto el flujo es el de siempre.
+  turns?: TurnsConfig;
 }
 
 export type QuoteResult = "quoted" | "no_quote" | "technical_issue" | "ignored";
@@ -191,74 +198,13 @@ export function buildAnalysisLog(analysis: AnalysisResult): Record<string, unkno
   };
 }
 
-// Máquina de seguridad del envío (ver supabase/migrations/20261023000000_plusmedik_audit_leases.sql):
-//   claim (lease) -> análisis -> evidencia -> RESERVA de envío -> Kapso -> resultado.
-// La llamada a Kapso solo ocurre tras una reserva concedida por la base a la ejecución que posee el lease. Cualquier otra cosa (reserva denegada, lease perdido,
-// reserva de resultado desconocido, base no disponible) significa NO enviar: un mensaje no enviado se concilia después; uno duplicado no se puede deshacer.
-export async function handleImageMessage(image: IncomingImage, deps: QuoteDeps): Promise<QuoteResult> {
+// El TRABAJO de un turno de imagen: descargar, analizar, registrar la evidencia y decidir qué responder. No reclama ni reserva ni envía: eso lo hace la máquina
+// común de guarded-turn.ts (claim -> trabajo -> reserva -> comprobación final -> Kapso -> resultado), que es la que garantiza que nunca se responda dos veces.
+export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProducer {
   const who = maskPhone(image.from);
-  let auditRunId: string | undefined;
-  let lease: AuditLease | undefined;
-  const writeErrorKind = (error: unknown) => (error instanceof AuditWriteError ? { kind: error.kind } : {});
-  // Atención humana: sin una clave estable del contacto, o sin la auditoría que concede los leases y las reservas, no hay forma de comprobar la pausa -> no se responde.
-  let contactKey: string | undefined;
-  if (deps.humanControl) {
-    contactKey = deps.humanControl.contactKeyFor(image.from);
-    if (!contactKey || !deps.audit) {
-      deps.log("reply_withheld", { reason: contactKey ? "audit_guard_unavailable" : "contact_unidentified" });
-      return "ignored";
-    }
-  }
-  if (deps.audit) {
-    try {
-      const claimImage = { messageId: image.messageId, mediaId: image.mediaId };
-      const claim = contactKey ? await deps.audit.claim(claimImage, { contactKey }) : await deps.audit.claim(claimImage);
-      if (claim.kind === "duplicate") {
-        deps.log("duplicate_ignored", { processingStatus: claim.processingStatus, ...(claim.reason ? { reason: claim.reason } : {}) });
-        return "ignored";
-      }
-      auditRunId = claim.runId;
-      lease = claim.lease;
-      if (claim.takeover) deps.log("lease_taken_over", { fence: claim.lease.fence });
-    } catch (error) {
-      deps.log("audit_unavailable", { stage: "claim", ...writeErrorKind(error) });
-      // Sin claim no hay lease ni reserva: la exclusión del envío no se puede demostrar. Por defecto se responde igual (política heredada: el webhook ya
-      // confirmó la recepción, así que un duplicado exigiría una segunda entrega mientras la base no responde); requireAuditGuard lo impide.
-      if (deps.requireAuditGuard || deps.humanControl) {
-        deps.log("reply_withheld", { reason: "audit_guard_unavailable" });
-        return "ignored";
-      }
-    }
-  }
-  const guarded = Boolean(deps.audit && auditRunId && lease);
-
-  // Latido del lease: solo mejora la disponibilidad. La seguridad NO depende de él (la reserva de envío comprueba owner + fence bajo bloqueo de fila).
-  let leaseLost = false;
-  const heartbeat = guarded
-    ? setInterval(() => {
-        deps.audit!.renewLease(auditRunId!, lease!).then((alive) => { if (!alive) leaseLost = true; }, () => undefined);
-      }, deps.leaseRenewIntervalMs ?? 40_000)
-    : undefined;
-  heartbeat?.unref?.();
-  try {
-    return await processClaimed();
-  } finally {
-    if (heartbeat) clearInterval(heartbeat);
-  }
-
-  async function processClaimed(): Promise<QuoteResult> {
-    const persist = async (stage: string, action: () => Promise<void>): Promise<void> => {
-      if (!guarded) return;
-      try {
-        await action();
-      } catch (error) {
-        if (error instanceof AuditWriteError && error.kind === "LEASE_LOST") leaseLost = true;
-        // Solo el código del fallo de escritura (nunca texto del servidor): REJECTED, CONFLICT, LEASE_LOST o UNKNOWN_OUTCOME (no se supo si se confirmó).
-        deps.log("audit_unavailable", { stage, ...writeErrorKind(error) });
-      }
-    };
+  return async (ctx): Promise<Produced> => {
     let reply: string;
-    let result: SendableResult;
+    let result: "quoted" | "no_quote" | "technical_issue";
     let processingStatus: "COMPLETED" | "FAILED" = "COMPLETED";
     const aiCalls: AiCallEvent[] = [];
     // Etapa en curso: el código de fallo de la auditoría sale de DÓNDE falló el flujo, no del texto del error.
@@ -269,13 +215,13 @@ export async function handleImageMessage(image: IncomingImage, deps: QuoteDeps):
       phase = "OTHER";
       if (bytes.length === 0 || bytes.length > MAX_IMAGE_BYTES) {
         deps.log("image_rejected_size", { messageId: image.messageId, phone: who, bytes: bytes.length });
-        await persist("image", () => deps.audit!.recordIgnored(auditRunId!, "IMAGE_SIZE", lease!));
-        return "ignored";
+        await ctx.persist("image", (audit, runId, lease) => audit.recordIgnored(runId, "IMAGE_SIZE", lease));
+        return { kind: "none" };
       }
       const mimeType = detectImageMime(bytes);
       if (!mimeType) {
         deps.log("image_rejected_type", { messageId: image.messageId, phone: who });
-        await persist("image", () => deps.audit!.recordIgnored(auditRunId!, "IMAGE_TYPE", lease!));
+        await ctx.persist("image", (audit, runId, lease) => audit.recordIgnored(runId, "IMAGE_TYPE", lease));
         reply = NO_QUOTE_MESSAGE;
         result = "no_quote";
       } else {
@@ -291,7 +237,7 @@ export async function handleImageMessage(image: IncomingImage, deps: QuoteDeps):
         deps.log("analysis", { messageId: image.messageId, phone: who, ...buildAnalysisLog(analysis) });
         // Todas las evidencias del análisis se confirman juntas o ninguna (una transacción en la base). Si falla, el envío al paciente sigue igual.
         evidenceAttempted = true;
-        await persist("evidence", () => deps.audit!.recordEvidence(auditRunId!, { analysis, aiCalls, catalog: catalogFingerprint(catalog) }, lease!));
+        await ctx.persist("evidence", (audit, runId, lease) => audit.recordEvidence(runId, { analysis, aiCalls, catalog: catalogFingerprint(catalog) }, lease));
         if (analysis.publicQuote && analysis.outcome !== "HUMAN_REVIEW") {
           reply = formatQuoteMessage(analysis.publicQuote);
           result = "quoted";
@@ -303,58 +249,19 @@ export async function handleImageMessage(image: IncomingImage, deps: QuoteDeps):
     } catch (error) {
       const errorCode = processingFailureCode(phase);
       deps.log("processing_failed", { messageId: image.messageId, phone: who, errorCode });
-      if (!evidenceAttempted) await persist("evidence", () => deps.audit!.recordEvidence(auditRunId!, { aiCalls }, lease!));
-      await persist("failure", () => deps.audit!.recordFailure(auditRunId!, errorCode, lease!));
+      if (!evidenceAttempted) await ctx.persist("evidence", (audit, runId, lease) => audit.recordEvidence(runId, { aiCalls }, lease));
+      await ctx.persist("failure", (audit, runId, lease) => audit.recordFailure(runId, errorCode, lease));
       reply = TECHNICAL_ISSUE_MESSAGE;
       result = "technical_issue";
       processingStatus = "FAILED";
     }
+    // En modo turnos: una cotización o su pedido de otra foto NUNCA se descartan en silencio; solo el aviso técnico puede quedar obsoleto si el paciente ya escribió de nuevo.
+    return { kind: "reply", body: reply, result, processingStatus, stale: result === "technical_issue" ? "NEWER_TURN" : "NONE" };
+  };
+}
 
-    // RESERVA DE ENVÍO: la única autorización para llamar a Kapso. Se concede una sola vez, a la ejecución que posee el lease vigente y mientras nadie haya
-    // bloqueado la respuesta. Sin reserva NO se envía (la base concilia lo pendiente; ver plusmedik_audit_recover_stale).
-    if (guarded) {
-      if (leaseLost) {
-        deps.log("reply_withheld", { reason: "lease_lost" });
-        return "ignored";
-      }
-      let reservation: SendReservation | "unavailable";
-      try {
-        reservation = await deps.audit!.reserveSend(auditRunId!, result, lease!);
-      } catch (error) {
-        reservation = "unavailable";
-        deps.log("audit_unavailable", { stage: "reserve", ...writeErrorKind(error) });
-      }
-      if (reservation !== "reserved") {
-        deps.log("reply_withheld", { reason: reservation });
-        return "ignored";
-      }
-    }
+export const imageTurnRef = (image: IncomingImage) => ({ messageId: image.messageId, mediaId: image.mediaId, from: image.from, kind: "IMAGE" as const, who: maskPhone(image.from) });
 
-    // Comprobación final, lo más cerca posible de la llamada a Kapso: si el contacto se pausó tras la reserva, se libera la reserva y NO se envía. Un evento humano
-    // que llegue después de esta comprobación (o durante la llamada) ya no puede cancelar el envío: queda registrado como carrera, no evitado.
-    if (guarded) {
-      let confirmation: SendConfirmation | "unavailable";
-      try {
-        confirmation = await deps.audit!.confirmSend(auditRunId!, lease!);
-      } catch (error) {
-        confirmation = "unavailable";
-        deps.log("audit_unavailable", { stage: "confirm", ...writeErrorKind(error) });
-      }
-      if (confirmation !== "proceed") {
-        deps.log("reply_withheld", { reason: confirmation });
-        return "ignored";
-      }
-    }
-
-    try {
-      const sent = await deps.sendText(image.from, reply);
-      deps.log("reply_sent", { messageId: image.messageId, phone: who, result });
-      await persist("reply", () => deps.audit!.recordReply(auditRunId!, { state: "ACCEPTED", result, processingStatus, providerMessageId: sent?.providerMessageId }, lease!));
-    } catch (error) {
-      deps.log("send_failed", { messageId: image.messageId, phone: who, errorCode: "KAPSO_SEND_UNCERTAIN" });
-      // No se reintenta: un error de transporte no demuestra que Kapso no aceptó el mensaje.
-      await persist("reply", () => deps.audit!.recordReply(auditRunId!, { state: "UNKNOWN", result, processingStatus }, lease!));
-    }
-    return result;
-  }
+export async function handleImageMessage(image: IncomingImage, deps: QuoteDeps): Promise<QuoteResult> {
+  return (await runGuardedTurn(imageTurnRef(image), deps, imageProducer(image, deps))) as QuoteResult;
 }
