@@ -163,8 +163,9 @@ export async function handleCrmAttention(request: Request, route: "status" | "ac
   }
   const proto = (request.headers.get("x-forwarded-proto") ?? url.protocol.replace(":", "")).split(",")[0]!.trim().toLowerCase();
   if (proto !== "https" && !isLocalHost(url.hostname)) return json(403, { ok: false, error: "https_required" });
-  // Solo servidor a servidor: un navegador envía Origin / Sec-Fetch-*.
-  if (request.headers.has("origin") || request.headers.has("sec-fetch-site") || request.headers.has("sec-fetch-mode")) return json(403, { ok: false, error: "browser_not_allowed" });
+  // Node.js fetch (undici) también envía Sec-Fetch-Mode: cors desde el servidor.
+  // Origin o Sec-Fetch-Site identifican solicitudes de navegador; nunca usar Sec-Fetch-Mode por sí solo.
+  if (request.headers.has("origin") || request.headers.has("sec-fetch-site")) return json(403, { ok: false, error: "browser_not_allowed" });
 
   const header = request.headers.get("authorization") ?? "";
   const provided = /^Bearer (\S+)$/i.exec(header)?.[1];
