@@ -119,13 +119,22 @@ describe("autenticación y límites de la llamada", () => {
     expect((await handleCrmAttention(request("status", statusBody, { headers: { "x-forwarded-proto": "https" } }), "status", w.deps)).status).toBe(200);
   });
 
-  it("no acepta llamadas de un navegador (Origin / Sec-Fetch-*)", async () => {
+  it("no acepta llamadas de un navegador (Origin / Sec-Fetch-Site)", async () => {
     const w = setup();
-    const browserHeaders: Array<Record<string, string>> = [{ origin: "https://crm.example.test" }, { "sec-fetch-site": "cross-site" }, { "sec-fetch-mode": "cors" }];
+    const browserHeaders: Array<Record<string, string>> = [{ origin: "https://crm.example.test" }, { "sec-fetch-site": "cross-site" }, { origin: "https://crm.example.test", "sec-fetch-mode": "cors" }];
     for (const headers of browserHeaders) {
       expect(await read(await handleCrmAttention(request("status", statusBody, { headers }), "status", w.deps))).toEqual({ status: 403, body: { ok: false, error: "browser_not_allowed" } });
     }
     expect(w.repo.status).not.toHaveBeenCalled();
+  });
+
+  it("permite fetch de Node.js con Sec-Fetch-Mode: cors, pero sigue exigiendo Bearer", async () => {
+    const w = setup();
+    const headers = { "sec-fetch-mode": "cors" };
+    expect(await read(await handleCrmAttention(request("status", statusBody, { headers }), "status", w.deps))).toEqual({ status: 200, body: { ok: true, available: true, state: "ACTIVE", revision: 4 } });
+    expect(w.repo.status).toHaveBeenCalledTimes(1);
+    expect(await read(await handleCrmAttention(request("status", statusBody, { headers, token: OTHER_TOKEN }), "status", w.deps))).toEqual({ status: 401, body: { ok: false, error: "unauthorized" } });
+    expect(w.repo.status).toHaveBeenCalledTimes(1);
   });
 
   it("cuerpo: JSON obligatorio, tamaño acotado, objeto, forma exacta", async () => {
