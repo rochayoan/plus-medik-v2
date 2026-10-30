@@ -57,6 +57,7 @@ preparar una base de staging y todas las protecciones:
 - `WEBHOOK_SECRET`: secreto de la firma del webhook utilizado solo con
   mensajes sintéticos en el ensayo.
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`: credenciales de staging.
+- `KAPSO_API_KEY`, `KAPSO_PHONE_NUMBER_ID`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`: necesarios para declarar el receptor configurado. Usar exclusivamente credenciales de prueba aprobadas; **si faltan, el webhook devuelve 503 sin aceptar eventos**.
   Nunca exponer service_role en navegador, ni compartir claves entre
   staging y producción.
 
