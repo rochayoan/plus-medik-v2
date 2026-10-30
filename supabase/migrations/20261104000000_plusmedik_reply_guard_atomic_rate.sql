@@ -244,7 +244,7 @@ begin
     insert into public.plusmedik_reply_guard_marks (run_id, contact_key, signature) values (p_run_id, v_contact, v_signature) on conflict (run_id) do nothing;
   end if;
   return v_result;
-end $;
+end $$;
 
 revoke all on function public.plusmedik_turn_reserve_send_guarded(uuid,text,bigint,text,integer,text,jsonb) from public, anon, authenticated;
 grant execute on function public.plusmedik_turn_reserve_send_guarded(uuid,text,bigint,text,integer,text,jsonb) to service_role;
