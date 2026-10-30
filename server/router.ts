@@ -1,7 +1,8 @@
-import { enqueueWebhook, InboxRepository, resolveInboxConfig } from "./inbox.js";
+import { enqueueWebhook, resolveInboxConfig } from "./inbox.js";
+import { createInboxStorage } from "./inbox-storage.js";
 // Dokploy phase 1: HTTP adapter for existing pure Request/Response handlers.
-// Deliberately fail closed for the Kapso webhook until durable ACK-before-work
-// scheduling is implemented and tested. Never send real Kapso traffic here.
+// The webhook stays closed until a durable queue and all runtime flags are present.
+// Local mode uses an encrypted, fsynced Dokploy volume; Supabase is unchanged.
 type HttpHandler = (request: Request) => Response | Promise<Response>;
 type HttpModule = Record<string, unknown>;
 
@@ -28,7 +29,7 @@ export async function routeDokployRequest(request: Request): Promise<Response> {
   }
   if (path === "/readyz" && (request.method === "GET" || request.method === "HEAD")) {
     const config = resolveInboxConfig(process.env);
-    if (!config || !(await new InboxRepository(config).ready())) {
+    if (!config || !(await createInboxStorage(config).ready())) {
       return json(503, { ok: false, reason: "DURABLE_WEBHOOK_QUEUE_NOT_IMPLEMENTED" });
     }
     return json(200, { ok: true, service: "plusmedik-dokploy", webhookReady: true });
@@ -36,7 +37,9 @@ export async function routeDokployRequest(request: Request): Promise<Response> {
   if (path === "/api/kapso/webhook") {
     const config = resolveInboxConfig(process.env);
     if (!config) return json(503, { ok: false, reason: "DURABLE_WEBHOOK_QUEUE_NOT_IMPLEMENTED" });
-    return enqueueWebhook(request, config);
+    const storage = createInboxStorage(config);
+    if (!(await storage.ready())) return json(503, { ok: false, reason: "INBOX_UNAVAILABLE" });
+    return enqueueWebhook(request, config, undefined, storage);
   }
 
   const loader = routes[path];
