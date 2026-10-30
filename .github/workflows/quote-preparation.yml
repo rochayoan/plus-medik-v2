@@ -3,6 +3,13 @@ name: Quote preparation checks
 on:
   pull_request:
     paths:
+      - ".github/workflows/quote-preparation.yml"
+      - "src/text-handler.ts"
+      - "src/quote-session.ts"
+      - "tests/text-handler.test.ts"
+      - "tests/quote-session.test.ts"
+      - "scripts/agent-config.ts"
+      - "agent-config/textos-a-aprobar.md"
       - "src/quote-preparation.ts"
       - "src/knowledge/service.ts"
       - "tests/knowledge-service.test.ts"
