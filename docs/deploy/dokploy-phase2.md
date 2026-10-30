@@ -45,8 +45,14 @@ el SQL a un Supabase de otros negocios ni a una base externa de Dokploy.
 2. Ejecutar también `supabase/preflight/v2_post_apply_read_only.sql` para comprobar
    las 16 migraciones oficiales. Si cualquier fila aparece como BLOCK, investigar.
 3. Verificar la copia de seguridad y confirmar permisos y acceso del equipo.
+   Revisar **Database → Backups** en Supabase y verificar la política del
+   plan: algunos planes no incluyen copias diarias. En caso de no disponer de
+   respaldo reciente, realizar una exportación con herramientas oficiales,
+   mantenerla fuera del repositorio y comprobar la posibilidad de restaurarla.
+   NO basta con que el SQL sea aditivo: el despliegue requiere respaldo real.
    El SQL aditivo `docs/deploy/sql/plusmedik_dokploy_inbox.staging.sql` es
-   **DRAFT NO APROBADO PARA PRODUCCIÓN**; no ejecutarlo todavía.
+   **DRAFT NO APROBADO PARA PRODUCCIÓN**; no ejecutarlo todavía. El SQL incluye una
+   transacción única y falla si detecta una instalación previa (no reemplaza datos).
 4. Una vez revisado formalmente el SQL aditivo y aplicada la versión aprobada,
    ejecutar `docs/deploy/sql/plusmedik_dokploy_existing_db_postflight.readonly.sql`
    y confirmar que todas las comprobaciones están en OK.
