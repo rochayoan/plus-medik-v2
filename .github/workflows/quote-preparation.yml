@@ -8,6 +8,8 @@ on:
       - "tests/conversation-model.test.ts"
       - ".github/workflows/quote-preparation.yml"
       - "src/quote-preparation.ts"
+      - "src/quote-study-details.ts"
+      - "tests/quote-study-details.test.ts"
       - "src/knowledge/service.ts"
       - "tests/knowledge-service.test.ts"
       - "tests/knowledge-answers-e2e.test.ts"
@@ -78,8 +80,8 @@ jobs:
         run: npm run typecheck
       - name: Text pilot safety gate tests
         run: npx vitest run tests/text-pilot-gate.test.ts
-      - name: Approved quote preparation tests
-        run: npx vitest run tests/quote-preparation.test.ts
+      - name: Approved quote preparation and study-details tests
+        run: npx vitest run tests/quote-preparation.test.ts tests/quote-study-details.test.ts
       - name: Knowledge strict-freshness tests
         run: npx vitest run tests/knowledge-service.test.ts
       - name: Quote session regression tests
