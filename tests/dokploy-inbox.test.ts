@@ -39,6 +39,32 @@ describe("Dokploy encrypted inbox: no real network", () => {
     expect(resolveInboxConfig({ ...env, PLUSMEDIK_DOKPLOY_INBOX_KEY: "invalid" })).toBeUndefined();
   });
 
+  it("blocks accidental all-contact activation and incomplete pilot configuration", () => {
+    const base = {
+      PLUSMEDIK_DOKPLOY_ACCEPT_WEBHOOK: "on",
+      PLUSMEDIK_DOKPLOY_WORKER: "on", REQUIRE_AUDIT_GUARD: "on",
+      SUPABASE_URL: config.baseUrl, SUPABASE_SERVICE_ROLE_KEY: config.serviceKey,
+      WEBHOOK_SECRET: config.webhookSecret,
+      KAPSO_API_KEY: "synthetic-kapso", KAPSO_PHONE_NUMBER_ID: "synthetic-phone-id",
+      OPENAI_API_KEY: "synthetic-openai", OPENROUTER_API_KEY: "synthetic-openrouter",
+      PLUSMEDIK_DOKPLOY_INBOX_KEY: key.toString("base64"),
+      PLUSMEDIK_TURNS: "on", PLUSMEDIK_TEXT_HANDLER: "on",
+      PLUSMEDIK_REPLY_GUARD: "on", PLUSMEDIK_TEXT_PILOT_GUARD: "on",
+      PLUSMEDIK_AGENT_CONTROL_PHONES: "59170000001",
+      ALLOWED_PHONES: "59170000001,59170000002",
+      PLUSMEDIK_CONTACT_HMAC_KEY: "synthetic-contact-hmac-key-32-chars-minimum"
+    };
+    expect(resolveInboxConfig(base)).toBeDefined();
+    expect(resolveInboxConfig({ ...base, PLUSMEDIK_TEXT_PILOT_GUARD: "off" })).toBeUndefined();
+    expect(resolveInboxConfig({ ...base, PLUSMEDIK_AGENT_CONTROL_PHONES: "59170000001,59170000002" })).toBeUndefined();
+    expect(resolveInboxConfig({ ...base, ALLOWED_PHONES: "59170000002" })).toBeUndefined();
+    expect(resolveInboxConfig({ ...base, PLUSMEDIK_REPLY_GUARD: "off" })).toBeUndefined();
+    expect(resolveInboxConfig({ ...base, PLUSMEDIK_CONTACT_HMAC_KEY: "" })).toBeUndefined();
+    expect(resolveInboxConfig({ ...base, PLUSMEDIK_TURNS: "off" })).toBeUndefined();
+    expect(resolveInboxConfig({ ...base, PLUSMEDIK_LLM_CONVERSATION: "on" })).toBeUndefined();
+    expect(resolveInboxConfig({ ...base, PLUSMEDIK_LLM_CONVERSATION: "on", OPENAI_CONVERSATION_MODEL: "synthetic-model" })).toBeDefined();
+  });
+
   it("denies unverified or malformed requests before contacting Supabase", async () => {
     const network = vi.fn(async () => new Response(JSON.stringify(randomUUID()), { status: 200 }));
     expect((await enqueueWebhook(req("invalid"), config, network)).status).toBe(401);
