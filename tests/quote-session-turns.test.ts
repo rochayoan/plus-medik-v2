@@ -253,7 +253,7 @@ describe("fotografía inmediata opt-in: conserva textos y elimina LISTO", () => 
     expect(w.sends[0]).toContain("GLUCOSA EN AYUNAS — Bs 30");
     expect(w.sends[0]).toContain("Bs 75");
     expect(w.sends[0]).toContain("PREPARACIÓN Y AYUNO");
-    expect(w.sends[0]).not.toMatch(/LISTO|Cuando termines|Puedes enviar|Respóndenos|\\?/i);
+    expect(w.sends[0]).not.toMatch(/LISTO|Cuando termines|Puedes enviar|Respóndenos|[?]/i);
     expect(appendix).toHaveBeenCalledTimes(1);
     expect(w.audit.quoteBegin).not.toHaveBeenCalled();
     expect(w.audit.quoteFinish).not.toHaveBeenCalled();
@@ -266,7 +266,7 @@ describe("fotografía inmediata opt-in: conserva textos y elimina LISTO", () => 
     await processTurns([image("partial-1")], w.deps);
     expect(w.sends[0]).toContain("Cotización parcial");
     expect(w.sends[0]).toContain("Bs 75");
-    expect(w.sends[0]).not.toMatch(/envía otra foto|consulta directamente|LISTO|Respóndenos|\\?/i);
+    expect(w.sends[0]).not.toMatch(/envía otra foto|consulta directamente|LISTO|Respóndenos|[?]/i);
     expect(w.audit.quoteBegin).not.toHaveBeenCalled();
   });
 
