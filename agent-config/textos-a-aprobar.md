@@ -10,7 +10,7 @@
 | Clave | Cuándo se usa | Texto actual (BORRADOR) | Aprobado por / fecha |
 | --- | --- | --- | --- |
 | `greeting` | Saludo cuando el paciente solo saluda. | Hola 👋 Soy el asistente de PlusMedik. Puedo ayudarte a cotizar tus estudios. Escríbeme los nombres de los análisis que necesitas o envíame una foto clara de tu receta. | |
-| `send_recipe` | Pide la foto de la receta cuando el mensaje es un pedido de cotización sin foto. | Claro. Puedes escribir los nombres de los estudios o enviarme una fotografía completa de tu receta. | |
+| `send_recipe` | Indica que puede escribir estudios o enviar la receta cuando pide cotizar sin estudios identificables. | Claro. Puedes escribir los nombres de los estudios o enviarme una fotografía completa de tu receta. | |
 | `fallback` | Mensaje que no se entiende ni se puede derivar. | Recibimos tu mensaje. Para cotizar tus estudios, escribe los nombres de los análisis o envía una foto clara y completa de tu receta. | |
 | `handoff_confirmed` | Confirma la derivación a una persona. SOLO se envía con el caso ya registrado en el CRM. | Recibimos tu solicitud. Una persona del equipo la revisará y te escribirá por este chat. | |
 | `handoff_unavailable` | Se envía cuando la derivación no se pudo registrar: no promete a una persona. | Recibimos tu mensaje, pero por ahora no puedo derivarlo a una persona desde este chat. Si quieres cotizar, escribe los nombres de los estudios o envía una foto clara y completa de tu receta. | |
