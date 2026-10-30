@@ -7,6 +7,7 @@ on:
       - "tests/dokploy-router.test.ts"
       - "tests/dokploy-inbox.test.ts"
       - "docs/deploy/sql/plusmedik_dokploy_inbox.staging.sql"
+      - "docs/deploy/sql/plusmedik_dokploy_inbox.install.sql"
       - "docs/deploy/sql/plusmedik_dokploy_existing_db_preflight.readonly.sql"
       - "docs/deploy/sql/plusmedik_dokploy_existing_db_postflight.readonly.sql"
       - "tests/support/dokploy-inbox-postgres.sql"
@@ -53,10 +54,13 @@ jobs:
             sleep 1
           done
           docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "create role anon; create role authenticated; create role service_role bypassrls;"
+          # Synthetic prerequisites for the guarded installer; CI does not use patient data.
+          docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "create table public.plusmedik_audit_runs (id uuid); create table public.plusmedik_quote_sessions (id uuid); create table public.plusmedik_guard_rate_ledger (id uuid);"
+          docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "create function public.plusmedik_turn_reserve_send_guarded(uuid,text,bigint,text,integer,text,jsonb) returns boolean language sql as 'select true';"
           docker exec -i plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -At < docs/deploy/sql/plusmedik_dokploy_existing_db_preflight.readonly.sql > /dev/null
-          docker exec -i plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres < docs/deploy/sql/plusmedik_dokploy_inbox.staging.sql
+          docker exec -i plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres < docs/deploy/sql/plusmedik_dokploy_inbox.install.sql
           # A second attempt must fail rather than replace existing queue objects.
-          if docker exec -i plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres < docs/deploy/sql/plusmedik_dokploy_inbox.staging.sql > /dev/null 2>&1; then
+          if docker exec -i plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres < docs/deploy/sql/plusmedik_dokploy_inbox.install.sql > /dev/null 2>&1; then
             echo "ERROR: repeat install unexpectedly succeeded" >&2
             exit 1
           fi
