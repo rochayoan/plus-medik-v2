@@ -3,6 +3,21 @@
 -- This migration adds a retryable queue, NOT a webhook cutover.
 -- Patient bodies are encrypted by the Node application before reaching this table.
 -- No plaintext, telephone number, API key or WhatsApp message content is indexed.
+-- Atomic additive install: abort if this script collides with existing objects.
+-- No changes are applied unless every statement succeeds.
+begin;
+do $installation_gate$
+begin
+  if to_regclass('public.plusmedik_dokploy_inbox') is not null
+     or to_regprocedure('public.plusmedik_dokploy_enqueue(text,text,text,text)') is not null
+     or to_regprocedure('public.plusmedik_dokploy_claim(uuid)') is not null
+     or to_regprocedure('public.plusmedik_dokploy_renew(uuid,uuid,integer)') is not null
+     or to_regprocedure('public.plusmedik_dokploy_finish(uuid,uuid,integer,boolean)') is not null
+     or to_regprocedure('public.plusmedik_dokploy_health()') is not null
+  then
+    raise exception 'DOKPLOY_INBOX_ALREADY_EXISTS: review existing objects before install' using errcode='P2001';
+  end if;
+end $installation_gate$;
 create table if not exists public.plusmedik_dokploy_inbox (
   id uuid primary key default gen_random_uuid(),
   payload_sha256 text not null unique check (payload_sha256 ~ '^[0-9a-f]{64}$'),
@@ -128,3 +143,4 @@ begin
 end $$;
 revoke all on function public.plusmedik_dokploy_health() from public,anon,authenticated;
 grant execute on function public.plusmedik_dokploy_health() to service_role;
+commit;
