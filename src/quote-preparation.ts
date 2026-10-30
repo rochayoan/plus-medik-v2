@@ -76,8 +76,8 @@ export async function appendApprovedQuotePreparations(input: QuotePreparationInp
     "🧪 *PREPARACIÓN Y AYUNO*",
     "",
     sections.join("\n\n"),
-    ...(missing > 0 ? ["", "ℹ️ Algunos estudios de esta cotización aún no tienen indicaciones de preparación confirmadas por este canal."] : []),
-    ...(groups.size > 1 ? ["", "📌 Las indicaciones son individuales. Si necesitas combinarlas, consulta al laboratorio."] : [])
+    ...(missing > 0 ? ["", "Para otros estudios de esta cotización, la preparación aún no está confirmada por este canal."] : []),
+    ...(groups.size > 1 ? ["", "Para combinarlas, consulta al laboratorio."] : [])
   ].join("\n");
 
   const hasFooter = input.quote.endsWith(FOOTER);
