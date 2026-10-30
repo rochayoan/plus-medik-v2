@@ -1,0 +1,53 @@
+name: Reply-guard concurrency checks
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/reply-guard-concurrency.yml"
+      - "src/text-pilot-gate.ts"
+      - "tests/text-pilot-gate.test.ts"
+      - "tests/reply-guard-db.test.ts"
+      - "tests/reply-guard-e2e.test.ts"
+      - "api/kapso/webhook.ts"
+      - "supabase/migrations/*reply_guard*.sql"
+
+  push:
+    branches:
+      - feat/pilot-text-quote-safety-gate
+    paths:
+      - ".github/workflows/reply-guard-concurrency.yml"
+      - "supabase/migrations/*.sql"
+      - "supabase/preflight/*.sql"
+      - "tests/*.test.ts"
+      - "docs/g5/20-g51-aplicacion-de-migraciones.md"
+
+
+concurrency:
+  group: reply-guard-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  reply-guard-isolation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+      - name: Full guard database and E2E tests
+        run: npx vitest run tests/reply-guard-db.test.ts tests/reply-guard-e2e.test.ts --maxWorkers=1 --no-file-parallelism
+      - name: Repeat concurrent reservations and webhooks 10 times
+        run: |
+          for i in $(seq 1 10); do
+            echo "Concurrency iteration $i"
+            npx vitest run tests/reply-guard-db.test.ts tests/reply-guard-e2e.test.ts -t "concurrencia:" --maxWorkers=1 --no-file-parallelism
+          done

@@ -19,6 +19,12 @@ export interface KapsoWebhookDeps {
   secret: string | undefined;
   allowedPhones: string | undefined;
   quote: QuoteDeps;
+  // Con piloto acotado: número que usa TURNOS + texto; todos los demás contactos
+  // conservan la ruta de fotografías. Nunca se loguea el valor.
+  textPilotPhone?: string;
+  // Configuración anterior para fotografías de contactos fuera del piloto.
+  // Mantiene requireAuditGuard sin depender del flag global de turnos.
+  legacyQuote?: QuoteDeps;
   // waitUntil de Vercel: mantiene viva la ejecución tras responder.
   schedule(task: Promise<unknown>): void;
   // Ausente = control de atención apagado: los eventos humanos se ignoran (comportamiento anterior).
@@ -80,9 +86,27 @@ export async function handleKapsoWebhook(request: Request, deps: KapsoWebhookDep
   // Modo turnos (deps.quote.turns, apagado por defecto): imágenes y, si hay manejador, texto u otros mensajes se procesan como turnos del contacto (ver turns.ts).
   // La política de ACK no cambia: 200 de inmediato y el trabajo en segundo plano.
   if (deps.quote.turns) {
-    const turns = extractIncomingTurns(payload, request.headers.get("x-webhook-batch"), { eventName: eventName, nowSeconds: Date.now() / 1000 }).filter((turn) => isAllowedPhone(turn.from, deps.allowedPhones));
-    if (!hasProcessableTurns(turns, deps.quote)) return text(200, "ignored");
-    deps.schedule(processTurns(turns, deps.quote));
+    const turns = extractIncomingTurns(payload, request.headers.get("x-webhook-batch"), { eventName: eventName, nowSeconds: Date.now() / 1000 })
+      .filter((turn) => isAllowedPhone(turn.from, deps.allowedPhones));
+    if (!deps.textPilotPhone) {
+      if (!hasProcessableTurns(turns, deps.quote)) return text(200, "ignored");
+      deps.schedule(processTurns(turns, deps.quote));
+      return text(200, "ok");
+    }
+
+    // Separar por CONTACTO, no por la lista global ALLOWED_PHONES.
+    // En el mismo lote pueden venir imágenes de otros pacientes y texto piloto:
+    // cada subconjunto mantiene su ruta. No duplicar imágenes del piloto.
+    const pilotTurns = turns.filter((turn) => isAllowedPhone(turn.from, deps.textPilotPhone));
+    const otherImages = extractIncomingImages(payload, request.headers.get("x-webhook-batch"))
+      .filter((image) => isAllowedPhone(image.from, deps.allowedPhones) && !isAllowedPhone(image.from, deps.textPilotPhone));
+    const hasPilot = hasProcessableTurns(pilotTurns, deps.quote);
+    if (!hasPilot && otherImages.length === 0) return text(200, "ignored");
+    if (hasPilot) deps.schedule(processTurns(pilotTurns, deps.quote));
+    if (otherImages.length > 0) {
+      const legacy = deps.legacyQuote ?? { ...deps.quote, turns: undefined };
+      deps.schedule(Promise.all(otherImages.map((image) => handleImageMessage(image, legacy))));
+    }
     return text(200, "ok");
   }
 

@@ -20,9 +20,34 @@ on:
       - "tests/reader-originals.test.ts"
       - "tests/partial-auto.test.ts"
       - "api/kapso/webhook.ts"
+      - "src/text-pilot-gate.ts"
+      - "tests/text-pilot-gate.test.ts"
       - "tests/quote-preparation.test.ts"
+      - "supabase/migrations/*.sql"
+      - "supabase/preflight/*.sql"
+      - "tests/migration-preflight-db.test.ts"
+      - "tests/reply-guard-db.test.ts"
+      - "tests/reply-guard-e2e.test.ts"
+      - "tests/crm-attention-boundaries.test.ts"
+      - "tests/attention-boundaries.test.ts"
+      - "tests/crm-outbox-db.test.ts"
+      - "tests/knowledge-refs-db.test.ts"
+      - "tests/quote-session-db.test.ts"
+      - "tests/study-facts-db.test.ts"
+      - "docs/g5/20-g51-aplicacion-de-migraciones.md"
       - "package.json"
       - "package-lock.json"
+
+  push:
+    branches:
+      - feat/pilot-text-quote-safety-gate
+    paths:
+      - ".github/workflows/quote-preparation.yml"
+      - "supabase/migrations/*.sql"
+      - "supabase/preflight/*.sql"
+      - "tests/*.test.ts"
+      - "docs/g5/20-g51-aplicacion-de-migraciones.md"
+
 
 concurrency:
   group: quote-preparation-pr-${{ github.event.pull_request.number }}
@@ -47,6 +72,8 @@ jobs:
         run: npm ci --ignore-scripts
       - name: Typecheck
         run: npm run typecheck
+      - name: Text pilot safety gate tests
+        run: npx vitest run tests/text-pilot-gate.test.ts
       - name: Approved quote preparation tests
         run: npx vitest run tests/quote-preparation.test.ts
       - name: Knowledge strict-freshness tests

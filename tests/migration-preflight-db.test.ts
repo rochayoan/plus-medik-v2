@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { buildManifest, expectedFiles, MIGRATIONS_DIR, POST_FILE, PRE_FILE, PREFLIGHT_DIR, readMigrations } from "../scripts/migration-manifest.js";
 import { findPostgresBin, startEphemeralPostgres, SUPABASE_BOOTSTRAP_SQL, type EphemeralPostgres, type PgDatabase } from "./support/ephemeral-postgres.js";
 
-// Las verificaciones de SOLO LECTURA (antes y después de aplicar a mano las 15 migraciones) contra un PostgreSQL REAL y efímero: detectan lo pendiente, lo ya aplicado, lo parcial, los huecos de
+// Las verificaciones de SOLO LECTURA (antes y después de aplicar a mano las 16 migraciones) contra un PostgreSQL REAL y efímero: detectan lo pendiente, lo ya aplicado, lo parcial, los huecos de
 // orden, las colisiones con el catálogo y con el esquema crm, y cualquier permiso de más. NO se conectan a ningún Supabase remoto.
 
 const bin = findPostgresBin();
@@ -27,16 +27,16 @@ const migrationRows = (rows: Row[]) => rows.filter((row) => row.section === "MIG
 const snapshot = (rows: Row[]) => rows.filter((row) => row.section === "INSTANTANEA").map((row) => `${row.item}=${row.detail}`).sort();
 
 describe("verificaciones de las migraciones: contenido estático", () => {
-  it("el manifiesto cubre las 15 migraciones en orden y cada una crea algo propio", () => {
-    expect(manifest.migrations).toHaveLength(15);
+  it("el manifiesto cubre las 16 migraciones en orden y cada una crea algo propio", () => {
+    expect(manifest.migrations).toHaveLength(16);
     expect(manifest.migrations.map((m) => m.version)).toEqual(files.map((f) => f.file.split("_")[0]));
     expect([...manifest.migrations.map((m) => m.version)]).toEqual([...manifest.migrations.map((m) => m.version)].sort());
     for (const m of manifest.migrations) expect(manifest.entries.some((e) => e.mig === m.index), m.file).toBe(true);
-    expect(manifest.entries.filter((e) => e.kind === "table").length).toBe(25);
+    expect(manifest.entries.filter((e) => e.kind === "table").length).toBe(26);
     expect(manifest.serviceFunctions.length).toBeGreaterThan(50);
     // las funciones que el orden redefine son exactamente las que el diseño conoce
     expect(manifest.redefined.filter((r) => r.kind === "function").map((r) => `${r.name}:${r.migrations.join(">")}`)).toEqual([
-      "plusmedik_audit_claim_run:4>5", "plusmedik_audit_record_reply:3>6", "plusmedik_audit_reserve_send:4>5>6", "plusmedik_audit_runs_guard:3>4>5", "plusmedik_quote_session_close:11>14", "plusmedik_quote_session_read:11>14"
+      "plusmedik_audit_claim_run:4>5", "plusmedik_audit_record_reply:3>6", "plusmedik_audit_reserve_send:4>5>6", "plusmedik_audit_runs_guard:3>4>5", "plusmedik_quote_session_close:11>14", "plusmedik_quote_session_read:11>14", "plusmedik_turn_reserve_send_guarded:10>16"
     ]);
   });
 
@@ -108,13 +108,13 @@ describe.skipIf(!bin)("verificaciones contra PostgreSQL real", () => {
   beforeAll(async () => { server = await startEphemeralPostgres(bin!); });
   afterAll(async () => { await server?.stop(); });
 
-  it("base sin migraciones: veredicto OK, las 15 pendientes, sin bloqueos; y se puede ejecutar en una transacción de solo lectura", async () => {
+  it("base sin migraciones: veredicto OK, las 16 pendientes, sin bloqueos; y se puede ejecutar en una transacción de solo lectura", async () => {
     const db = await newDb();
     const rows = await runReadOnly(db, pre);
     expect(blocks(rows)).toEqual([]);
     expect(verdict(rows)).toMatchObject({ section: "VEREDICTO", status: "OK" });
     const states = migrationRows(rows);
-    expect(states).toHaveLength(15);
+    expect(states).toHaveLength(16);
     for (const row of states) expect(row, row.item).toMatchObject({ status: "OK", detail: expect.stringContaining("pendiente") });
     expect(rows.find((row) => row.item === "lab_tests.id (uuid)")).toMatchObject({ status: "OK" });
     expect(rows.find((row) => row.item === "version_20261025000000_duplicada")).toMatchObject({ status: "INFO" });
@@ -127,10 +127,10 @@ describe.skipIf(!bin)("verificaciones contra PostgreSQL real", () => {
     for (const row of migrationRows(rows)) expect(row.status).toBe("INFO");
   });
 
-  it("aplicar las 15 migraciones en orden: la previa lo reconoce como YA APLICADO, la posterior da OK, y el catálogo y el esquema crm no cambian", async () => {
+  it("aplicar las 16 migraciones en orden: la previa lo reconoce como YA APLICADO, la posterior da OK, y el catálogo y el esquema crm no cambian", async () => {
     const db = await newDb();
     const before = await runReadOnly(db, post);
-    await apply(db, 15);
+    await apply(db, 16);
     const afterPre = await runReadOnly(db, pre);
     for (const row of migrationRows(afterPre)) expect(row, row.item).toMatchObject({ status: "INFO", detail: expect.stringContaining("YA APLICADA") });
     expect(blocks(afterPre)).toEqual([]);
@@ -149,7 +149,7 @@ describe.skipIf(!bin)("verificaciones contra PostgreSQL real", () => {
 
   it("aplicar de a una: tras cada migración, lo aplicado está completo y lo siguiente figura como pendiente en orden", async () => {
     const db = await newDb();
-    for (let n = 1; n <= 15; n++) {
+    for (let n = 1; n <= 16; n++) {
       await db.applyFile(join(MIGRATIONS_DIR, files[n - 1]!.file));
       const rows = await run(db, post);
       expect(blocks(rows), `tras la ${n}`).toEqual([]);
@@ -160,11 +160,11 @@ describe.skipIf(!bin)("verificaciones contra PostgreSQL real", () => {
     }
   });
 
-  it("volver a ejecutar las 15 migraciones (reintento tras un corte) no falla ni cambia el estado", async () => {
+  it("volver a ejecutar las 16 migraciones (reintento tras un corte) no falla ni cambia el estado", async () => {
     const db = await newDb();
-    await apply(db, 15);
+    await apply(db, 16);
     const first = await run(db, post);
-    await apply(db, 15);
+    await apply(db, 16);
     const second = await run(db, post);
     expect(blocks(second)).toEqual([]);
     expect(second.map((row) => `${row.item}|${row.status}`)).toEqual(first.map((row) => `${row.item}|${row.status}`));
@@ -172,7 +172,7 @@ describe.skipIf(!bin)("verificaciones contra PostgreSQL real", () => {
 
   it("una migración PARCIAL (falta un objeto) y un HUECO de orden son BLOQUEOS, y se nombra lo que falta", async () => {
     const partial = await newDb();
-    await apply(partial, 15);
+    await apply(partial, 16);
     await partial.ok(fn("plusmedik_kb_revision", "drop function %SIG%"));
     for (const script of [pre, post]) {
       const rows = await run(partial, script);
@@ -180,7 +180,7 @@ describe.skipIf(!bin)("verificaciones contra PostgreSQL real", () => {
       expect(migrationRows(rows).filter((row) => row.status === "BLOCK" && row.detail.includes("PARCIAL")).length).toBeGreaterThanOrEqual(1);
     }
     const gap = await newDb();
-    await apply(gap, 15);
+    await apply(gap, 16);
     await gap.ok(fn("plusmedik_turn_release", "drop function %SIG%"));
     const rows = await run(gap, pre);
     expect(verdict(rows).status).toBe("BLOCK");
@@ -238,7 +238,7 @@ describe.skipIf(!bin)("verificaciones contra PostgreSQL real", () => {
   it("la verificación posterior detecta cada permiso o ajuste de más", async () => {
     const mutate = async (sql: string, item: string, status = "BLOCK") => {
       const db = await newDb();
-      await apply(db, 15);
+      await apply(db, 16);
       await db.ok(sql);
       const rows = await run(db, post);
       expect(rows.find((row) => row.item === item), sql).toMatchObject({ status });
@@ -267,19 +267,19 @@ describe.skipIf(!bin)("verificaciones contra PostgreSQL real", () => {
     expect(blocks(early)).toEqual([]);
 
     const full = await newDb();
-    await apply(full, 15);
+    await apply(full, 16);
     const ok = await run(full, post);
     for (const item of ["plusmedik_audit_claim_run_una_sola_firma_con_p_contact_key", "plusmedik_audit_reserve_send_incluye_el_tipo_conversation", "plusmedik_audit_record_reply_incluye_el_tipo_conversation"]) {
       expect(ok.find((row) => row.item === item), item).toMatchObject({ status: "OK" });
     }
 
     const stale = await newDb();
-    await apply(stale, 15);
+    await apply(stale, 16);
     await stale.ok("create function public.plusmedik_audit_claim_run(text, text, text, integer, integer, text, jsonb, integer) returns jsonb language sql as 'select null::jsonb';");
     expect((await run(stale, post)).find((row) => row.item.startsWith("plusmedik_audit_claim_run"))).toMatchObject({ status: "BLOCK" });
 
     const reverted = await newDb();
-    await apply(reverted, 15);
+    await apply(reverted, 16);
     await reverted.ok("do $b$ declare d text; begin select pg_get_functiondef(p.oid) into d from pg_proc p where p.proname = 'plusmedik_audit_reserve_send'; execute replace(d, 'conversation', 'zzz'); end $b$;");
     expect((await run(reverted, post)).find((row) => row.item === "plusmedik_audit_reserve_send_incluye_el_tipo_conversation")).toMatchObject({ status: "BLOCK" });
   });

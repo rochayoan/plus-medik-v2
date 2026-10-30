@@ -38,6 +38,19 @@ describe.skipIf(!bin)("guarda de respuestas contra PostgreSQL real (migración 1
     await server?.stop();
   });
 
+  it("postflight de migración 16: SELECT real en PostgreSQL y BLOCK=0", async () => {
+    const file = readFileSync(join(__dirname, "..", "supabase", "preflight", "v2_atomic_rate_post_apply_read_only.sql"), "utf8");
+    const output = await db.ok(file);
+    const lines = output.trim().split("\n").filter(Boolean);
+    const verdict = lines.find((line) => line.startsWith("0|VEREDICTO|"));
+    expect(verdict).toContain("|OK|BLOCK=0|INFO");
+    const rows = lines.filter((line) => !line.startsWith("0|"));
+    expect(rows.length).toBeGreaterThanOrEqual(8);
+    for (const row of rows) {
+      expect(row.endsWith("|BLOCK"), row).toBe(false);
+    }
+  });
+
   const asService = (sql: string) => `set role service_role; ${sql}`;
   const newMessage = () => `wamid.guard-${++counter}-${Date.now()}`;
   const newContact = () => (++counter).toString(16).padStart(64, "0");
@@ -68,7 +81,14 @@ describe.skipIf(!bin)("guarda de respuestas contra PostgreSQL real (migración 1
       update public.plusmedik_reply_guard_marks set created_at = created_at - interval '${seconds} seconds' where contact_key = '${contact}';
       update public.plusmedik_reply_guard_events set created_at = created_at - interval '${seconds} seconds' where contact_key = '${contact}';
       update public.plusmedik_reply_guard_state set suppressed_until = suppressed_until - interval '${seconds} seconds', updated_at = updated_at - interval '${seconds} seconds',
-        counted_since = counted_since - interval '${seconds} seconds' where contact_key = '${contact}';`);
+        counted_since = counted_since - interval '${seconds} seconds' where contact_key = '${contact}';
+      -- Simulación del tiempo también para el ledger agregado por migración 16.
+      update public.plusmedik_guard_rate_ledger set state =
+        jsonb_set(state, '{slots}', coalesce((
+          select jsonb_agg(jsonb_set(e.value, '{t}', to_jsonb((e.value ->> 't')::numeric - ${seconds})) order by e.ord)
+          from jsonb_array_elements(state -> 'slots') with ordinality as e(value, ord)
+        ), '[]'::jsonb))
+      where contact_key = '${contact}';`);
 
   interface Turn { message: string; id: string; who: string; fence: number }
   async function turn(contact: string, who = 1, kind = "TEXT"): Promise<Turn> {
@@ -90,6 +110,10 @@ describe.skipIf(!bin)("guarda de respuestas contra PostgreSQL real (migración 1
       const contact = newContact();
       await replied(contact, guard({ signature: "INFO_REQUEST:HOURS" }));
       await db.applyFile(join(dir, GUARD));
+      // La migración 10 reemplaza la firma vigente de la función. Restaurar
+      // inmediatamente la migración 16 para que los demás tests no usen
+      // accidentalmente el rate limiter anterior sin cuota atómica.
+      await db.applyFile(join(dir, "20261104000000_plusmedik_reply_guard_atomic_rate.sql"));
       expect(await db.ok(`select count(*) from public.plusmedik_reply_guard_marks where contact_key = '${contact}'`)).toBe("1");
     });
 
@@ -579,7 +603,7 @@ describe.skipIf(!bin)("guarda de respuestas contra PostgreSQL real (migración 1
 
     it("es la décima (las siguientes: sesiones de cotización G4.0 y datos por estudio G4.1) y las nueve anteriores no se modificaron (hashes fijados)", () => {
       expect(MIGRATIONS[9]).toBe(GUARD);
-      expect(MIGRATIONS).toHaveLength(15);
+      expect(MIGRATIONS).toHaveLength(16); // migración 16 aditiva: cuota atómica G3.2
       expect(sha("20261028000000_plusmedik_knowledge_refs.sql")).toBe("aa0b8644dc0f4a2ac98c84ae4c123b03c5e261c41618f4d45ec7dc9245690021");
     });
 

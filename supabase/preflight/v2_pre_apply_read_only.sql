@@ -1,9 +1,9 @@
--- PlusMedik V2 — verificación ANTES de aplicar las 13 migraciones (solo lectura)
+-- PlusMedik V2 — verificación ANTES de aplicar las 16 migraciones (solo lectura)
 -- GENERADO por scripts/migration-manifest.ts a partir de supabase/migrations/*.sql. NO editar a mano (una prueba falla si no coincide).
 -- SOLO LECTURA: una sola sentencia SELECT. No contiene DDL, DML, RPC ni datos clínicos; devuelve metadatos y conteos.
 -- Ejecutar exclusivamente en el proyecto Supabase cvokrtrdzxfchntwwslz (verificar el identificador en la URL del panel ANTES de ejecutar),
 -- con el rol administrativo del SQL Editor. Es seguro ejecutarla dentro de una transacción de solo lectura.
--- Esperado antes de empezar: VEREDICTO = OK, las 13 migraciones en NOT_APPLIED (estado «pendiente»), sin filas BLOCK.
+-- Esperado: VEREDICTO = OK, las migraciones existentes como YA APLICADA y las restantes como pendientes; ninguna fila BLOCK.
 -- Si alguna migración aparece APPLIED (INFO), ya se aplicó: no repetirla sin entender por qué. PARTIAL o un hueco de orden = BLOCK.
 -- Guardar las filas INSTANTANEA: se comparan con la verificación posterior (el catálogo y el esquema crm no deben cambiar).
 --
@@ -23,6 +23,7 @@
 --   13  20261101000000_plusmedik_crm_outbox.sql  97567b01091229f081f070f4990eb6e0859c5a9ae4ac849e424c8f903137feb5
 --   14  20261102000000_plusmedik_quote_text_flow.sql  2094f37085484e0c889f3fa46a563539b7f7ba61049ffb332064a7059d17d9f5
 --   15  20261103000000_plusmedik_crm_attention_control.sql  0f14159a903f1e50d3666923fa0e46edc06d36b752ec7ef6348923b5e43c3bc9
+--   16  20261104000000_plusmedik_reply_guard_atomic_rate.sql  33b409b481cbc845ed6b07f2a3b74af86251ba936ac6b5c465127d838097568b
 --
 -- Resultado: una tabla (orden, seccion, comprobacion, estado, detalle). Estados: OK · INFO · WARN (revisar) · BLOCK (detenerse).
 -- La primera fila es el VEREDICTO. Guardar el resultado completo: las filas INSTANTANEA deben ser IDÉNTICAS antes y después.
@@ -283,7 +284,9 @@ manifest(mig, kind, name, parent) as (
     (14, 'function', 'plusmedik_quote_ambiguity_state', ''),
     (15, 'constraint', 'plusmedik_attention_events_kind_crm_check', 'plusmedik_attention_events'),
     (15, 'constraint', 'plusmedik_attention_events_outcome_crm_check', 'plusmedik_attention_events'),
-    (15, 'function', 'plusmedik_attention_crm_action', '')
+    (15, 'function', 'plusmedik_attention_crm_action', ''),
+    (16, 'function', 'plusmedik_guard_rate_decide', ''),
+    (16, 'table', 'plusmedik_guard_rate_ledger', '')
 ),
 migration_files(mig, file) as (
   values
@@ -301,7 +304,8 @@ migration_files(mig, file) as (
     (12, '20261031000000_plusmedik_study_facts.sql'),
     (13, '20261101000000_plusmedik_crm_outbox.sql'),
     (14, '20261102000000_plusmedik_quote_text_flow.sql'),
-    (15, '20261103000000_plusmedik_crm_attention_control.sql')
+    (15, '20261103000000_plusmedik_crm_attention_control.sql'),
+    (16, '20261104000000_plusmedik_reply_guard_atomic_rate.sql')
 ),
 service_functions(name) as (
   values
