@@ -14,13 +14,13 @@ export type TextPilotGate =
   | { enabled: true; ready: true }
   | { enabled: true; ready: false; reason: "INVALID_FLAG" | "PILOT_SCOPE_MISSING_OR_MISMATCH" };
 
-const PHONE = /^\\+?[0-9]{8,15}$/;
+const PHONE = new RegExp("^[+]?[0-9]{8,15}$");
 
 function exactlyOnePhone(raw: string | undefined): string | undefined {
   if (!raw || !raw.trim()) return undefined;
   const parts = raw.split(",").map((s) => s.trim());
   if (parts.length !== 1 || !PHONE.test(parts[0]!)) return undefined;
-  return parts[0]!.replace(/^\\+/, "");
+  return parts[0]!.replace(/^[+]/, "");
 }
 
 export function resolveTextPilotGate(env: Record<string, string | undefined>): TextPilotGate {
