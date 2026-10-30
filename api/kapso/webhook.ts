@@ -210,6 +210,10 @@ export async function POST(request: Request): Promise<Response> {
     secret: process.env.WEBHOOK_SECRET,
     allowedPhones: process.env.ALLOWED_PHONES,
     quote: realDeps,
+    textPilotPhone: textPilotGate.enabled && textPilotGate.ready ? textPilotGate.pilotPhone : undefined,
+    legacyQuote: textPilotGate.enabled && textPilotGate.ready && turnsEnabled
+      ? { ...realDeps, turns: undefined, requireAuditGuard: humanControlEnabled || on("REQUIRE_AUDIT_GUARD") }
+      : undefined,
     schedule: (task) => waitUntil(task),
     humanControl: humanControlEnabled ? { labPhoneNumberId: process.env.KAPSO_PHONE_NUMBER_ID, contactKeyFor, attention: attentionProxy } : undefined,
     log: realDeps.log
