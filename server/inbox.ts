@@ -1,5 +1,6 @@
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:crypto";
 import { verifyWebhookSignature } from "../src/whatsapp-quote.js";
+import { resolveTextPilotGate } from "../src/text-pilot-gate.js";
 
 export interface InboxConfig {
   baseUrl: string;
@@ -51,6 +52,18 @@ export function resolveInboxConfig(env: NodeJS.ProcessEnv = process.env): InboxC
     env.OPENAI_API_KEY, env.OPENROUTER_API_KEY
   ];
   if (requiredRuntime.some(value => !value?.trim())) return undefined;
+  const on = (name: string) => env[name]?.trim().toLowerCase() === "on";
+  const turnsOrText = on("PLUSMEDIK_TURNS") || on("PLUSMEDIK_TEXT_HANDLER");
+  const guardedContact = turnsOrText || on("PLUSMEDIK_HUMAN_CONTROL") || on("PLUSMEDIK_AGENT_CONTROL");
+  if (guardedContact && (env.PLUSMEDIK_CONTACT_HMAC_KEY?.trim().length ?? 0) < 32) return undefined;
+  if (turnsOrText) {
+    // Never allow the new turn/text routing to spill to every WhatsApp contact.
+    const pilot = resolveTextPilotGate(env);
+    if (!pilot.enabled || !pilot.ready) return undefined;
+  }
+  if (on("PLUSMEDIK_TEXT_HANDLER") && (!on("PLUSMEDIK_TURNS") || !on("PLUSMEDIK_REPLY_GUARD"))) return undefined;
+  if (on("PLUSMEDIK_QUOTE_SESSIONS") && !on("PLUSMEDIK_TEXT_HANDLER")) return undefined;
+  if (on("PLUSMEDIK_LLM_CONVERSATION") && (!on("PLUSMEDIK_TEXT_HANDLER") || !env.OPENAI_CONVERSATION_MODEL?.trim())) return undefined;
   if (!baseUrl || !/^https:\/\//.test(baseUrl) || !serviceKey || !webhookSecret || !encoded
       || !/^[A-Za-z0-9+/]{43}=$/.test(encoded)) return undefined;
   const encryptionKey = Buffer.from(encoded, "base64");
