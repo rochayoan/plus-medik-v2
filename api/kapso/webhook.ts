@@ -1,3 +1,4 @@
+import { resolveTextPilotGate } from "../../src/text-pilot-gate.js";
 import { WhatsAppClient } from "@kapso/whatsapp-cloud-api";
 import { waitUntil } from "@vercel/functions";
 import { analyzeImage } from "../../src/analyze.js";
@@ -29,11 +30,17 @@ import type { IncomingImage, QuoteDeps } from "../../src/whatsapp-quote.js";
 // solo las imágenes pasan por la coordinación; el texto y los demás mensajes se siguen ignorando.
 const on = (name: string) => process.env[name]?.trim().toLowerCase() === "on";
 const humanControlEnabled = on("PLUSMEDIK_HUMAN_CONTROL");
-const turnsEnabled = on("PLUSMEDIK_TURNS");
+// La puerta opt-in impide activar G2/G4 sobre teléfonos fuera del piloto.
+// Si no coincide con la lista de control del CRM, se conserva el flujo de imágenes anterior.
+const textPilotGate = resolveTextPilotGate(process.env);
+if (textPilotGate.enabled && !textPilotGate.ready) {
+  console.log(JSON.stringify({ app: "plusmedik", event: "text_pilot_config_invalid", reason: textPilotGate.reason }));
+}
+const turnsEnabled = on("PLUSMEDIK_TURNS") && textPilotGate.ready;
 // Manejador de texto (G2.1, APAGADO por defecto): PLUSMEDIK_TEXT_HANDLER=on solo tiene efecto con PLUSMEDIK_TURNS=on. Responde con textos fijos BORRADOR (pendientes de
 // aprobación del laboratorio) sin cifras, horarios ni datos médicos. La derivación a una persona permanece BLOQUEADA (BLOCKED_HANDOFF) salvo que la cola hacia el CRM (G5.0, abajo)
 // esté habilitada Y completamente configurada; mientras tanto nunca se le dice al paciente que una persona lo atenderá.
-const textHandlerEnabled = on("PLUSMEDIK_TEXT_HANDLER");
+const textHandlerEnabled = on("PLUSMEDIK_TEXT_HANDLER") && textPilotGate.ready;
 // Respuestas con conocimiento aprobado del laboratorio (G3.1A, APAGADO por defecto): PLUSMEDIK_KNOWLEDGE_ANSWERS=on solo tiene efecto con PLUSMEDIK_TURNS=on y PLUSMEDIK_TEXT_HANDLER=on.
 // Exige las NUEVE migraciones aplicadas y conocimiento APROBADO cargado; sin datos aprobados y vigentes el bot responde como sin conocimiento (nunca inventa). Las referencias
 // de cada respuesta se registran antes de enviarla; si no se pueden registrar, no se envía esa respuesta.
