@@ -9,11 +9,11 @@
 
 | Clave | Cuándo se usa | Texto actual (BORRADOR) | Aprobado por / fecha |
 | --- | --- | --- | --- |
-| `greeting` | Saludo cuando el paciente solo saluda. | Hola 👋 Soy el asistente de PlusMedik. Para cotizar tus estudios, envíame una foto clara y completa de tu receta. | |
-| `send_recipe` | Pide la foto de la receta cuando el mensaje es un pedido de cotización sin foto. | Para cotizar tus estudios, envíame una foto clara y completa de tu receta. | |
-| `fallback` | Mensaje que no se entiende ni se puede derivar. | Recibimos tu mensaje. Por este medio puedo cotizar recetas: envíame una foto clara y completa de tu receta. | |
+| `greeting` | Saludo cuando el paciente solo saluda. | Hola 👋 Soy el asistente de PlusMedik. Puedo ayudarte a cotizar tus estudios. Escríbeme los nombres de los análisis que necesitas o envíame una foto clara de tu receta. | |
+| `send_recipe` | Pide la foto de la receta cuando el mensaje es un pedido de cotización sin foto. | Claro. Puedes escribir los nombres de los estudios o enviarme una fotografía completa de tu receta. | |
+| `fallback` | Mensaje que no se entiende ni se puede derivar. | Recibimos tu mensaje. Para cotizar tus estudios, escribe los nombres de los análisis o envía una foto clara y completa de tu receta. | |
 | `handoff_confirmed` | Confirma la derivación a una persona. SOLO se envía con el caso ya registrado en el CRM. | Recibimos tu solicitud. Una persona del equipo la revisará y te escribirá por este chat. | |
-| `handoff_unavailable` | Se envía cuando la derivación no se pudo registrar: no promete a una persona. | Recibimos tu mensaje, pero por ahora no puedo derivarlo a una persona desde este chat. Si quieres una cotización, envíame una foto clara y completa de tu receta. | |
+| `handoff_unavailable` | Se envía cuando la derivación no se pudo registrar: no promete a una persona. | Recibimos tu mensaje, pero por ahora no puedo derivarlo a una persona desde este chat. Si quieres cotizar, escribe los nombres de los estudios o envía una foto clara y completa de tu receta. | |
 | `medical_unavailable` | Consulta médica sin caso registrado: sin orientación médica y aviso de urgencias. | Recibimos tu mensaje. No puedo darte orientación médica por este chat. Si es una urgencia, comunícate con los servicios de emergencia de tu localidad. | |
 | `medical_handoff_confirmed` | Consulta médica con caso registrado: conserva el aviso de urgencias y promete a una persona. | Recibimos tu mensaje. No puedo darte orientación médica por este chat. Si es una urgencia, comunícate con los servicios de emergencia de tu localidad. Una persona del equipo revisará tu mensaje y te escribirá por este chat. | |
 
@@ -37,7 +37,7 @@
 | `repeated_note` | Aviso de estudios repetidos contados una vez. | Si repetiste algún estudio, lo conté una sola vez. | |
 | `unreadable_image` | Imagen ilegible. | No pude leer esa imagen. Envíala de nuevo como foto, clara y completa. | |
 | `identified_so_far` | Encabezado de la lista de estudios anotados (los nombres salen del catálogo). | Estudios anotados: | |
-| `confirm_done` | Pregunta si eso es todo, tras anotar estudios escritos sin pedir cotizar. «SÍ» o «LISTO» cotiza. | ¿Eso es todo? Responde SÍ y te paso la cotización, o envíame los estudios que falten. | |
+| `confirm_done` | Pregunta si eso es todo, tras anotar estudios escritos sin pedir cotizar. «SÍ» o «LISTO» cotiza. | Tengo anotados tus estudios. ¿Deseas agregar alguno más? Si ya terminaste, responde SÍ o escribe LISTO para conocer el total. | |
 | `ask_option_intro` | Introduce las opciones numeradas cuando un nombre corresponde a varios estudios del catálogo. | Para uno de los estudios tengo varias opciones: | |
 | `ask_option_outro` | Indica cómo elegir una opción (número o nombre exacto). | Responde con el número o escribe el nombre exacto del estudio. | |
 | `ask_unresolved` | Pide el nombre exacto o una foto cuando algo no se pudo identificar. No promete a nadie. | No pude identificar con certeza algunos estudios. Escribe el nombre exacto de cada uno o envía una foto de tu receta. Si no los encuentras, escribe LISTO y dejaré tu solicitud en revisión. | |
