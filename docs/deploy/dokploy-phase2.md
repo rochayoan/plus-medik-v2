@@ -32,13 +32,15 @@ del contenedor deben superar pruebas reales controladas antes del corte.
 
 ## Activación segura y variables
 
+El SQL no forma parte del manifiesto oficial de migraciones (16); es exclusivo para pruebas aisladas hasta revisión y promoción formal.
+
 La fase 1 sigue siendo el comportamiento por defecto:
 `/healthz` = 200 (`webhookReady:false`),
 `/readyz` = 503,
 `/api/kapso/webhook` = 503.
 
-En un **proyecto Supabase de staging** separado, revisar la migración
-`supabase/migrations/20261105000000_plusmedik_dokploy_inbox.sql`;
+En un **proyecto Supabase de staging** separado, revisar el SQL experimental
+`docs/deploy/sql/plusmedik_dokploy_inbox.staging.sql`;
 aplicarla únicamente tras revisión de permisos, cifrado y backups.
 Todavía no se ha aplicado mediante esta conversación.
 El repositorio contiene pruebas SQL contra PostgreSQL 16 efímero.
