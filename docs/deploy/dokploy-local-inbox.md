@@ -14,7 +14,7 @@ Este modo evita añadir la tabla de inbox a Supabase. **NO elimina la dependenci
 
 Aplicación **Agente Plusmedik**, no editar CRM, cotizador ni bd_cotizador.
 
-- En la pestaña **Volumes** de la aplicación, añadir un volumen **persistente** (preferiblemente Docker managed volume) con **mount path `/data`**, que sobreviva deploy/recreate. No usar un volumen temporal ni la capa efímera del contenedor.
+- En **Advanced → Mounts** de la aplicación, seleccionar **Volume Mount** (volumen Docker gestionado). Usar un nombre estable y exclusivo, por ejemplo `plusmedik-agent-inbox`, con **Mount Path `/data`**. Este montaje debe sobrevivir a deploy/recreate. No usar File Mount, un volumen temporal ni la capa efímera del contenedor.
 - El Dockerfile crea `/data/plusmedik-inbox` y asigna su propietario al usuario `node` (UID 1000) dentro de la imagen. Verificar que el volumen montado permita escritura al UID 1000; los host-bind mounts pueden requerir ajustar permisos del directorio del host de forma independiente.
 - El runtime inspecciona `/proc/self/mountinfo` y requiere un montaje exacto en `/data` o `/data/plusmedik-inbox`; si no existe, responde 503. Solo crear el directorio dentro del contenedor NO basta.
 - Configurar **1 réplica** para este servicio. No reemplazar el volumen ni borrarlo entre deploys. Salvaguardar el volumen y la clave AES: si se pierde el volumen se pierden mensajes no procesados, y si se pierde la clave no se podrán leer.
