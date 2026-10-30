@@ -38,6 +38,19 @@ describe.skipIf(!bin)("guarda de respuestas contra PostgreSQL real (migración 1
     await server?.stop();
   });
 
+  it("postflight de migración 16: SELECT real en PostgreSQL y BLOCK=0", async () => {
+    const file = readFileSync(join(__dirname, "..", "supabase", "preflight", "v2_atomic_rate_post_apply_read_only.sql"), "utf8");
+    const output = await db.ok(file);
+    const lines = output.trim().split("\\n").filter(Boolean);
+    const verdict = lines.find((line) => line.startsWith("0|VEREDICTO|"));
+    expect(verdict).toContain("|OK|BLOCK=0|INFO");
+    const rows = lines.filter((line) => !line.startsWith("0|"));
+    expect(rows.length).toBeGreaterThanOrEqual(8);
+    for (const row of rows) {
+      expect(row.endsWith("|BLOCK"), row).toBe(false);
+    }
+  });
+
   const asService = (sql: string) => `set role service_role; ${sql}`;
   const newMessage = () => `wamid.guard-${++counter}-${Date.now()}`;
   const newContact = () => (++counter).toString(16).padStart(64, "0");
