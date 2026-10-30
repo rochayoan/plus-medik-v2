@@ -49,7 +49,7 @@ jobs:
           docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "set role service_role; select public.plusmedik_dokploy_health();"
           docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "set role service_role; select public.plusmedik_dokploy_enqueue(repeat('a',64),'AAAAAAAA','BBBBBBBB','CCCCCCCC');"
           docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "set role service_role; select * from public.plusmedik_dokploy_claim('00000000-0000-4000-8000-000000000001');"
-          docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "select has_table_privilege('anon','public.plusmedik_dokploy_inbox','SELECT') as anon_can_read;" | grep -q ' f '
+          docker exec plusmedik-inbox-pg psql -At -v ON_ERROR_STOP=1 -U postgres -c "select has_table_privilege('anon','public.plusmedik_dokploy_inbox','SELECT');" | grep -qx 'f'
       - name: Build Docker runtime
         run: docker build -f Dockerfile.dokploy -t plusmedik-dokploy:ci .
       - name: Docker smoke test (no patient traffic)
