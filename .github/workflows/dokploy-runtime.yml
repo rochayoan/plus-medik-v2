@@ -54,6 +54,12 @@ jobs:
             sleep 1
           done
           docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "create role anon; create role authenticated; create role service_role bypassrls;"
+          # The installer must abort atomically before the original 16 migrations exist.
+          if docker exec -i plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres < docs/deploy/sql/plusmedik_dokploy_inbox.install.sql > /dev/null 2>&1; then
+            echo "ERROR: installer unexpectedly succeeded without PlusMedik base schema" >&2
+            exit 1
+          fi
+          docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -Atc "select to_regclass('public.plusmedik_dokploy_inbox') is null" | grep -qx 't'
           # Synthetic prerequisites for the guarded installer; CI does not use patient data.
           docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "create table public.plusmedik_audit_runs (id uuid); create table public.plusmedik_quote_sessions (id uuid); create table public.plusmedik_guard_rate_ledger (id uuid);"
           docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "create function public.plusmedik_turn_reserve_send_guarded(uuid,text,bigint,text,integer,text,jsonb) returns boolean language sql as 'select true';"
