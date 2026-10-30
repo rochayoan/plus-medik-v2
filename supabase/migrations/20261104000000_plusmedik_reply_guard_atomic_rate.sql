@@ -84,19 +84,17 @@ revoke all on function public.plusmedik_guard_rate_decide(jsonb,jsonb,timestampt
 -- Migración idempotente: sustituye SOLO la función existente y mantiene
 -- exactamente la misma firma, parámetros, roles y bloqueo por atención humana.
 
-create or replace function public.plusmedik_turn_reserve_send_guarded(p_run_id uuid, p_owner text, p_fence bigint, p_kind text, p_lease_seconds integer, p_stale_policy text, p_guard jsonb)
-returns jsonb
-language plpgsql
-security definer
-set search_path = ''
+create or replace function public.plusmedik_turn_reserve_send_guarded(
+  p_run_id uuid, p_owner text, p_fence bigint, p_kind text,
+  p_lease_seconds integer, p_stale_policy text, p_guard jsonb
+) returns jsonb
+language plpgsql security definer set search_path = ''
 as $$
 declare
   v_contact text;
-  v_seq bigint;
   v_turn_kind text;
   v_run public.plusmedik_audit_runs%rowtype;
   v_state public.plusmedik_reply_guard_state%rowtype;
-  v_paused boolean := false;
   v_now timestamptz;
   v_since timestamptz;
   v_signature text;
@@ -111,157 +109,172 @@ declare
   v_rule_max integer;
 begin
   if p_guard is null then
-    return public.plusmedik_turn_reserve_send(p_run_id, p_owner, p_fence, p_kind, p_lease_seconds, p_stale_policy);
+    return public.plusmedik_turn_reserve_send(
+      p_run_id, p_owner, p_fence, p_kind, p_lease_seconds, p_stale_policy);
   end if;
-  if p_kind is null or p_kind not in ('quoted', 'no_quote', 'technical_issue', 'conversation')
-     or p_stale_policy is null or p_stale_policy not in ('NONE', 'NEWER_TURN')
+  if p_kind is null or p_kind not in ('quoted','no_quote','technical_issue','conversation')
+     or p_stale_policy is null or p_stale_policy not in ('NONE','NEWER_TURN')
      or p_lease_seconds is null or p_lease_seconds not between 1 and 900
      or not public.plusmedik_reply_guard_valid(p_guard) then
-    raise exception 'plusmedik_guard: invalid send reservation' using errcode = 'PT422';
+    raise exception 'plusmedik_guard: invalid send reservation' using errcode='PT422';
   end if;
-  select contact_key, seq, turn_kind into v_contact, v_seq, v_turn_kind from public.plusmedik_turns where run_id = p_run_id;
+  select contact_key, turn_kind into v_contact, v_turn_kind
+    from public.plusmedik_turns where run_id = p_run_id;
   if not found then
-    raise exception 'plusmedik_guard: turn not found' using errcode = 'PT404';
+    raise exception 'plusmedik_guard: turn not found' using errcode='PT404';
   end if;
-  -- Imágenes y cotizaciones nunca se limitan.
-  if v_turn_kind = 'IMAGE' or p_kind not in ('conversation', 'technical_issue') then
-    return public.plusmedik_turn_reserve_send(p_run_id, p_owner, p_fence, p_kind, p_lease_seconds, p_stale_policy);
+  if v_turn_kind = 'IMAGE' or p_kind not in ('conversation','technical_issue') then
+    return public.plusmedik_turn_reserve_send(
+      p_run_id, p_owner, p_fence, p_kind, p_lease_seconds, p_stale_policy);
   end if;
 
+  -- Serialización por contacto y fencing, previos a cualquier intento.
   perform 1 from public.plusmedik_contact_turns where contact_key = v_contact for update;
   v_run := public.plusmedik_audit_lock_leased(p_run_id, p_owner, p_fence);
-  -- Una reserva ya concedida (o un cierre) se repite igual: idempotente.
+  -- Solo una reserva PREVIAMENTE concedida es idempotente.
   if v_run.send_state <> 'NOT_RESERVED' then
-    return public.plusmedik_turn_reserve_send(p_run_id, p_owner, p_fence, p_kind, p_lease_seconds, p_stale_policy);
-  end if;
-  select coalesce((select state = 'HUMAN_PAUSED' from public.plusmedik_attention_contacts where contact_key = v_contact), false) into v_paused;
-  -- Pausa humana / bloqueo previo, otro envío en vuelo y respuesta obsoleta: la función de turnos decide, antes que el tope.
-  -- No delegar una rama BUSY directamente a turn_reserve_send:
-  -- entre esta comprobación y su segunda consulta, el envío en vuelo puede
-  -- terminar y turn_reserve_send devolver RESERVED sin comprobar la cuota.
-  -- En tal caso se debe responder BUSY y reintentar bajo la guarda.
-  if exists (select 1 from public.plusmedik_audit_runs r
-             where r.contact_key = v_contact and r.id <> p_run_id
-               and r.send_state = 'RESERVED' and r.lease_expires_at > now()) then
-    return jsonb_build_object('status','busy');
-  end if;
-  -- Las rutas de prioridad mantienen su semántica anterior, pero NUNCA
-  -- conceden una reserva sin pasar por la cuota.
-  if v_run.send_blocked_at is not null or v_paused
-     or (p_stale_policy = 'NEWER_TURN' and exists (
-          select 1 from public.plusmedik_turns t join public.plusmedik_audit_runs r on r.id = t.run_id
-          where t.contact_key = v_contact and t.seq > v_seq and r.send_state in ('RESERVED', 'ACCEPTED', 'UNKNOWN'))) then
-    v_result := public.plusmedik_turn_reserve_send(p_run_id, p_owner, p_fence, p_kind, p_lease_seconds, p_stale_policy);
-    if v_result ->> 'status' = 'reserved' then
-      raise exception 'plusmedik_guard: priority state changed; retry' using errcode = 'PT409';
-    end if;
-    return v_result;
+    return public.plusmedik_turn_reserve_send(
+      p_run_id, p_owner, p_fence, p_kind, p_lease_seconds, p_stale_policy);
   end if;
 
   v_now := clock_timestamp();
   v_signature := p_guard ->> 'signature';
   v_cooldown := (p_guard ->> 'cooldownSeconds')::integer;
-  insert into public.plusmedik_reply_guard_state (contact_key) values (v_contact) on conflict (contact_key) do nothing;
-  select * into v_state from public.plusmedik_reply_guard_state where contact_key = v_contact;
-  v_since := coalesce(v_state.counted_since, '-infinity'::timestamptz);
 
-  -- 1. Supresión vigente (por una ráfaga o una repetición anterior): no se responde hasta que caduque o se recupere.
-  if v_state.suppressed_until is not null and v_state.suppressed_until > v_now then
-    v_reason := 'SUPPRESSED';
-  end if;
-
-  -- 2. Ráfaga: demasiados mensajes de texto entrantes en poco tiempo (cuenta el actual).
-  if v_reason is null then
-    select count(*) into v_count from public.plusmedik_turns t
-    where t.contact_key = v_contact and t.turn_kind in ('TEXT', 'OTHER') and t.created_at > v_since
-      and t.created_at > v_now - make_interval(secs => (p_guard #>> '{burst,windowSeconds}')::integer);
-    if v_count >= (p_guard #>> '{burst,max}')::integer then
-      v_reason := 'LOOP_SUSPECTED';
-      update public.plusmedik_reply_guard_state set suppressed_until = v_now + make_interval(secs => v_cooldown), reason = 'LOOP_BURST', updated_at = v_now where contact_key = v_contact;
-      insert into public.plusmedik_reply_guard_events (contact_key, run_id, kind, detail) values (v_contact, p_run_id, 'LOOP_SUSPECTED',
-        jsonb_build_object('signal', 'BURST', 'count', v_count, 'windowSeconds', (p_guard #>> '{burst,windowSeconds}')::integer, 'max', (p_guard #>> '{burst,max}')::integer, 'cooldownSeconds', v_cooldown));
+  -- Punto crítico: el turno y la cuota deben comprometerse JUNTOS.
+  -- El subbloque con EXCEPTION usa un savepoint de PL/pgSQL. Si la cuota
+  -- rechaza, el estado RESERVED de la función base se revierte por completo.
+  -- Así ninguna ruta (BUSY/pausa/obsolescencia) puede autorizar un envío
+  -- sin pasar por el contador. Se preserva RESERVED→ACCEPTED/UNKNOWN:
+  -- jamás se intenta la transición prohibida RESERVED→CANCELLED.
+  begin
+    v_result := public.plusmedik_turn_reserve_send(
+      p_run_id, p_owner, p_fence, p_kind, p_lease_seconds, p_stale_policy);
+    if v_result ->> 'status' <> 'reserved' then
+      return v_result;
     end if;
-  end if;
 
-  -- 3. Repetición: la misma respuesta (firma) ya se dio demasiadas veces a este contacto en la ventana.
-  if v_reason is null and v_signature is not null then
-    select count(*) into v_count from public.plusmedik_reply_guard_marks m join public.plusmedik_audit_runs r on r.id = m.run_id
-    where m.contact_key = v_contact and m.signature = v_signature and m.created_at > v_since
-      and m.created_at > v_now - make_interval(secs => (p_guard #>> '{repeat,windowSeconds}')::integer)
-      and r.send_state in ('RESERVED', 'ACCEPTED', 'UNKNOWN');
-    if v_count >= (p_guard #>> '{repeat,max}')::integer then
-      v_reason := 'REPEAT_SUSPECTED';
-      update public.plusmedik_reply_guard_state set suppressed_until = v_now + make_interval(secs => v_cooldown), reason = 'LOOP_REPEAT', updated_at = v_now where contact_key = v_contact;
-      insert into public.plusmedik_reply_guard_events (contact_key, run_id, kind, detail) values (v_contact, p_run_id, 'REPEAT_SUSPECTED',
-        jsonb_build_object('signal', 'REPEAT', 'signature', v_signature, 'count', v_count, 'windowSeconds', (p_guard #>> '{repeat,windowSeconds}')::integer, 'max', (p_guard #>> '{repeat,max}')::integer, 'cooldownSeconds', v_cooldown));
+    insert into public.plusmedik_reply_guard_state(contact_key)
+      values (v_contact) on conflict(contact_key) do nothing;
+    select * into v_state from public.plusmedik_reply_guard_state
+      where contact_key = v_contact;
+    v_since := coalesce(v_state.counted_since, '-infinity'::timestamptz);
+
+    if v_state.suppressed_until is not null and v_state.suppressed_until > v_now then
+      v_reason := 'SUPPRESSED';
     end if;
-  end if;
 
-  -- G5.9 / migración 16: cuota deslizante atómica.
-  -- ON CONFLICT DO UPDATE opera sobre la última versión de la fila (incluso
-  -- bajo concurrencia READ COMMITTED); el valor devuelto se deriva de ESE estado,
-  -- no de un COUNT con snapshot anterior a la espera del bloqueo.
-  if v_reason is null then
-    insert into public.plusmedik_guard_rate_ledger (contact_key, state)
-    values (v_contact, public.plusmedik_guard_rate_decide('{}'::jsonb, p_guard -> 'rules', v_now, v_since, p_run_id))
-    on conflict (contact_key) do update
-      set state = public.plusmedik_guard_rate_decide(public.plusmedik_guard_rate_ledger.state, p_guard -> 'rules', v_now, v_since, p_run_id)
-    returning state into v_rate_state;
-
-    if v_rate_state ->> 'allowed' = 'false' then
-      v_reason := 'RATE_LIMITED';
-      v_count := (v_rate_state ->> 'count')::integer;
-      v_rule_seconds := (v_rate_state ->> 'windowSeconds')::integer;
-      v_rule_max := (v_rate_state ->> 'max')::integer;
-      v_index := (v_rate_state ->> 'rule')::integer;
-      -- Un único evento por ventana, igual que G3.2.
-      if not exists (
-        select 1 from public.plusmedik_reply_guard_events e
-        where e.contact_key = v_contact and e.kind = 'RATE_LIMITED'
-          and e.created_at > v_now - make_interval(secs => v_rule_seconds)
-      ) then
-        insert into public.plusmedik_reply_guard_events (contact_key, run_id, kind, detail)
-          values (v_contact, p_run_id, 'RATE_LIMITED', jsonb_build_object(
-            'rule', v_index, 'count', v_count, 'windowSeconds', v_rule_seconds, 'max', v_rule_max
-          ));
+    if v_reason is null then
+      select count(*) into v_count from public.plusmedik_turns t
+        where t.contact_key = v_contact and t.turn_kind in ('TEXT','OTHER')
+          and t.created_at > v_since
+          and t.created_at > v_now - make_interval(
+            secs => (p_guard #>> '{burst,windowSeconds}')::integer);
+      if v_count >= (p_guard #>> '{burst,max}')::integer then
+        v_reason := 'LOOP_SUSPECTED';
       end if;
     end if;
-  end if;
 
-  if v_reason is not null then
-    perform public.plusmedik_audit_prove(p_run_id, p_fence);
-    update public.plusmedik_audit_runs set
-      send_state = 'CANCELLED',
-      send_blocked_at = coalesce(send_blocked_at, now()),
-      send_block_reason = coalesce(send_block_reason, v_reason),
-      processing_status = case when processing_status in ('PROCESSING', 'ANALYZED', 'IGNORED') then 'COMPLETED' else processing_status end,
-      completed_at = coalesce(completed_at, now()),
-      lease_expires_at = now()
-    where id = p_run_id;
-    perform set_config('plusmedik.fence_proof', '', true);
-    return jsonb_build_object('status', 'limited', 'reason', v_reason);
-  end if;
+    if v_reason is null and v_signature is not null then
+      select count(*) into v_count
+        from public.plusmedik_reply_guard_marks m
+        join public.plusmedik_audit_runs r on r.id = m.run_id
+        where m.contact_key = v_contact and m.signature = v_signature
+          and m.created_at > v_since
+          and m.created_at > v_now - make_interval(
+            secs => (p_guard #>> '{repeat,windowSeconds}')::integer)
+          and r.send_state in ('RESERVED','ACCEPTED','UNKNOWN');
+      if v_count >= (p_guard #>> '{repeat,max}')::integer then
+        v_reason := 'REPEAT_SUSPECTED';
+      end if;
+    end if;
 
-  v_result := public.plusmedik_turn_reserve_send(p_run_id, p_owner, p_fence, p_kind, p_lease_seconds, p_stale_policy);
-  if v_result ->> 'status' <> 'reserved' then
-    -- No se envió ni se reservó: devolver el hueco, dentro de la misma
-    -- transacción, mientras la fila de cuota sigue bloqueada.
-    update public.plusmedik_guard_rate_ledger
-      set state = jsonb_set(
-        state, '{slots}',
-        coalesce((
-          select jsonb_agg(e.value)
-          from jsonb_array_elements(state -> 'slots') e
-          where e.value ->> 'r' is distinct from p_run_id::text
-        ), '[]'::jsonb)
-      )
-    where contact_key = v_contact;
+    if v_reason is null then
+      -- UPSERT atómico sobre la fila ACTUAL del contacto; cada cupo lleva
+      -- run_id y sello de tiempo. No se consume cupo si la reserva base
+      -- devolvió BUSY, BLOCKED, SUPERSEDED o CLOSED.
+      insert into public.plusmedik_guard_rate_ledger(contact_key,state)
+      values (v_contact, public.plusmedik_guard_rate_decide(
+        '{}'::jsonb, p_guard -> 'rules', v_now, v_since, p_run_id))
+      on conflict (contact_key) do update
+        set state = public.plusmedik_guard_rate_decide(
+          public.plusmedik_guard_rate_ledger.state,
+          p_guard -> 'rules', v_now, v_since, p_run_id)
+      returning state into v_rate_state;
+      if v_rate_state ->> 'allowed' = 'false' then
+        v_reason := 'RATE_LIMITED';
+        v_count := (v_rate_state ->> 'count')::integer;
+        v_index := (v_rate_state ->> 'rule')::integer;
+        v_rule_seconds := (v_rate_state ->> 'windowSeconds')::integer;
+        v_rule_max := (v_rate_state ->> 'max')::integer;
+      end if;
+    end if;
+
+    if v_reason is not null then
+      raise exception 'plusmedik_guard: quota denied' using errcode='PZ429';
+    end if;
+
+    if v_signature is not null then
+      insert into public.plusmedik_reply_guard_marks(run_id,contact_key,signature)
+        values (p_run_id,v_contact,v_signature) on conflict(run_id) do nothing;
+    end if;
     return v_result;
+
+  exception when sqlstate 'PZ429' then
+    -- La reserva RESERVED y el intento de consumir cuota quedan revertidos.
+    -- Las variables v_reason/v_count persisten para dejar el evento correcto.
+    null;
+  end;
+
+  -- A partir de aquí el run sigue NOT_RESERVED: cancelación legal.
+  insert into public.plusmedik_reply_guard_state(contact_key)
+    values (v_contact) on conflict(contact_key) do nothing;
+  if v_reason in ('LOOP_SUSPECTED','REPEAT_SUSPECTED') then
+    update public.plusmedik_reply_guard_state
+      set suppressed_until = v_now + make_interval(secs => v_cooldown),
+          reason = case when v_reason = 'LOOP_SUSPECTED' then 'LOOP_BURST'
+                        else 'LOOP_REPEAT' end,
+          updated_at = v_now
+      where contact_key = v_contact;
+    insert into public.plusmedik_reply_guard_events(contact_key,run_id,kind,detail)
+      values(v_contact,p_run_id,v_reason,
+        case when v_reason = 'LOOP_SUSPECTED' then
+          jsonb_build_object('signal','BURST','count',v_count,
+            'windowSeconds',(p_guard #>> '{burst,windowSeconds}')::integer,
+            'max',(p_guard #>> '{burst,max}')::integer,
+            'cooldownSeconds',v_cooldown)
+        else
+          jsonb_build_object('signal','REPEAT','signature',v_signature,
+            'count',v_count,
+            'windowSeconds',(p_guard #>> '{repeat,windowSeconds}')::integer,
+            'max',(p_guard #>> '{repeat,max}')::integer,
+            'cooldownSeconds',v_cooldown)
+        end);
+  elsif v_reason = 'RATE_LIMITED' then
+    if not exists (
+      select 1 from public.plusmedik_reply_guard_events e
+      where e.contact_key = v_contact and e.kind = 'RATE_LIMITED'
+        and e.created_at > v_now - make_interval(secs => v_rule_seconds)
+    ) then
+      insert into public.plusmedik_reply_guard_events(contact_key,run_id,kind,detail)
+        values(v_contact,p_run_id,'RATE_LIMITED',
+          jsonb_build_object('rule',v_index,'count',v_count,
+            'windowSeconds',v_rule_seconds,'max',v_rule_max));
+    end if;
   end if;
-  if v_signature is not null then
-    insert into public.plusmedik_reply_guard_marks (run_id, contact_key, signature) values (p_run_id, v_contact, v_signature) on conflict (run_id) do nothing;
-  end if;
-  return v_result;
+
+  perform public.plusmedik_audit_prove(p_run_id,p_fence);
+  update public.plusmedik_audit_runs set
+    send_state = 'CANCELLED',
+    send_blocked_at = coalesce(send_blocked_at, now()),
+    send_block_reason = coalesce(send_block_reason, v_reason),
+    processing_status = case when processing_status in ('PROCESSING','ANALYZED','IGNORED')
+                          then 'COMPLETED' else processing_status end,
+    completed_at = coalesce(completed_at, now()),
+    lease_expires_at = now()
+    where id = p_run_id;
+  perform set_config('plusmedik.fence_proof','',true);
+  return jsonb_build_object('status','limited','reason',v_reason);
 end $$;
 
 revoke all on function public.plusmedik_turn_reserve_send_guarded(uuid,text,bigint,text,integer,text,jsonb) from public, anon, authenticated;
