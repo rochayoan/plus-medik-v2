@@ -56,11 +56,11 @@ export async function appendApprovedQuoteStudyDetails(input: QuoteStudyDetailsIn
       lines.push(...turnaroundLines(turnaround.result.data, ANSWER_TEXTS));
       refs.push({ kind: "TURNAROUND", labTestId: study.id, version: proof.version, contentHash: proof.contentHash });
     }
-    if (lines.length > 0) blocks.push("*" + study.name + "*\n" + lines.join("\n"));
+    if (lines.length > 0) blocks.push("▫️ *" + study.name + "*\n" + lines.map((line) => "• " + line).join("\n"));
   }
   if (blocks.length === 0 || refs.length === 0) return input.quote;
 
-  const section = "📋 *Muestras, requisitos y tiempos de entrega*\n\n" + blocks.join("\n\n");
+  const section = "📋 *MUESTRAS, REQUISITOS Y ENTREGA*\n\n" + blocks.join("\n\n");
   const hasFooter = input.quote.endsWith(FOOTER);
   const base = hasFooter ? input.quote.slice(0, -FOOTER.length) : input.quote;
   const combined = base + "\n\n" + section + (hasFooter ? FOOTER : "");
