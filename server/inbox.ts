@@ -7,6 +7,8 @@ export interface InboxConfig {
   serviceKey: string;
   encryptionKey: Buffer;
   webhookSecret: string;
+  storage?: "supabase" | "local";
+  localDir?: string;
 }
 
 export interface EncryptedEnvelope {
@@ -68,7 +70,18 @@ export function resolveInboxConfig(env: NodeJS.ProcessEnv = process.env): InboxC
       || !/^[A-Za-z0-9+/]{43}=$/.test(encoded)) return undefined;
   const encryptionKey = Buffer.from(encoded, "base64");
   if (encryptionKey.length !== 32 || encryptionKey.toString("base64") !== encoded) return undefined;
-  return { baseUrl, serviceKey, webhookSecret, encryptionKey };
+  const storageMode = env.PLUSMEDIK_DOKPLOY_INBOX_STORAGE?.trim().toLowerCase() ?? "supabase";
+  if (storageMode !== "supabase" && storageMode !== "local") return undefined;
+  if (storageMode === "local") {
+    // Explicit acknowledgement of a manually attached persistent Dokploy volume.
+    // Never silently fall back to the ephemeral Docker filesystem.
+    const localDir = env.PLUSMEDIK_DOKPLOY_SPOOL_DIR?.trim();
+    if (env.PLUSMEDIK_DOKPLOY_VOLUME_CONFIRMED?.trim().toLowerCase() !== "on"
+        || !localDir?.startsWith("/data/") || localDir.includes("..")
+        || localDir === "/data/" || localDir.includes("//")) return undefined;
+    return { baseUrl, serviceKey, webhookSecret, encryptionKey, storage: "local", localDir };
+  }
+  return { baseUrl, serviceKey, webhookSecret, encryptionKey, storage: "supabase" };
 }
 
 export function encryptPayload(value: QueuedRequest, key: Buffer): EncryptedEnvelope {
@@ -158,7 +171,8 @@ export class InboxRepository {
 }
 
 export async function enqueueWebhook(
-  request: Request, config: InboxConfig | undefined, fetchFn?: JsonFetch
+  request: Request, config: InboxConfig | undefined, fetchFn?: JsonFetch,
+  repo?: Pick<InboxRepository, "enqueue">
 ): Promise<Response> {
   if (!config) return json(503, "INBOX_NOT_READY");
   if (request.method !== "POST") return json(405, "METHOD_NOT_ALLOWED");
@@ -177,8 +191,8 @@ export async function enqueueWebhook(
     idempotency: request.headers.get("x-idempotency-key")
   };
   try {
-    await new InboxRepository(config, fetchFn).enqueue(value);
-    // Never ACK before the database confirms durable storage.
+    await (repo ?? new InboxRepository(config, fetchFn)).enqueue(value);
+    // Never ACK before the chosen storage confirms durable persistence.
     return json(200, "QUEUED");
   } catch {
     return json(503, "INBOX_UNAVAILABLE");
