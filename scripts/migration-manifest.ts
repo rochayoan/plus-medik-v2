@@ -230,8 +230,8 @@ const LEDGER = `
     'AVISO FIJO: V2 (20261025000000_plusmedik_turns) y el CRM (20261025000000_crm_fix_patient_note_and_follow_up_rpcs) comparten el número de versión: NO usar "supabase db push" desde ninguno de los dos repositorios sobre este proyecto'`;
 
 export function renderPreflight(manifest = buildManifest()): string {
-  return `${COMMON_HEAD(manifest, "PlusMedik V2 — verificación ANTES de aplicar las 13 migraciones (solo lectura)", [
-    "Esperado antes de empezar: VEREDICTO = OK, las 13 migraciones en NOT_APPLIED (estado «pendiente»), sin filas BLOCK.",
+  return `${COMMON_HEAD(manifest, `PlusMedik V2 — verificación ANTES de aplicar las ${manifest.migrations.length} migraciones (solo lectura)`, [
+    "Esperado: VEREDICTO = OK, las migraciones existentes como YA APLICADA y las restantes como pendientes; ninguna fila BLOCK.",
     "Si alguna migración aparece APPLIED (INFO), ya se aplicó: no repetirla sin entender por qué. PARTIAL o un hueco de orden = BLOCK.",
     "Guardar las filas INSTANTANEA: se comparan con la verificación posterior (el catálogo y el esquema crm no deben cambiar)."
   ])}
@@ -275,8 +275,8 @@ export function renderPostflight(manifest = buildManifest()): string {
   const serviceCount = manifest.serviceFunctions.length;
   const controlMig = definingMigration(manifest, "function", "plusmedik_audit_confirm_send");
   const turnsMig = definingMigration(manifest, "table", "plusmedik_turns");
-  return `${COMMON_HEAD(manifest, "PlusMedik V2 — verificación DESPUÉS de aplicar las 13 migraciones (solo lectura)", [
-    "Esperado: VEREDICTO = OK, las 13 migraciones APPLIED, ninguna fila BLOCK, y las filas INSTANTANEA idénticas a las de la verificación previa.",
+  return `${COMMON_HEAD(manifest, `PlusMedik V2 — verificación DESPUÉS de aplicar las ${manifest.migrations.length} migraciones (solo lectura)`, [
+    "Esperado al completar el conjunto: VEREDICTO = OK, todas las migraciones completas y sin BLOCK; filas INSTANTANEA idénticas antes/después.",
     "También sirve después de CADA migración: las posteriores aparecerán como pendientes (INFO) y las aplicadas deben estar completas.",
     `Funciones con EXECUTE para service_role esperadas por las migraciones: ${serviceCount}.`
   ])}
