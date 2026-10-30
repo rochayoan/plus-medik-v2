@@ -46,12 +46,31 @@ jobs:
             where r.contact_key = '${contact}'`);
             const since = await db.ok(`select counted_since from public.plusmedik_reply_guard_state where contact_key = '${contact}'`);
             const ledger = await db.ok(`select state from public.plusmedik_guard_rate_ledger where contact_key = '${contact}'`);
-            console.log("GUARD_CONCURRENCY_DIAGNOSTIC", JSON.stringify({ outcomes, since, detail, ledger }));
+                        const decisionLog = await db.ok(`select coalesce(json_agg(json_build_object('step',d.step,'run_id',d.run_id,'slot_count',case when d.slots is null then null else jsonb_array_length(d.slots) end,'at',d.at) order by d.at), '[]') from public.guard_debug_decisions d where d.run_id in (select id from public.plusmedik_audit_runs where contact_key = '${contact}')`);
+            console.log("GUARD_CONCURRENCY_DIAGNOSTIC", JSON.stringify({ outcomes, since, detail, ledger, decisionLog }));
           }
           ''' + old
           if old not in source:
             raise SystemExit("test marker missing")
           p.write_text(source.replace(old, replacement))
+          PY
+      - name: Instrument quota decisions in temporary PostgreSQL
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('supabase/migrations/20261104000000_plusmedik_reply_guard_atomic_rate.sql')
+          sql = p.read_text()
+          sql = 'create table public.guard_debug_decisions(run_id uuid, step text, slots jsonb, at timestamptz default clock_timestamp());\n' + sql
+          old = 'returning state into v_rate_state;'
+          assert sql.count(old) == 1
+          sql = sql.replace(old, old + "\n    insert into public.guard_debug_decisions(run_id,step,slots) values (p_run_id,'quota:'||(v_rate_state->>'allowed'),v_rate_state->'slots');")
+          old = 'v_result := public.plusmedik_turn_reserve_send(p_run_id, p_owner, p_fence, p_kind, p_lease_seconds, p_stale_policy);'
+          assert sql.count(old) == 1
+          sql = sql.replace(old, old + "\n  insert into public.guard_debug_decisions(run_id,step,slots) values (p_run_id,'result:'||(v_result->>'status'),null);")
+          old = "if v_run.send_state <> 'NOT_RESERVED' then"
+          assert sql.count(old) == 1
+          sql = sql.replace(old, old + "\n    insert into public.guard_debug_decisions(run_id,step,slots) values (p_run_id, 'early:'||v_run.send_state,null);")
+          p.write_text(sql)
           PY
       - name: Repeat synthetic concurrent reservations until first failure
         run: |
