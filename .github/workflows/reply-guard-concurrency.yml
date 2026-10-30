@@ -26,6 +26,32 @@ jobs:
           cache: npm
       - name: Install locked dependencies
         run: npm ci --ignore-scripts
+      - name: Log synthetic reservation ledger if the SQL guard overshoots
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("tests/reply-guard-db.test.ts")
+          source = p.read_text()
+          old = 'expect(outcomes.filter((status) => status === "reserved")).toHaveLength(3);'
+          replacement = '''if (outcomes.filter((status) => status === "reserved").length > 3) {
+            const detail = await db.ok(`select json_agg(json_build_object(
+              'state', r.send_state,
+              'kind', r.send_kind,
+              'reserved_age_seconds', round(extract(epoch from clock_timestamp() - r.send_reserved_at)::numeric, 3),
+              'reserved_at', r.send_reserved_at,
+              'turn_kind', t.turn_kind
+            ) order by r.send_reserved_at)
+            from public.plusmedik_audit_runs r
+            join public.plusmedik_turns t on t.run_id = r.id
+            where r.contact_key = '${contact}'`);
+            const since = await db.ok(`select counted_since from public.plusmedik_reply_guard_state where contact_key = '${contact}'`);
+            console.log("GUARD_CONCURRENCY_DIAGNOSTIC", JSON.stringify({ outcomes, since, detail }));
+          }
+          ''' + old
+          if old not in source:
+            raise SystemExit("test marker missing")
+          p.write_text(source.replace(old, replacement))
+          PY
       - name: Baseline concurrency (diagnostic only)
         continue-on-error: true
         run: for i in 1 2 3 4 5 6; do echo "Concurrency iteration $i"; npx vitest run tests/reply-guard-db.test.ts tests/reply-guard-e2e.test.ts -t "concurrencia:" --maxWorkers=1 --no-file-parallelism || exit 1; done
