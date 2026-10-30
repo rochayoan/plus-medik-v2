@@ -236,6 +236,7 @@ export async function POST(request: Request): Promise<Response> {
     allowedPhones: process.env.ALLOWED_PHONES,
     quote: realDeps,
     textPilotPhone: textPilotGate.enabled && textPilotGate.ready ? textPilotGate.pilotPhone : undefined,
+    textPilotExtraPhones: textPilotGate.enabled && textPilotGate.ready ? textPilotGate.extraPhones : undefined,
     legacyQuote: textPilotGate.enabled && textPilotGate.ready && turnsEnabled
       ? { ...realDeps, turns: undefined, requireAuditGuard: humanControlEnabled || on("REQUIRE_AUDIT_GUARD") }
       : undefined,
