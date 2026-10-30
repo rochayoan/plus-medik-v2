@@ -39,7 +39,8 @@ export function inboxConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
 
 export function resolveInboxConfig(env: NodeJS.ProcessEnv = process.env): InboxConfig | undefined {
   if (env.PLUSMEDIK_DOKPLOY_ACCEPT_WEBHOOK?.trim().toLowerCase() !== "on"
-      || env.PLUSMEDIK_DOKPLOY_WORKER?.trim().toLowerCase() !== "on") return undefined;
+      || env.PLUSMEDIK_DOKPLOY_WORKER?.trim().toLowerCase() !== "on"
+      || env.REQUIRE_AUDIT_GUARD?.trim().toLowerCase() !== "on") return undefined;
   const baseUrl = env.SUPABASE_URL?.replace(/\/+$/, "");
   const serviceKey = env.SUPABASE_SERVICE_ROLE_KEY;
   const webhookSecret = env.WEBHOOK_SECRET;
