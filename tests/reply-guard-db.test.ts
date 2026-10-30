@@ -97,6 +97,10 @@ describe.skipIf(!bin)("guarda de respuestas contra PostgreSQL real (migración 1
       const contact = newContact();
       await replied(contact, guard({ signature: "INFO_REQUEST:HOURS" }));
       await db.applyFile(join(dir, GUARD));
+      // La migración 10 reemplaza la firma vigente de la función. Restaurar
+      // inmediatamente la migración 16 para que los demás tests no usen
+      // accidentalmente el rate limiter anterior sin cuota atómica.
+      await db.applyFile(join(dir, "20261104000000_plusmedik_reply_guard_atomic_rate.sql"));
       expect(await db.ok(`select count(*) from public.plusmedik_reply_guard_marks where contact_key = '${contact}'`)).toBe("1");
     });
 
