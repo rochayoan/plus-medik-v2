@@ -1,9 +1,9 @@
--- PlusMedik V2 — verificación DESPUÉS de aplicar las 13 migraciones (solo lectura)
+-- PlusMedik V2 — verificación DESPUÉS de aplicar las 16 migraciones (solo lectura)
 -- GENERADO por scripts/migration-manifest.ts a partir de supabase/migrations/*.sql. NO editar a mano (una prueba falla si no coincide).
 -- SOLO LECTURA: una sola sentencia SELECT. No contiene DDL, DML, RPC ni datos clínicos; devuelve metadatos y conteos.
 -- Ejecutar exclusivamente en el proyecto Supabase cvokrtrdzxfchntwwslz (verificar el identificador en la URL del panel ANTES de ejecutar),
 -- con el rol administrativo del SQL Editor. Es seguro ejecutarla dentro de una transacción de solo lectura.
--- Esperado: VEREDICTO = OK, las 13 migraciones APPLIED, ninguna fila BLOCK, y las filas INSTANTANEA idénticas a las de la verificación previa.
+-- Esperado al completar el conjunto: VEREDICTO = OK, todas las migraciones completas y sin BLOCK; filas INSTANTANEA idénticas antes/después.
 -- También sirve después de CADA migración: las posteriores aparecerán como pendientes (INFO) y las aplicadas deben estar completas.
 -- Funciones con EXECUTE para service_role esperadas por las migraciones: 59.
 --
