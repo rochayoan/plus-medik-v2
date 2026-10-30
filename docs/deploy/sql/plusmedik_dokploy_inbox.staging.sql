@@ -119,8 +119,12 @@ grant execute on function public.plusmedik_dokploy_finish(uuid,uuid,integer,bool
 
 -- Lightweight readiness check; fails if this migration has not been applied.
 create or replace function public.plusmedik_dokploy_health()
-returns boolean language sql security invoker set search_path='' as $$
- select true;
-$$;
+returns boolean language plpgsql security invoker set search_path='' as $
+begin
+ -- Check that this RPC can actually access the queue under service_role.
+ -- A constant SELECT true would report readiness even with missing table grants.
+ perform 1 from public.plusmedik_dokploy_inbox limit 1;
+ return true;
+end $;
 revoke all on function public.plusmedik_dokploy_health() from public,anon,authenticated;
 grant execute on function public.plusmedik_dokploy_health() to service_role;
