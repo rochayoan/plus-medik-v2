@@ -59,6 +59,13 @@ describe("classifyText: clasificación determinista", () => {
 });
 
 describe("textos de respuesta: sin políticas, horarios, precios ni datos médicos", () => {
+  it("los borradores del piloto ofrecen texto o foto sin prometer atención humana", () => {
+    for (const key of ["greeting", "send_recipe", "fallback", "handoff_unavailable"] as const) {
+      expect(DRAFT_TEXTS[key], key).toMatch(/escrib|escr[ií]beme/i);
+      expect(DRAFT_TEXTS[key], key).toMatch(/foto|fotograf[ií]a/i);
+    }
+  });
+
   it("los textos por defecto no tienen cifras, moneda, plazos ni horarios", () => {
     for (const [key, text] of Object.entries(DRAFT_TEXTS)) {
       expect(text, key).not.toMatch(/\d/);
