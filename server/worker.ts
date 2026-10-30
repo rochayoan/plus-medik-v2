@@ -32,11 +32,13 @@ export async function runInboxJob(
   try {
     const payload = decryptPayload(job.encrypted, config.encryptionKey);
     const request = restoreWebhookRequest(payload, config);
-    const scheduled: Promise<unknown>[] = [];
-    const response = await process(request, (task) => scheduled.push(task));
-    const outcomes = await Promise.allSettled(scheduled);
-    success = response.status === 200 && outcomes.every(x => x.status === "fulfilled");
-    if (!success) log("inbox_job_not_completed", { status: response.status, failedTasks: outcomes.filter(x=>x.status==="rejected").length });
+    const scheduled: Promise<boolean>[] = [];
+    // Attach a rejection handler synchronously. A scheduler may start several
+    // promises before the HTTP handler resolves.
+    const response = await process(request, (task) => { scheduled.push(task.then(() => true, () => false)); });
+    const outcomes = await Promise.all(scheduled);
+    success = response.status === 200 && outcomes.every(Boolean);
+    if (!success) log("inbox_job_not_completed", { status: response.status, failedTasks: outcomes.filter(x => !x).length });
   } catch {
     log("inbox_job_exception");
   } finally {
