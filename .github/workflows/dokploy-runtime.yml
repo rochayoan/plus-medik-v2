@@ -5,6 +5,9 @@ on:
     paths:
       - "server/**"
       - "tests/dokploy-router.test.ts"
+      - "tests/dokploy-inbox.test.ts"
+      - "supabase/migrations/20261105000000_plusmedik_dokploy_inbox.sql"
+      - "api/kapso/webhook.ts"
       - "Dockerfile.dokploy"
       - ".dockerignore"
       - "tsconfig.dokploy.json"
@@ -32,7 +35,21 @@ jobs:
       - name: Build Dokploy Node server
         run: npm run build:dokploy
       - name: Check closed webhook and health endpoints
-        run: npx vitest run tests/dokploy-router.test.ts
+        run: npx vitest run tests/dokploy-router.test.ts tests/dokploy-inbox.test.ts
+      - name: Validate inbox SQL against isolated PostgreSQL 16
+        run: |
+          docker run --rm -d --name plusmedik-inbox-pg -e POSTGRES_PASSWORD=local-only -p 127.0.0.1:54339:5432 postgres:16-alpine
+          trap 'docker rm -f plusmedik-inbox-pg || true' EXIT
+          for i in $(seq 1 40); do
+            docker exec plusmedik-inbox-pg pg_isready -U postgres && break
+            sleep 1
+          done
+          docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "create role anon; create role authenticated; create role service_role;"
+          docker exec -i plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres < supabase/migrations/20261105000000_plusmedik_dokploy_inbox.sql
+          docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "set role service_role; select public.plusmedik_dokploy_health();"
+          docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "set role service_role; select public.plusmedik_dokploy_enqueue(repeat('a',64),'AAAAAAAA','BBBBBBBB','CCCCCCCC');"
+          docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "set role service_role; select * from public.plusmedik_dokploy_claim('00000000-0000-4000-8000-000000000001');"
+          docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "select has_table_privilege('anon','public.plusmedik_dokploy_inbox','SELECT') as anon_can_read;" | grep -q ' f '
       - name: Build Docker runtime
         run: docker build -f Dockerfile.dokploy -t plusmedik-dokploy:ci .
       - name: Docker smoke test (no patient traffic)
