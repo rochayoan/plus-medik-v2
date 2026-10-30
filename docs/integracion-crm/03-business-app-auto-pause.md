@@ -11,7 +11,7 @@ Esta reactivación es perezosa: sin un mensaje entrante, el estado persistido si
 Las pausas manuales del CRM son independientes y no expiran por este mecanismo.
 
 No se requiere nueva variable de entorno ni configuración del celular.
-IMPORTANTE: la migración 20261105000000_plusmedik_human_idle_resume.sql
+IMPORTANTE: la migración pendiente en supabase/pending-migrations/20261105000000_plusmedik_human_idle_resume.sql
 debe aplicarse a la base ANTES de desplegar el nuevo código, o los pilotos
 quedarán silenciados (falla cerrado al no poder comprobar el vencimiento).
 

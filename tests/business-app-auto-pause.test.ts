@@ -105,7 +105,7 @@ describe("pausa automática por WhatsApp Business del celular", () => {
   });
 
   it("la SQL protege la pausa CRM y serializa la reactivación", () => {
-    const sql = readFileSync(join(__dirname, "..", "supabase", "migrations", "20261105000000_plusmedik_human_idle_resume.sql"), "utf8");
+    const sql = readFileSync(join(__dirname, "..", "supabase", "pending-migrations", "20261105000000_plusmedik_human_idle_resume.sql"), "utf8");
     expect(sql).toContain("for update");
     expect(sql).toContain("pause_source is distinct from 'kapso_business_app'");
     expect(sql).toContain("interval '10 minutes'");
