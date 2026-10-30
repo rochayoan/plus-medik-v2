@@ -8,7 +8,7 @@ export type InboxStorage = Pick<InboxRepository, "ready" | "enqueue" | "claim" |
 export function createInboxStorage(config: InboxConfig): InboxStorage {
   if (config.storage === "local") {
     if (!config.localDir) throw new Error("LOCAL_INBOX_DIRECTORY_REQUIRED");
-    return new LocalInboxRepository(config.localDir, config.encryptionKey);
+    return new LocalInboxRepository(config.localDir, config.encryptionKey, true);
   }
   return new InboxRepository(config);
 }
