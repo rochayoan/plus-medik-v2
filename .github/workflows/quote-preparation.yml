@@ -20,6 +20,8 @@ on:
       - "tests/reader-originals.test.ts"
       - "tests/partial-auto.test.ts"
       - "api/kapso/webhook.ts"
+      - "src/text-pilot-gate.ts"
+      - "tests/text-pilot-gate.test.ts"
       - "tests/quote-preparation.test.ts"
       - "package.json"
       - "package-lock.json"
@@ -47,6 +49,8 @@ jobs:
         run: npm ci --ignore-scripts
       - name: Typecheck
         run: npm run typecheck
+      - name: Text pilot safety gate tests
+        run: npx vitest run tests/text-pilot-gate.test.ts
       - name: Approved quote preparation tests
         run: npx vitest run tests/quote-preparation.test.ts
       - name: Knowledge strict-freshness tests
