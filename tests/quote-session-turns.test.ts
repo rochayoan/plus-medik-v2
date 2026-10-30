@@ -244,7 +244,7 @@ describe("fotografía inmediata opt-in: conserva textos y elimina LISTO", () => 
   it("cotiza cada foto de inmediato con ambos precios, total, rastro clínico y sin pedir confirmación", async () => {
     const w = setup({ analysis: pricedAnalysis() });
     w.deps.turns!.instantPhotoQuotes = true;
-    const appendix = vi.fn(async (body: string) => body + "\\n\\n🧪 *PREPARACIÓN Y AYUNO*\\n• Indicaciones aprobadas.");
+    const appendix = vi.fn(async (body: string) => body + "\n\n🧪 *PREPARACIÓN Y AYUNO*\n• Indicaciones aprobadas.");
     w.deps.quotePreparations = appendix;
     const reports = await processTurns([image("instant-1")], w.deps);
     expect(reports[0]?.result).toBe("quoted");
