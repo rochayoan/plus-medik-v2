@@ -1,26 +1,35 @@
 /**
- * Puerta de despliegue piloto para G2/G4/G5.9 (texto y sesiones).
+ * Puerta estricta de activación del piloto de cotización por texto.
  *
- * Apagada por defecto: no cambia el comportamiento anterior del agente.
- * Con PLUSMEDIK_TEXT_PILOT_GUARD=on, exige que ALLOWED_PHONES y
- * PLUSMEDIK_AGENT_CONTROL_PHONES contengan exactamente el mismo número
- * internacional. Impide habilitar los turnos de todos los pacientes si alguien
- * dejó ALLOWED_PHONES sin definir (caso que el webhook interpreta como "todos").
+ * Con PLUSMEDIK_TEXT_PILOT_GUARD=on, se exige UN solo teléfono piloto en
+ * PLUSMEDIK_AGENT_CONTROL_PHONES. ALLOWED_PHONES es una política INDEPENDIENTE
+ * del webhook anterior: puede estar vacía (todos) o contener varios teléfonos,
+ * pero si está limitada DEBE incluir al piloto.
  *
- * No lee ni devuelve los números en mensajes de error ni en logs.
+ * La puerta devuelve un número únicamente para el ruteo interno; nunca debe
+ * aparecer en logs o errores. Los otros contactos conservan la ruta de imagen
+ * sin turnos. Apagada por defecto = comportamiento previo sin cambios.
  */
 export type TextPilotGate =
   | { enabled: false; ready: true }
-  | { enabled: true; ready: true }
+  | { enabled: true; ready: true; pilotPhone: string }
   | { enabled: true; ready: false; reason: "INVALID_FLAG" | "PILOT_SCOPE_MISSING_OR_MISMATCH" };
 
-const PHONE = new RegExp("^[+]?[0-9]{8,15}$");
+const PHONE = /^[+]?[0-9]{8,15}$/;
+const normalizePhone = (value: string) => value.replace(/^[+]/, "");
 
 function exactlyOnePhone(raw: string | undefined): string | undefined {
-  if (!raw || !raw.trim()) return undefined;
+  if (!raw?.trim()) return undefined;
   const parts = raw.split(",").map((s) => s.trim());
   if (parts.length !== 1 || !PHONE.test(parts[0]!)) return undefined;
-  return parts[0]!.replace(/^[+]/, "");
+  return normalizePhone(parts[0]!);
+}
+
+function isPilotAllowedByExistingFilter(pilot: string, raw: string | undefined): boolean {
+  if (!raw?.trim()) return true; // ALLOWED_PHONES vacío = todos, como antes.
+  const parts = raw.split(",").map((s) => s.trim());
+  if (parts.some((s) => !PHONE.test(s))) return false;
+  return parts.map(normalizePhone).includes(pilot);
 }
 
 export function resolveTextPilotGate(env: Record<string, string | undefined>): TextPilotGate {
@@ -28,10 +37,9 @@ export function resolveTextPilotGate(env: Record<string, string | undefined>): T
   if (flag === undefined || flag === "" || flag === "off") return { enabled: false, ready: true };
   if (flag !== "on") return { enabled: true, ready: false, reason: "INVALID_FLAG" };
 
-  const allowed = exactlyOnePhone(env.ALLOWED_PHONES);
-  const controlled = exactlyOnePhone(env.PLUSMEDIK_AGENT_CONTROL_PHONES);
-  if (!allowed || !controlled || allowed !== controlled) {
+  const pilot = exactlyOnePhone(env.PLUSMEDIK_AGENT_CONTROL_PHONES);
+  if (!pilot || !isPilotAllowedByExistingFilter(pilot, env.ALLOWED_PHONES)) {
     return { enabled: true, ready: false, reason: "PILOT_SCOPE_MISSING_OR_MISMATCH" };
   }
-  return { enabled: true, ready: true };
+  return { enabled: true, ready: true, pilotPhone: pilot };
 }
