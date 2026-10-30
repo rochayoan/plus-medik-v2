@@ -27,9 +27,14 @@ describe("Dokploy encrypted inbox: no real network", () => {
     const env = { PLUSMEDIK_DOKPLOY_ACCEPT_WEBHOOK: "on", PLUSMEDIK_DOKPLOY_WORKER: "on",
       REQUIRE_AUDIT_GUARD: "on", SUPABASE_URL: config.baseUrl,
       SUPABASE_SERVICE_ROLE_KEY: config.serviceKey, WEBHOOK_SECRET: config.webhookSecret,
+      KAPSO_API_KEY: "synthetic-kapso", KAPSO_PHONE_NUMBER_ID: "synthetic-phone-id",
+      OPENAI_API_KEY: "synthetic-openai", OPENROUTER_API_KEY: "synthetic-openrouter",
       PLUSMEDIK_DOKPLOY_INBOX_KEY: key.toString("base64") };
     expect(resolveInboxConfig(env)?.encryptionKey).toEqual(key);
     expect(resolveInboxConfig({ ...env, REQUIRE_AUDIT_GUARD: "off" })).toBeUndefined();
+    expect(resolveInboxConfig({ ...env, KAPSO_API_KEY: "" })).toBeUndefined();
+    expect(resolveInboxConfig({ ...env, OPENAI_API_KEY: "" })).toBeUndefined();
+    expect(resolveInboxConfig({ ...env, OPENROUTER_API_KEY: "" })).toBeUndefined();
     expect(resolveInboxConfig({ ...env, PLUSMEDIK_DOKPLOY_WORKER: "off" })).toBeUndefined();
     expect(resolveInboxConfig({ ...env, PLUSMEDIK_DOKPLOY_INBOX_KEY: "invalid" })).toBeUndefined();
   });
