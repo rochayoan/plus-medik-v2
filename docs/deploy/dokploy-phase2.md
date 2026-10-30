@@ -61,6 +61,16 @@ preparar una base de staging y todas las protecciones:
   Nunca exponer service_role en navegador, ni compartir claves entre
   staging y producción.
 
+Para habilitar **turnos o texto** se exige además:
+`PLUSMEDIK_TEXT_PILOT_GUARD=on`, exactamente un teléfono en
+`PLUSMEDIK_AGENT_CONTROL_PHONES` incluido en `ALLOWED_PHONES` cuando
+esa lista esté limitada, y una `PLUSMEDIK_CONTACT_HMAC_KEY` exclusiva de
+al menos 32 caracteres. Si se enciende `PLUSMEDIK_TEXT_HANDLER`, también
+se exige `PLUSMEDIK_TURNS=on` y `PLUSMEDIK_REPLY_GUARD=on`.
+La cotización conversacional exige el manejador de texto; la conversación
+OpenAI exige además un `OPENAI_CONVERSATION_MODEL` configurado.
+Con estas dependencias incompletas se rechaza el webhook con 503.
+
 No cambiar el webhook registrado en Kapso. La configuración se comprueba
 antes de aceptar tráfico, y `/readyz` exige también que la RPC de salud
 de la base responda. **Un 200 en /readyz no es aprobación de corte**: solo
