@@ -45,7 +45,8 @@ jobs:
             join public.plusmedik_turns t on t.run_id = r.id
             where r.contact_key = '${contact}'`);
             const since = await db.ok(`select counted_since from public.plusmedik_reply_guard_state where contact_key = '${contact}'`);
-            console.log("GUARD_CONCURRENCY_DIAGNOSTIC", JSON.stringify({ outcomes, since, detail }));
+            const ledger = await db.ok(`select state from public.plusmedik_guard_rate_ledger where contact_key = '${contact}'`);
+            console.log("GUARD_CONCURRENCY_DIAGNOSTIC", JSON.stringify({ outcomes, since, detail, ledger }));
           }
           ''' + old
           if old not in source:
