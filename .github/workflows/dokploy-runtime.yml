@@ -44,7 +44,7 @@ jobs:
             docker exec plusmedik-inbox-pg pg_isready -U postgres && break
             sleep 1
           done
-          docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "create role anon; create role authenticated; create role service_role;"
+          docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "create role anon; create role authenticated; create role service_role bypassrls;"
           docker exec -i plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres < supabase/migrations/20261105000000_plusmedik_dokploy_inbox.sql
           docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "set role service_role; select public.plusmedik_dokploy_health();"
           docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "set role service_role; select public.plusmedik_dokploy_enqueue(repeat('a',64),'AAAAAAAA','BBBBBBBB','CCCCCCCC');"
