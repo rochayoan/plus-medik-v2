@@ -90,3 +90,15 @@ describe("quote", () => {
     expect(res.preparations).toEqual([expect.objectContaining({ studyId: A, fastingHours: 8 })]);
   });
 });
+
+describe("fallos internos", () => {
+  it("el catálogo no toca la preparación y un fallo del repositorio responde 500 sin detalles", async () => {
+    const knowledge = { getStudyPreparation: vi.fn() } as unknown as WebQuoteDeps["knowledge"];
+    const deps = setup({ knowledge, loadCatalog: async () => { throw new Error("GET lab_tests -> HTTP 401: sin permiso"); } });
+    const res = await call("catalog", deps);
+    expect(res.status).toBe(500);
+    expect(JSON.stringify(await res.json())).not.toContain("lab_tests");
+    expect(deps.log).toHaveBeenCalledWith("web_quote_failed", expect.objectContaining({ route: "catalog", message: expect.stringContaining("lab_tests") }));
+    expect(knowledge!.getStudyPreparation).not.toHaveBeenCalled();
+  });
+});

@@ -17,7 +17,8 @@ export function createWebQuoteRoute(route: WebRoute) {
   return (request: Request): Promise<Response> => handleWebQuote(request, route, {
     config: resolveWebQuoteConfig(process.env),
     loadCatalog: () => loadActiveCatalog(),
-    knowledge: knowledgeReader(),
+    // Solo la cotización lee preparaciones: el catálogo depende únicamente de lab_tests y sus alias.
+    knowledge: route === "quote" ? knowledgeReader() : undefined,
     log
   });
 }

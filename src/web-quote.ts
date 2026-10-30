@@ -134,7 +134,8 @@ export async function handleWebQuote(request: Request, route: WebRoute, deps: We
       return json(200, { ok: true, ...quote });
     }
   } catch (error) {
-    deps.log("web_quote_failed", { route, error: error instanceof Error ? error.name : "unknown" });
+    // Solo al registro del servidor (nunca a la respuesta). Los mensajes de los repositorios no incluyen claves; se acotan por si acaso.
+    deps.log("web_quote_failed", { route, error: error instanceof Error ? error.name : "unknown", message: error instanceof Error ? error.message.slice(0, 300) : undefined });
     return json(500, { ok: false, error: "internal_error" });
   }
 }
