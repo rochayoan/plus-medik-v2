@@ -67,14 +67,14 @@ La fase 1 sigue siendo el comportamiento por defecto:
 `/readyz` = 503,
 `/api/kapso/webhook` = 503.
 
-En un **proyecto Supabase de staging** separado, revisar el SQL experimental
+En el **Supabase existente de PlusMedik**, y solo después del preflight sin BLOCK y de confirmar el backup, revisar el SQL experimental
 `docs/deploy/sql/plusmedik_dokploy_inbox.staging.sql`;
-aplicarla únicamente tras revisión de permisos, cifrado y backups.
+aplicarlo únicamente tras aprobación de permisos, cifrado y backups; nunca ejecutar esta versión DRAFT directamente en producción.
 Todavía no se ha aplicado mediante esta conversación.
 El repositorio contiene pruebas SQL contra PostgreSQL 16 efímero.
 
 Para habilitar exclusivamente un ensayo sintético en Dokploy **después** de
-preparar una base de staging y todas las protecciones:
+instalar una versión revisada de la cola en la base existente y de configurar todas las protecciones:
 
 - `PLUSMEDIK_DOKPLOY_ACCEPT_WEBHOOK=on`
 - `PLUSMEDIK_DOKPLOY_WORKER=on`
@@ -83,11 +83,10 @@ preparar una base de staging y todas las protecciones:
   base64, de 32 bytes, distinta de las claves de WhatsApp/CRM. Nunca
   mostrarla en logs o chat ni subirla a GitHub.
 - `WEBHOOK_SECRET`: secreto de la firma del webhook utilizado solo con
-  mensajes sintéticos en el ensayo.
-- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`: credenciales de staging.
+  mensajes sintéticos en el ensayo. No enviar mensajes a pacientes durante la prueba.
+- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`: credenciales privadas del Supabase existente. No exponerlas fuera del servidor.
 - `KAPSO_API_KEY`, `KAPSO_PHONE_NUMBER_ID`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`: necesarios para declarar el receptor configurado. Usar exclusivamente credenciales de prueba aprobadas; **si faltan, el webhook devuelve 503 sin aceptar eventos**.
-  Nunca exponer service_role en navegador, ni compartir claves entre
-  staging y producción.
+  Nunca exponer service_role en navegador ni en repositorios.
 
 Para habilitar **turnos o texto** se exige además:
 `PLUSMEDIK_TEXT_PILOT_GUARD=on`, exactamente un teléfono en
@@ -107,7 +106,7 @@ worker, los permisos y el comportamiento bajo interrupciones.
 
 ### Prueba sintética
 
-Con credenciales exclusivas de staging, enviar un payload sintético firmado,
+Con un conjunto de credenciales de prueba controladas y sin pacientes reales, enviar un payload sintético firmado,
 con `x-webhook-signature` válido, y comprobar:
 - `200/QUEUED` solo después de la RPC; con error de base, `503`.
 - Misma carga dos veces => una sola fila de inbox.
@@ -120,7 +119,7 @@ con `x-webhook-signature` válido, y comprobar:
 
 ## Pendientes para el corte
 
-- Verificar contra el **Supabase real de PlusMedik** que las migraciones
+- Verificar con el **preflight del Supabase real de PlusMedik** que las migraciones
   anteriores existen y `REQUIRE_AUDIT_GUARD=on` tiene efecto. Este proyecto
   no está disponible mediante la conexión actual; no asumir compatibilidad
   solo por las pruebas aisladas.
