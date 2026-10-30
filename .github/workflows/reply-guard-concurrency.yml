@@ -65,7 +65,7 @@ jobs:
           assert sql.count(old) == 1
           sql = sql.replace(old, old + "\n    insert into public.guard_debug_decisions(run_id,step,slots) values (p_run_id,'quota:'||(v_rate_state->>'allowed'),v_rate_state->'slots');")
           old = 'v_result := public.plusmedik_turn_reserve_send(p_run_id, p_owner, p_fence, p_kind, p_lease_seconds, p_stale_policy);'
-          assert sql.count(old) == 1
+          assert sql.count(old) == 2
           sql = sql.replace(old, old + "\n  insert into public.guard_debug_decisions(run_id,step,slots) values (p_run_id,'result:'||(v_result->>'status'),null);")
           old = "if v_run.send_state <> 'NOT_RESERVED' then"
           assert sql.count(old) == 1
