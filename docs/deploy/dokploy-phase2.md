@@ -1,7 +1,7 @@
 # PlusMedik V2 — Dokploy, fase 2: inbox cifrado y worker (STAGING)
 
-**Estado: código preparado para pruebas; NO habilitado para recibir pacientes.**
-Este documento NO autoriza cambios en Kapso, WhatsApp, Vercel ni Supabase de producción.
+**Estado: código del inbox con instalador transaccional; NO habilitado para recibir pacientes.**
+Esta etapa puede agregar únicamente objetos de la cola al Supabase existente, tras ejecutar los preflights y verificar el proyecto. No autoriza cambios en Kapso, WhatsApp ni Vercel.
 
 ## Flujo propuesto
 
@@ -44,18 +44,19 @@ el SQL a un Supabase de otros negocios ni a una base externa de Dokploy.
    No necesita credenciales ni devuelve información de pacientes.
 2. Ejecutar también `supabase/preflight/v2_post_apply_read_only.sql` para comprobar
    las 16 migraciones oficiales. Si cualquier fila aparece como BLOCK, investigar.
-3. Verificar la copia de seguridad y confirmar permisos y acceso del equipo.
-   Revisar **Database → Backups** en Supabase y verificar la política del
-   plan: algunos planes no incluyen copias diarias. En caso de no disponer de
-   respaldo reciente, realizar una exportación con herramientas oficiales,
-   mantenerla fuera del repositorio y comprobar la posibilidad de restaurarla.
-   NO basta con que el SQL sea aditivo: el despliegue requiere respaldo real.
-   El SQL aditivo `docs/deploy/sql/plusmedik_dokploy_inbox.staging.sql` es
-   **DRAFT NO APROBADO PARA PRODUCCIÓN**; no ejecutarlo todavía. El SQL incluye una
-   transacción única y falla si detecta una instalación previa (no reemplaza datos).
-4. Una vez revisado formalmente el SQL aditivo y aplicada la versión aprobada,
-   ejecutar `docs/deploy/sql/plusmedik_dokploy_existing_db_postflight.readonly.sql`
-   y confirmar que todas las comprobaciones están en OK.
+3. **Respaldo recomendado antes de cualquier DDL.** Comprobar
+   **Database → Backups**; si no existe, exportar con Supabase CLI.
+   Si el responsable del proyecto decide continuar sin backup, documentar la
+   aceptación del riesgo: el instalador es transaccional, aditivo y no
+   reconstruye datos, pero **no garantiza recuperación** en caso de falla.
+4. Instalar desde el **archivo separado para la base existente**:
+   `docs/deploy/sql/plusmedik_dokploy_inbox.install.sql`.
+   Verificar de nuevo el identificador del proyecto `cvokrtrdzxfchntwwslz`
+   antes de pulsar Run. No ejecutar la variante `staging.sql`.
+   Si falla, detenerse sin reintentar hasta revisar el error.
+   Después ejecutar `docs/deploy/sql/plusmedik_dokploy_existing_db_postflight.readonly.sql`
+   y confirmar todas las comprobaciones en OK.
+
 5. Solo después configurar las variables privadas de Dokploy y realizar pruebas
    sintéticas controladas. **Kapso seguirá apuntando a Vercel** hasta el corte
    autorizado y reversible.
@@ -66,17 +67,20 @@ confundir un resultado sobre otro proyecto con una validación real.
 
 ## Activación segura y variables
 
-El SQL no forma parte del manifiesto oficial de migraciones (16); es exclusivo para pruebas aisladas hasta revisión y promoción formal.
+El instalador operativo `plusmedik_dokploy_inbox.install.sql` es un cambio
+aditivo independiente de las 16 migraciones oficiales; se prueba contra
+PostgreSQL efímero en CI y no altera el manifiesto previo. Se mantiene
+`plusmedik_dokploy_inbox.staging.sql` exclusivamente como referencia experimental.
 
 La fase 1 sigue siendo el comportamiento por defecto:
 `/healthz` = 200 (`webhookReady:false`),
 `/readyz` = 503,
 `/api/kapso/webhook` = 503.
 
-En el **Supabase existente de PlusMedik**, y solo después del preflight sin BLOCK y de confirmar el backup, revisar el SQL experimental
-`docs/deploy/sql/plusmedik_dokploy_inbox.staging.sql`;
-aplicarlo únicamente tras aprobación de permisos, cifrado y backups; nunca ejecutar esta versión DRAFT directamente en producción.
-Todavía no se ha aplicado mediante esta conversación.
+En el **Supabase existente de PlusMedik**, tras ambos preflights sin BLOCK,
+utilizar únicamente `docs/deploy/sql/plusmedik_dokploy_inbox.install.sql`.
+El archivo de staging NO debe instalarse directamente en producción.
+La instalación aún no se ha ejecutado desde esta conversación.
 El repositorio contiene pruebas SQL contra PostgreSQL 16 efímero.
 
 Para habilitar exclusivamente un ensayo sintético en Dokploy **después** de
