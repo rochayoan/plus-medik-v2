@@ -72,10 +72,10 @@ jobs:
           sql = sql.replace(old, old + "\n    insert into public.guard_debug_decisions(run_id,step,slots) values (p_run_id, 'early:'||v_run.send_state,null);")
           anchor = "  if p_guard is null then"
           assert sql.count(anchor) == 1
-          sql = sql.replace(anchor, "  insert into public.guard_debug_decisions(run_id,step,slots) values (p_run_id,'entry:guard_null='||(p_guard is null)::text,null);\\n" + anchor)
+          sql = sql.replace(anchor, "  insert into public.guard_debug_decisions(run_id,step,slots) values (p_run_id,'entry:guard_null='||(p_guard is null)::text,null);\n" + anchor)
           anchor = "  if v_turn_kind = 'IMAGE' or p_kind not in ('conversation', 'technical_issue') then"
           assert sql.count(anchor) == 1
-          sql = sql.replace(anchor, "  insert into public.guard_debug_decisions(run_id,step,slots) values (p_run_id,'kind:'||coalesce(v_turn_kind,'NULL')||':'||coalesce(p_kind,'NULL'),null);\\n" + anchor)
+          sql = sql.replace(anchor, "  insert into public.guard_debug_decisions(run_id,step,slots) values (p_run_id,'kind:'||coalesce(v_turn_kind,'NULL')||':'||coalesce(p_kind,'NULL'),null);\n" + anchor)
           p.write_text(sql)
           PY
       - name: Repeat synthetic concurrent reservations until first failure
