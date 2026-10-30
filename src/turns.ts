@@ -225,7 +225,7 @@ export function producerFor(turn: IncomingTurn, deps: QuoteDeps): TurnProducer |
   const handlers = deps.turns?.handlers;
   const sessions = deps.turns?.quoteSessions;
   // Con sesiones, la foto no se cotiza sola: se agrega a la sesión del contacto (la cotización sale con «listo»). Solo si hay manejador de texto (si no, nadie podría cerrar la sesión).
-  if (turn.kind === "IMAGE") return sessions && handlers?.text ? sessionImageProducer(imageOf(turn), deps, sessions) : imageProducer(imageOf(turn), deps);
+  if (turn.kind === "IMAGE") return sessions && handlers?.text && !deps.turns?.instantPhotoQuotes ? sessionImageProducer(imageOf(turn), deps, sessions) : imageProducer(imageOf(turn), deps);
   const handler = turn.kind === "TEXT" ? handlers?.text : handlers?.other;
   if (!handler) return undefined;
   const conversation = () => conversationProducer(turn, (t, c) => handler.call(handlers, t, c), deps);

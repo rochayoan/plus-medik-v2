@@ -56,6 +56,8 @@ const replyGuardInvalid = replyGuard.enabled && "error" in replyGuard;
 // nadie podría escribir «listo» y las fotos quedarían sin cotización: por eso, sin él, las fotos siguen cotizándose una por una como siempre). Exige la ONCEAVA migración aplicada;
 // sin ella las fotos y los textos de cotización responden con el aviso técnico (falla cerrado). Los estudios y precios son SIEMPRE los de lab_tests al momento de cotizar.
 const quoteSessionsEnabled = on("PLUSMEDIK_QUOTE_SESSIONS") && turnsEnabled && textHandlerEnabled;
+// Piloto opt-in: cada foto entrega SU propia cotización, sin pedir LISTO. No desactiva las cotizaciones por texto ni cambia el ruteo de otros pacientes.
+const instantPhotoQuotesEnabled = on("PLUSMEDIK_INSTANT_PHOTO_QUOTES") && quoteSessionsEnabled && textPilotGate.enabled && textPilotGate.ready;
 // Opt-in: anexar preparaciones clínicas aprobadas a la cotización, sin llamadas al modelo.
 // Exige turnos auditables, respuesta de texto y conocimiento (falla cerrado si falta cualquiera).
 const quotePreparationsEnabled = on("PLUSMEDIK_QUOTE_PREPARATIONS") && turnsEnabled && textHandlerEnabled && knowledgeAnswersEnabled && replyGuard.enabled && !replyGuardInvalid;
@@ -199,7 +201,7 @@ const realDeps: QuoteDeps = {
   requireAuditGuard: humanControlEnabled || turnsEnabled || on("REQUIRE_AUDIT_GUARD"),
   humanControl: humanControlEnabled ? { contactKeyFor } : undefined,
   scopedControl: scopedContactControl ? { contactKeyFor, covers: scopedContactControl.covers } : undefined,
-  turns: turnsEnabled ? { contactKeyFor, replyGuard: replyGuardConfig, attention: attentionConfig,
+  turns: turnsEnabled ? { contactKeyFor, replyGuard: replyGuardConfig, attention: attentionConfig, instantPhotoQuotes: instantPhotoQuotesEnabled,
     crmHandoff: crmOutbox,
     quoteSessions: quoteSessionsEnabled && !replyGuardInvalid
       ? resolveQuoteSessionsConfig({ catalogForText: ttlCache(() => loadActiveCatalog(), 60_000), loopProtection: replyGuard.enabled, attention: attentionConfig ? { gate: attentionConfig.gate, settleMs: attentionConfig.settleMs } : undefined, ownTexts: [...Object.values(DRAFT_TEXTS), ...Object.values(ANSWER_TEXTS), ...Object.values(QUOTE_TEXTS)], isInfoQuestion: knowledgeAnswersEnabled ? (text) => detectTopics(text, studyInfoEnabled).length > 0 : undefined })

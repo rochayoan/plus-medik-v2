@@ -98,7 +98,7 @@ export const formatBs = (amount: number): string => `Bs ${Number.isInteger(amoun
 
 // Recibe SOLO la salida pública: estudios, precios y el subtotal cotizado.
 // AUTO_PARTIAL se comunica al paciente SIN exponer textos dudosos, candidatos ni datos clínicos.
-export function formatQuoteMessage(quote: PublicQuote, options: { partial?: boolean } = {}): string {
+export function formatQuoteMessage(quote: PublicQuote, options: { partial?: boolean; instant?: boolean } = {}): string {
   const lines = quote.studies.map((study) => `${emojiFor(study.name)} ${study.name} — ${formatBs(study.priceBs)}`);
   return [
     "🩺 *PlusMedik* · Cotización de tu receta",
@@ -109,15 +109,16 @@ export function formatQuoteMessage(quote: PublicQuote, options: { partial?: bool
     ...(options.partial ? [
       "",
       "⚠️ *Cotización parcial:* hay estudios o detalles de la receta que no pudimos confirmar. Este importe incluye solo los estudios listados, no necesariamente toda la solicitud.",
-      "Para intentar completar la cotización, envía otra foto completa y más clara de la receta, o consulta directamente al laboratorio por los estudios no incluidos."
+      ...(options.instant ? [] : ["Para intentar completar la cotización, envía otra foto completa y más clara de la receta, o consulta directamente al laboratorio por los estudios no incluidos."])
     ] : []),
     "",
-    "Respóndenos por este chat para continuar. 😊"
+    ...(options.instant ? [] : ["Respóndenos por este chat para continuar. 😊"])
   ].join("\n");
 }
 
 // Sin cotización automática (ningún estudio verificable, documento que no es una solicitud, etc.): se pide una mejor foto. No menciona estudios pendientes.
 export const NO_QUOTE_MESSAGE = "🩺 *PlusMedik*\n\nNo pudimos generar la cotización con esta imagen. ¿Puedes enviarnos una foto más clara de tu receta, completa y bien iluminada? 📸";
+const NO_QUOTE_MESSAGE_INSTANT = "🩺 *PlusMedik*\n\nNo pudimos identificar estudios con suficiente certeza en esta fotografía para generar una cotización. 📋";
 export const TECHNICAL_ISSUE_MESSAGE = "🩺 *PlusMedik*\n\nTuvimos un inconveniente al revisar tu receta. Por favor, intenta enviarla de nuevo en unos minutos. 🙏";
 
 // ───────────────────────────── orquestación (con dependencias inyectables) ─────────────────────────────
@@ -211,6 +212,7 @@ export function buildAnalysisLog(analysis: AnalysisResult): Record<string, unkno
 // común de guarded-turn.ts (claim -> trabajo -> reserva -> comprobación final -> Kapso -> resultado), que es la que garantiza que nunca se responda dos veces.
 export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProducer {
   const who = maskPhone(image.from);
+  const instant = deps.turns?.instantPhotoQuotes === true;
   return async (ctx): Promise<Produced> => {
     let reply: string;
     let result: "quoted" | "no_quote" | "technical_issue";
@@ -231,7 +233,7 @@ export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProduc
       if (!mimeType) {
         deps.log("image_rejected_type", { messageId: image.messageId, phone: who });
         await ctx.persist("image", (audit, runId, lease) => audit.recordIgnored(runId, "IMAGE_TYPE", lease));
-        reply = NO_QUOTE_MESSAGE;
+        reply = instant ? NO_QUOTE_MESSAGE_INSTANT : NO_QUOTE_MESSAGE;
         result = "no_quote";
       } else {
         phase = "CATALOG_LOAD";
@@ -259,7 +261,7 @@ export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProduc
         evidenceAttempted = true;
         await ctx.persist("evidence", (audit, runId, lease) => audit.recordEvidence(runId, { analysis, aiCalls, catalog: catalogFingerprint(catalog) }, lease));
         if (analysis.publicQuote && analysis.outcome !== "HUMAN_REVIEW") {
-          reply = formatQuoteMessage(analysis.publicQuote, { partial: analysis.outcome === "AUTO_PARTIAL" });
+          reply = formatQuoteMessage(analysis.publicQuote, { partial: analysis.outcome === "AUTO_PARTIAL", instant });
           if (deps.quotePreparations) {
             // Solo los estudios realmente MOSTRADOS al paciente (AUTO parcial puede excluir otros).
             const visible = new Set(analysis.publicQuote.studies.map((item) => `${item.name}|${item.priceBs}`));
@@ -274,7 +276,7 @@ export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProduc
           }
           result = "quoted";
         } else {
-          reply = NO_QUOTE_MESSAGE;
+          reply = instant ? NO_QUOTE_MESSAGE_INSTANT : NO_QUOTE_MESSAGE;
           result = "no_quote";
         }
       }

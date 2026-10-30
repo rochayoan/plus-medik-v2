@@ -33,6 +33,9 @@ export interface TurnsConfig {
   // G4.0 (apagado si falta): sesiones de cotización. Las fotos y los estudios escritos se agregan a la sesión del contacto y solo se cotiza cuando el paciente escribe «listo».
   // Exige el manejador de texto (sin él nadie podría escribir «listo»). Con esto ausente el flujo de imágenes es exactamente el de siempre.
   quoteSessions?: QuoteSessionsConfig;
+  // Opt-in para que CADA fotografía se cotice inmediatamente con el motor original, sin entrar a la sesión ni pedir LISTO.
+  // Las listas escritas siguen usando quoteSessions; no cambia el comportamiento de otros contactos.
+  instantPhotoQuotes?: boolean;
   // G4.1: cuánto tiempo después de una cotización entregada se considera «la última cotización» del contacto para responder por sus estudios sin que los nombre (por defecto 24 h).
   studyInfoContextSeconds?: number;
   // G5.0 (apagado si falta): derivación segura de casos al CRM (cola de salida persistente e idempotente). Sin esto la derivación a una persona sigue bloqueada.

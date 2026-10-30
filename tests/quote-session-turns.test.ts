@@ -221,6 +221,63 @@ describe("sin manejador de texto las sesiones NO se usan (nadie podría escribir
   });
 });
 
+describe("fotografía inmediata opt-in: conserva textos y elimina LISTO", () => {
+  const pricedAnalysis = (partial = false) => ({
+    decision: "AUTO_SAFE", outcome: partial ? "AUTO_PARTIAL" : "AUTO_COMPLETE",
+    reasons: [], finalVisualStudies: [], disputes: [], judgeResolved: [], unresolvedDisputes: [],
+    publicQuote: {
+      studies: [
+        { name: "HEMOGRAMA COMPLETO", priceBs: 45 },
+        { name: "GLUCOSA EN AYUNAS", priceBs: 30 }
+      ],
+      totalBs: 75, totalLabel: "Total de los estudios cotizados", tariff: "PACIENTE"
+    },
+    internal: {
+      quoted: { lines: [
+        { id: uuid(1), name: "HEMOGRAMA COMPLETO", priceBs: 45 },
+        { id: uuid(2), name: "GLUCOSA EN AYUNAS", priceBs: 30 }
+      ] },
+      studies: [], pending: [], advisories: [], document: { zones: [] }
+    }
+  } as unknown as AnalysisResult);
+
+  it("cotiza cada foto de inmediato con ambos precios, total, rastro clínico y sin pedir confirmación", async () => {
+    const w = setup({ analysis: pricedAnalysis() });
+    w.deps.turns!.instantPhotoQuotes = true;
+    const appendix = vi.fn(async (body: string) => body + "\n\n🧪 *PREPARACIÓN Y AYUNO*\n• Indicaciones aprobadas.");
+    w.deps.quotePreparations = appendix;
+    const reports = await processTurns([image("instant-1")], w.deps);
+    expect(reports[0]?.result).toBe("quoted");
+    expect(w.sends).toHaveLength(1);
+    expect(w.sends[0]).toContain("HEMOGRAMA COMPLETO — Bs 45");
+    expect(w.sends[0]).toContain("GLUCOSA EN AYUNAS — Bs 30");
+    expect(w.sends[0]).toContain("Bs 75");
+    expect(w.sends[0]).toContain("PREPARACIÓN Y AYUNO");
+    expect(w.sends[0]).not.toMatch(/LISTO|Cuando termines|Puedes enviar|Respóndenos|[?]/i);
+    expect(appendix).toHaveBeenCalledTimes(1);
+    expect(w.audit.quoteBegin).not.toHaveBeenCalled();
+    expect(w.audit.quoteFinish).not.toHaveBeenCalled();
+    expect(w.audit.reserveSend).toHaveBeenCalledWith("run-1", "quoted", LEASE, { stale: "NONE" });
+  });
+
+  it("aunque haya estudios dudosos, muestra solo lo cotizado sin solicitar nada al paciente", async () => {
+    const w = setup({ analysis: pricedAnalysis(true) });
+    w.deps.turns!.instantPhotoQuotes = true;
+    await processTurns([image("partial-1")], w.deps);
+    expect(w.sends[0]).toContain("Cotización parcial");
+    expect(w.sends[0]).toContain("Bs 75");
+    expect(w.sends[0]).not.toMatch(/envía otra foto|consulta directamente|LISTO|Respóndenos|[?]/i);
+    expect(w.audit.quoteBegin).not.toHaveBeenCalled();
+  });
+
+  it("no altera las cotizaciones por estudios ESCRITOS ni las sesiones de texto", async () => {
+    const w = setup();
+    w.deps.turns!.instantPhotoQuotes = true;
+    await processTurns([text("hemograma", "text-after-instant")], w.deps);
+    expect(w.audit.quoteBegin).toHaveBeenCalled();
+  });
+});
+
 describe("G5.9 · texto en modo sesión: cotizar sin «listo», acumular y preguntar", () => {
   const CATALOG2 = [...CATALOG, study(7, "CREATININA SERICA", ["creatinina"], 20), study(8, "CREATININA EN ORINA", ["creatinina"], 22)];
   const itemOf = (seq: number, over: Partial<SessionItem> = {}): SessionItem => ({ id: `i${seq}`, seq, kind: "TEXT", status: "RESOLVED", studyIds: [], ambiguous: [], unresolved: 0, reasons: [], ...over });
