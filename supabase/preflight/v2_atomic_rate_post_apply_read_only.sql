@@ -40,11 +40,21 @@ with checks as (
   select 21, 'Función auxiliar no ejecutable por anon/authenticated/PUBLIC',
     (not has_function_privilege('anon', to_regprocedure('public.plusmedik_guard_rate_decide(jsonb,jsonb,timestamp with time zone,timestamp with time zone,uuid)'), 'EXECUTE')
       and not has_function_privilege('authenticated', to_regprocedure('public.plusmedik_guard_rate_decide(jsonb,jsonb,timestamp with time zone,timestamp with time zone,uuid)'), 'EXECUTE')
-      and not has_function_privilege('PUBLIC', to_regprocedure('public.plusmedik_guard_rate_decide(jsonb,jsonb,timestamp with time zone,timestamp with time zone,uuid)'), 'EXECUTE'))::text,
+      and not exists (
+        select 1 from pg_proc pr
+        cross join lateral aclexplode(coalesce(pr.proacl, acldefault('f', pr.proowner))) acl
+        where pr.oid = to_regprocedure('public.plusmedik_guard_rate_decide(jsonb,jsonb,timestamp with time zone,timestamp with time zone,uuid)')
+          and acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+      ))::text,
     'true', case when
       not has_function_privilege('anon', to_regprocedure('public.plusmedik_guard_rate_decide(jsonb,jsonb,timestamp with time zone,timestamp with time zone,uuid)'), 'EXECUTE')
       and not has_function_privilege('authenticated', to_regprocedure('public.plusmedik_guard_rate_decide(jsonb,jsonb,timestamp with time zone,timestamp with time zone,uuid)'), 'EXECUTE')
-      and not has_function_privilege('PUBLIC', to_regprocedure('public.plusmedik_guard_rate_decide(jsonb,jsonb,timestamp with time zone,timestamp with time zone,uuid)'), 'EXECUTE')
+      and not exists (
+        select 1 from pg_proc pr
+        cross join lateral aclexplode(coalesce(pr.proacl, acldefault('f', pr.proowner))) acl
+        where pr.oid = to_regprocedure('public.plusmedik_guard_rate_decide(jsonb,jsonb,timestamp with time zone,timestamp with time zone,uuid)')
+          and acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+      )
     then 'OK' else 'BLOCK' end
   union all
   select 22, 'Guarda de reservas autorizada solo a service_role',
