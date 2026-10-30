@@ -15,6 +15,7 @@ import { resolveCrmOutbox } from "../../src/crm-outbox/config.js";
 import { createCrmHandoffSink } from "../../src/crm-outbox/handoff-sink.js";
 import { QUOTE_TEXTS } from "../../src/quote-session.js";
 import { appendApprovedQuotePreparations } from "../../src/quote-preparation.js";
+import { appendApprovedQuoteStudyDetails } from "../../src/quote-study-details.js";
 import { createSupabaseStudyFactsStore, StudyFactsService } from "../../src/study-facts/index.js";
 import { resolveQuoteSessionsConfig } from "../../src/quote-session-turns.js";
 import { resolveReplyGuard } from "../../src/reply-guard.js";
@@ -62,6 +63,8 @@ const quotePreparationsEnabled = on("PLUSMEDIK_QUOTE_PREPARATIONS") && turnsEnab
 // Permite consultar el plazo de entrega (en horas o días según el estudio) y el tipo de muestra/requisitos SOLO con datos aprobados y vigentes. Exige la DOCEAVA migración; sin ella
 // o sin datos aprobados el bot dice que no tiene el dato (nunca inventa un plazo). Los estudios salen de la última cotización o del nombre que escriba el paciente.
 const studyInfoEnabled = on("PLUSMEDIK_STUDY_INFO") && turnsEnabled && textHandlerEnabled && knowledgeAnswersEnabled;
+// Opt-in independiente: se añaden muestra, requisitos y tiempos aprobados a la cotización después de anexar la preparación.
+const quoteStudyDetailsEnabled = on("PLUSMEDIK_QUOTE_STUDY_DETAILS") && quotePreparationsEnabled && studyInfoEnabled;
 // Derivación segura de casos al CRM (G5.0, APAGADA por defecto): PLUSMEDIK_CRM_HANDOFF=on solo tiene efecto con PLUSMEDIK_TURNS=on y PLUSMEDIK_TEXT_HANDLER=on y con TODA la configuración
 // (PLUSMEDIK_CRM_REVIEW_URL, PLUSMEDIK_CRM_REVIEW_TOKEN, PLUSMEDIK_OUTBOX_KEY, KAPSO_PHONE_NUMBER_ID). Exige la TRECEAVA migración. Con ella, la derivación a una persona deja de estar
 // bloqueada, pero SOLO se le confirma al paciente cuando el CRM ya registró el caso. Con cualquier configuración incompleta la derivación sigue BLOQUEADA (y se registra un código).
@@ -119,6 +122,12 @@ const quotePreparationReader = () => (quotePreparationKnowledge ??= new Knowledg
   maxStaleMs: 0
 }));
 
+const quoteFactsReader = () => new StudyFactsService({
+  store: createSupabaseStudyFactsStore({ requestTimeoutMs: 3000, retryDelayMs: 200 }),
+  revisionCheckMs: 0,
+  maxStaleMs: 0 // nunca usar una instantánea de datos por estudio cuya vigencia no se haya confirmado
+});
+
 const realDeps: QuoteDeps = {
   async downloadImage(image: IncomingImage) {
     const client = kapsoClient();
@@ -137,17 +146,31 @@ const realDeps: QuoteDeps = {
   analyze: ({ imageBase64, mimeType, catalog }) =>
     analyzeImage({ imageBase64, mimeType, catalog, ...ENGINE_FLAGS }),
   quotePreparations: quotePreparationsEnabled
-    ? (quote, studyIds, catalog, ctx) => appendApprovedQuotePreparations({
-        quote,
-        studyIds,
-        catalog,
-        knowledge: quotePreparationReader(),
-        trace: (refs) => ctx.persist("quote_preparation", async (repo, runId, lease) => {
-          if ((await repo.recordKnowledgeRefs?.(runId, refs, lease)) !== "recorded") {
-            throw new Error("QUOTE_PREPARATION_TRACE_UNAVAILABLE");
-          }
-        })
-      })
+    ? async (quote, studyIds, catalog, ctx) => {
+        const prepared = await appendApprovedQuotePreparations({
+          quote,
+          studyIds,
+          catalog,
+          knowledge: quotePreparationReader(),
+          trace: (refs) => ctx.persist("quote_preparation", async (repo, runId, lease) => {
+            if ((await repo.recordKnowledgeRefs?.(runId, refs, lease)) !== "recorded") {
+              throw new Error("QUOTE_PREPARATION_TRACE_UNAVAILABLE");
+            }
+          })
+        });
+        if (!quoteStudyDetailsEnabled) return prepared;
+        return appendApprovedQuoteStudyDetails({
+          quote: prepared,
+          studyIds,
+          catalog,
+          facts: quoteFactsReader(),
+          trace: (refs) => ctx.persist("quote_study_details", async (repo, runId, lease) => {
+            if ((await repo.recordFactRefs?.(runId, refs, lease)) !== "recorded") {
+              throw new Error("QUOTE_STUDY_DETAILS_TRACE_UNAVAILABLE");
+            }
+          })
+        });
+      }
     : undefined,
   async sendText(to, body) {
     const response = await kapsoClient().messages.sendText({ phoneNumberId: phoneNumberId(), to, body });
