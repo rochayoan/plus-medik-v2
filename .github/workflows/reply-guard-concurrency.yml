@@ -28,9 +28,9 @@ jobs:
         run: npm ci --ignore-scripts
       - name: Baseline concurrency (diagnostic only)
         continue-on-error: true
-        run: npx vitest run tests/reply-guard-db.test.ts tests/reply-guard-e2e.test.ts --maxWorkers=1 --no-file-parallelism
+        run: for i in 1 2 3 4 5 6; do echo "Concurrency iteration $i"; npx vitest run tests/reply-guard-db.test.ts tests/reply-guard-e2e.test.ts -t "concurrencia:" --maxWorkers=1 --no-file-parallelism || exit 1; done
       - name: Reproduce with monotonic reservation timestamps (temporary CI workspace only)
         run: |
           sed -i 's/send_reserved_at = now(),/send_reserved_at = clock_timestamp(),/' supabase/migrations/20261025000000_plusmedik_turns.sql
           grep -q 'send_reserved_at = clock_timestamp(),' supabase/migrations/20261025000000_plusmedik_turns.sql
-          npx vitest run tests/reply-guard-db.test.ts tests/reply-guard-e2e.test.ts --maxWorkers=1 --no-file-parallelism
+          for i in 1 2 3 4 5 6; do echo "Concurrency iteration $i"; npx vitest run tests/reply-guard-db.test.ts tests/reply-guard-e2e.test.ts -t "concurrencia:" --maxWorkers=1 --no-file-parallelism || exit 1; done
