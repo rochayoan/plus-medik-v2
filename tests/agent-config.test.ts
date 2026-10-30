@@ -52,6 +52,15 @@ describe("src/system-prompt.ts real de PlusMedik", () => {
     expect(SYSTEM_PROMPT).not.toMatch(/https?:\/\/|@|\+?\d[\d ]{6,}\d|\b(bs|bob|usd)\b|\$/i);
   });
 
+  it("orienta cotización escrita o por foto sin ceder la cotización al modelo", () => {
+    const rules = SYSTEM_PROMPT.split("REGLAS DE CONVERSACIÓN")[1]?.split("LO QUE HACE EL SISTEMA")[0];
+    expect(rules).toContain("escribir los nombres de sus estudios");
+    expect(rules).toContain("foto clara y completa");
+    expect(rules).toContain("No le exijas una foto");
+    expect(rules).toContain("responde SÍ o escribe LISTO");
+    expect(rules).toContain("el backend puede cotizar sin exigir LISTO");
+    expect(rules).toContain("tú no calculas precios");
+  });
   it("el agente usa ESTE módulo tal cual: el prompt y la huella salen de SYSTEM_PROMPT y BUSINESS_DATA, y la huella cambia con cualquier edición", () => {
     const source = buildPromptSource();
     expect(source).toMatchObject({ origin: "code", problems: [], prompt: SYSTEM_PROMPT });
