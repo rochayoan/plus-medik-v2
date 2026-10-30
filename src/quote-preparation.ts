@@ -67,15 +67,17 @@ export async function appendApprovedQuotePreparations(input: QuotePreparationInp
   }
   if (groups.size === 0 || refs.length === 0) return input.quote;
 
-  const sections = [...groups.entries()].map(([instructions, names]) =>
-    `*${names.join(" / ")}*\n${instructions}`
-  );
+  const sections = [...groups.entries()].map(([instructions, names]) => {
+    // Solo cambia la presentación de las instrucciones aprobadas; no su contenido.
+    const bullets = instructions.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => `• ${line}`).join("\n");
+    return `* ${names.join(" / ")}*\n${bullets}`;
+  });
   const section = [
-    "🧪 *Preparación para tus estudios*",
+    "🧪 *PREPARACIÓN Y AYUNO*",
     "",
     sections.join("\n\n"),
-    ...(missing > 0 ? ["", "Para otros estudios de esta cotización, la preparación aún no está confirmada por este canal."] : []),
-    ...(groups.size > 1 ? ["", "Las indicaciones son individuales. Para combinarlas, consulta al laboratorio."] : [])
+    ...(missing > 0 ? ["", "ℹ️ Algunos estudios de esta cotización aún no tienen indicaciones de preparación confirmadas por este canal."] : []),
+    ...(groups.size > 1 ? ["", "📌 Las indicaciones son individuales. Si necesitas combinarlas, consulta al laboratorio."] : [])
   ].join("\n");
 
   const hasFooter = input.quote.endsWith(FOOTER);
