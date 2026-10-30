@@ -6,6 +6,7 @@ on:
       - "server/**"
       - "tests/dokploy-router.test.ts"
       - "tests/dokploy-inbox.test.ts"
+      - "tests/dokploy-local-inbox.test.ts"
       - "docs/deploy/sql/plusmedik_dokploy_inbox.staging.sql"
       - "docs/deploy/sql/plusmedik_dokploy_inbox.install.sql"
       - "docs/deploy/sql/plusmedik_dokploy_existing_db_preflight.readonly.sql"
@@ -39,7 +40,7 @@ jobs:
       - name: Build Dokploy Node server
         run: npm run build:dokploy
       - name: Check closed webhook and health endpoints
-        run: npx vitest run tests/dokploy-router.test.ts tests/dokploy-inbox.test.ts
+        run: npx vitest run tests/dokploy-router.test.ts tests/dokploy-inbox.test.ts tests/dokploy-local-inbox.test.ts
       - name: Validate inbox SQL against isolated PostgreSQL 16
         run: |
           docker run --rm -d --name plusmedik-inbox-pg -e POSTGRES_PASSWORD=local-only -p 127.0.0.1:54339:5432 postgres:16-alpine
