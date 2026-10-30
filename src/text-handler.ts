@@ -71,9 +71,9 @@ export interface ConversationTexts {
 // BORRADORES pendientes de aprobación del laboratorio. Sin cifras, moneda, plazos ni horarios; solo uno promete a una persona (handoff_confirmed) y solo se usa con
 // la derivación persistida.
 export const DRAFT_TEXTS: ConversationTexts = {
-  greeting: "¡Hola! 👋 Soy la recepcionista virtual de PlusMedik. ¿En qué puedo ayudarte? Puedes escribir tus estudios o enviarme una foto de tu receta para cotizar."
-  send_recipe: "Con gusto te ayudo a cotizar. Puedes escribir los nombres de tus estudios o enviar una foto clara y completa de tu receta."
-  fallback: "Con gusto te oriento. ¿Sobre qué te gustaría saber más? También puedes escribir tus estudios o enviar una foto de tu receta para cotizar."
+  greeting: "¡Hola! 👋 Soy la recepcionista virtual de PlusMedik. ¿En qué puedo ayudarte? Puedes escribir tus estudios o enviarme una foto de tu receta para cotizar.",
+  send_recipe: "Con gusto te ayudo a cotizar. Puedes escribir los nombres de tus estudios o enviar una foto clara y completa de tu receta.",
+  fallback: "Con gusto te oriento. ¿Sobre qué te gustaría saber más? También puedes escribir tus estudios o enviar una foto de tu receta para cotizar.",
   handoff_confirmed: "Recibimos tu solicitud. Una persona del equipo la revisará y te escribirá por este chat.",
   handoff_unavailable: "Recibimos tu mensaje, pero por ahora no puedo derivarlo a una persona desde este chat. Si quieres una cotización, envíame una foto clara y completa de tu receta.",
   medical_unavailable: "Recibimos tu mensaje. No puedo darte orientación médica por este chat. Si es una urgencia, comunícate con los servicios de emergencia de tu localidad.",
