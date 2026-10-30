@@ -1,0 +1,30 @@
+name: Business App auto-pause checks
+
+on:
+  pull_request:
+    paths:
+      - "src/human-control.ts"
+      - "src/kapso-webhook.ts"
+      - "api/kapso/webhook.ts"
+      - "supabase/pending-migrations/*human_idle_resume.sql"
+      - "tests/business-app-auto-pause*.test.ts"
+      - ".github/workflows/business-app-pause.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  auto-pause:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Typecheck
+        run: npm run typecheck
+      - name: WhatsApp Business pause and PostgreSQL expiry tests
+        run: npx vitest run tests/business-app-auto-pause.test.ts tests/business-app-auto-pause-db.test.ts tests/human-control.test.ts tests/text-pilot-routing.test.ts --maxWorkers=1 --no-file-parallelism
