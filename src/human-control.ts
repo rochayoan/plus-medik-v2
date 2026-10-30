@@ -120,6 +120,9 @@ export interface AttentionRepository {
   recordEvent(event: { eventKey: string; contactKey?: string; kind: "UNKNOWN_ORIGIN" | "OTHER_APP_OUTBOUND" | "META_AGENT_OUTBOUND"; occurredAt?: string; detail?: Record<string, string> }): Promise<"RECORDED" | "DUPLICATE">;
   // Reactivación explícita (uso futuro desde un panel). Los eventos humanos anteriores a este momento ya no vuelven a pausar.
   resume(contactKey: string, reason: string, actor: string): Promise<"RESUMED" | "ALREADY_ACTIVE">;
+  // Reanudación transaccional tras 10 minutos sin intervención desde WhatsApp Business.
+  // Opcional para conservar compatibilidad con dobles de prueba existentes.
+  resumeIfIdle?(contactKey: string): Promise<"RESUMED" | "NOT_DUE" | "ALREADY_ACTIVE" | "MANUAL_PAUSED">;
 }
 
 export const HUMAN_PAUSE_REASON = "HUMAN_WHATSAPP_BUSINESS_APP";
@@ -156,6 +159,12 @@ export function createAttentionRepository(options: SupabaseRpcOptions = {}): Att
         p_detail: event.detail ?? {}
       });
       return result.outcome === "RECORDED" ? "RECORDED" : "DUPLICATE";
+    },
+    async resumeIfIdle(contactKey) {
+      const result = await rpc("plusmedik_attention_resume_if_idle", { p_contact_key: contactKey });
+      const outcome = result?.outcome;
+      if (outcome !== "RESUMED" && outcome !== "NOT_DUE" && outcome !== "ALREADY_ACTIVE" && outcome !== "MANUAL_PAUSED") throw new AuditWriteError("REJECTED");
+      return outcome;
     },
     async resume(contactKey, reason, actor) {
       const result = await rpc("plusmedik_attention_resume", { p_contact_key: contactKey, p_reason: reason, p_actor: actor });

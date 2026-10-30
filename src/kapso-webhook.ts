@@ -34,6 +34,9 @@ export interface KapsoWebhookDeps {
     labPhoneNumberId: string | undefined;
     contactKeyFor(phone: string): string | undefined;
     attention: AttentionRepository;
+    // Solo intervenciones desde WhatsApp Business hacia contactos piloto.
+    covers?(phone: string): boolean;
+    resumeIdleOnInbound?: boolean;
   };
   log(event: string, data: Record<string, unknown>): void;
 }
@@ -78,6 +81,10 @@ export async function handleKapsoWebhook(request: Request, deps: KapsoWebhookDep
         deps.log("human_event_ignored", { reason: "phone_not_allowed" });
         continue;
       }
+      if (control.covers && (!event.contactPhone || !control.covers(event.contactPhone))) {
+        if (event.kind === "HUMAN_BUSINESS_APP") deps.log("human_event_ignored", { reason: "outside_pilot_scope" });
+        continue;
+      }
       if (!(await registerControlEvent(event, idempotencyKey, control, deps))) humanFailed = true;
     }
   }
@@ -105,7 +112,28 @@ export async function handleKapsoWebhook(request: Request, deps: KapsoWebhookDep
       .filter((image) => isAllowedPhone(image.from, deps.allowedPhones) && !isAllowedPhone(image.from, pilotScope));
     const hasPilot = hasProcessableTurns(pilotTurns, deps.quote);
     if (!hasPilot && otherImages.length === 0) return text(200, "ignored");
-    if (hasPilot) deps.schedule(processTurns(pilotTurns, deps.quote));
+    if (hasPilot) deps.schedule((async () => {
+      // Antes de crear cualquier turno, comprobar si la pausa de Business App
+      // venció. La RPC serializa por contacto con el nuevo mensaje de la asesora.
+      // Ante error, se falla cerrado sin responder (no se ignora una pausa válida).
+      if (control?.resumeIdleOnInbound) {
+        for (const phone of new Set(pilotTurns.map((turn) => turn.from))) {
+          const key = control.contactKeyFor(phone);
+          if (!key || !control.attention.resumeIfIdle) {
+            deps.log("human_idle_resume_failed", { reason: "unavailable" });
+            return;
+          }
+          try {
+            const outcome = await control.attention.resumeIfIdle(key);
+            deps.log("human_idle_resume_checked", { outcome, phone: maskPhone(phone) });
+          } catch (error) {
+            deps.log("human_idle_resume_failed", { reason: error instanceof AuditWriteError ? error.kind : "unavailable", phone: maskPhone(phone) });
+            return;
+          }
+        }
+      }
+      await processTurns(pilotTurns, deps.quote);
+    })());
     if (otherImages.length > 0) {
       const legacy = deps.legacyQuote ?? { ...deps.quote, turns: undefined };
       deps.schedule(Promise.all(otherImages.map((image) => handleImageMessage(image, legacy))));
