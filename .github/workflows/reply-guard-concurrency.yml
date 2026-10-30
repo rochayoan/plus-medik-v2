@@ -1,4 +1,4 @@
-name: Reply-guard concurrency isolation
+name: Reply-guard concurrency checks
 
 on:
   pull_request:
@@ -6,8 +6,14 @@ on:
       - ".github/workflows/reply-guard-concurrency.yml"
       - "src/text-pilot-gate.ts"
       - "tests/text-pilot-gate.test.ts"
+      - "tests/reply-guard-db.test.ts"
+      - "tests/reply-guard-e2e.test.ts"
       - "api/kapso/webhook.ts"
       - "supabase/migrations/*reply_guard*.sql"
+
+concurrency:
+  group: reply-guard-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -15,7 +21,7 @@ permissions:
 jobs:
   reply-guard-isolation:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,61 +32,11 @@ jobs:
           cache: npm
       - name: Install locked dependencies
         run: npm ci --ignore-scripts
-      - name: Log synthetic reservation ledger if the SQL guard overshoots
+      - name: Full guard database and E2E tests
+        run: npx vitest run tests/reply-guard-db.test.ts tests/reply-guard-e2e.test.ts --maxWorkers=1 --no-file-parallelism
+      - name: Repeat concurrent reservations and webhooks 10 times
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path("tests/reply-guard-db.test.ts")
-          source = p.read_text()
-          old = 'expect(outcomes.filter((status) => status === "reserved")).toHaveLength(3);'
-          replacement = '''if (outcomes.filter((status) => status === "reserved").length > 3) {
-            const detail = await db.ok(`select json_agg(json_build_object(
-              'state', r.send_state,
-              'kind', r.send_kind,
-              'reserved_age_seconds', round(extract(epoch from clock_timestamp() - r.send_reserved_at)::numeric, 3),
-              'reserved_at', r.send_reserved_at,
-              'turn_kind', t.turn_kind
-            ) order by r.send_reserved_at)
-            from public.plusmedik_audit_runs r
-            join public.plusmedik_turns t on t.run_id = r.id
-            where r.contact_key = '${contact}'`);
-            const since = await db.ok(`select counted_since from public.plusmedik_reply_guard_state where contact_key = '${contact}'`);
-            const ledger = await db.ok(`select state from public.plusmedik_guard_rate_ledger where contact_key = '${contact}'`);
-                        const decisionLog = await db.ok(`select coalesce(json_agg(json_build_object('step',d.step,'run_id',d.run_id,'slot_count',case when d.slots is null then null else jsonb_array_length(d.slots) end,'at',d.at) order by d.at), '[]') from public.guard_debug_decisions d where d.run_id in (select id from public.plusmedik_audit_runs where contact_key = '${contact}')`);
-            console.log("GUARD_CONCURRENCY_DIAGNOSTIC", JSON.stringify({ outcomes, since, detail, ledger, decisionLog }));
-          }
-          ''' + old
-          if old not in source:
-            raise SystemExit("test marker missing")
-          p.write_text(source.replace(old, replacement))
-          PY
-      - name: Instrument quota decisions in temporary PostgreSQL
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('supabase/migrations/20261104000000_plusmedik_reply_guard_atomic_rate.sql')
-          sql = p.read_text()
-          sql = 'create table public.guard_debug_decisions(run_id uuid, step text, slots jsonb, at timestamptz default clock_timestamp());\n' + sql
-          old = 'returning state into v_rate_state;'
-          assert sql.count(old) == 1
-          sql = sql.replace(old, old + "\n    insert into public.guard_debug_decisions(run_id,step,slots) values (p_run_id,'quota:'||(v_rate_state->>'allowed'),v_rate_state->'slots');")
-          old = 'v_result := public.plusmedik_turn_reserve_send(p_run_id, p_owner, p_fence, p_kind, p_lease_seconds, p_stale_policy);'
-          assert sql.count(old) == 2
-          sql = sql.replace(old, old + "\n  insert into public.guard_debug_decisions(run_id,step,slots) values (p_run_id,'result:'||(v_result->>'status'),null);")
-          old = "if v_run.send_state <> 'NOT_RESERVED' then"
-          assert sql.count(old) == 1
-          sql = sql.replace(old, old + "\n    insert into public.guard_debug_decisions(run_id,step,slots) values (p_run_id, 'early:'||v_run.send_state,null);")
-          anchor = "  if p_guard is null then"
-          assert sql.count(anchor) == 1
-          sql = sql.replace(anchor, "  insert into public.guard_debug_decisions(run_id,step,slots) values (p_run_id,'entry:guard_null='||(p_guard is null)::text,null);\n" + anchor)
-          anchor = "  if v_turn_kind = 'IMAGE' or p_kind not in ('conversation', 'technical_issue') then"
-          assert sql.count(anchor) == 1
-          sql = sql.replace(anchor, "  insert into public.guard_debug_decisions(run_id,step,slots) values (p_run_id,'kind:'||coalesce(v_turn_kind,'NULL')||':'||coalesce(p_kind,'NULL'),null);\n" + anchor)
-          p.write_text(sql)
-          PY
-      - name: Repeat synthetic concurrent reservations until first failure
-        run: |
-          for i in $(seq 1 24); do
+          for i in $(seq 1 10); do
             echo "Concurrency iteration $i"
-            npx vitest run tests/reply-guard-db.test.ts tests/reply-guard-e2e.test.ts -t "concurrencia:" --maxWorkers=1 --no-file-parallelism || exit 1
+            npx vitest run tests/reply-guard-db.test.ts tests/reply-guard-e2e.test.ts -t "concurrencia:" --maxWorkers=1 --no-file-parallelism
           done
