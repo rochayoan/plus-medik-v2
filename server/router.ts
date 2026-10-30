@@ -1,3 +1,4 @@
+import { enqueueWebhook, InboxRepository, resolveInboxConfig } from "./inbox.js";
 // Dokploy phase 1: HTTP adapter for existing pure Request/Response handlers.
 // Deliberately fail closed for the Kapso webhook until durable ACK-before-work
 // scheduling is implemented and tested. Never send real Kapso traffic here.
@@ -26,13 +27,16 @@ export async function routeDokployRequest(request: Request): Promise<Response> {
     return json(200, { ok: true, service: "plusmedik-dokploy", webhookReady: false });
   }
   if (path === "/readyz" && (request.method === "GET" || request.method === "HEAD")) {
-    return json(503, { ok: false, reason: "DURABLE_WEBHOOK_QUEUE_NOT_IMPLEMENTED" });
+    const config = resolveInboxConfig(process.env);
+    if (!config || !(await new InboxRepository(config).ready())) {
+      return json(503, { ok: false, reason: "DURABLE_WEBHOOK_QUEUE_NOT_IMPLEMENTED" });
+    }
+    return json(200, { ok: true, service: "plusmedik-dokploy", webhookReady: true });
   }
   if (path === "/api/kapso/webhook") {
-    // The Vercel endpoint acknowledges immediately and relies on waitUntil().
-    // A Node process cannot safely emulate that across process crashes/redeploys.
-    // Do NOT delegate GET or POST until a durable inbox/worker is implemented.
-    return json(503, { ok: false, reason: "DURABLE_WEBHOOK_QUEUE_NOT_IMPLEMENTED" });
+    const config = resolveInboxConfig(process.env);
+    if (!config) return json(503, { ok: false, reason: "DURABLE_WEBHOOK_QUEUE_NOT_IMPLEMENTED" });
+    return enqueueWebhook(request, config);
   }
 
   const loader = routes[path];
