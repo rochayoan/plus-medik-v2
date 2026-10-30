@@ -66,7 +66,8 @@ describe("el agente en ejecución no puede aprobar su propio conocimiento", () =
 describe("G3.1A: dónde puede aparecer el conocimiento y que sigue apagado", () => {
   it("solo el manejador de texto, la capa de respuestas, el productor de turnos (rastro), la auditoría (rastro) y el cableado de Vercel lo mencionan; el resto del webhook y del motor no", () => {
     // G4.2: el apéndice de cotización lee conocimiento clínico aprobado, pero no conoce su administración.
-    const allowed = new Set(["src/text-handler.ts", "src/knowledge-answers.ts", "src/quote-preparation.ts", "src/turns.ts", "src/audit.ts", "api/kapso/webhook.ts"]);
+    // API web de médicos: lee solo la preparación aprobada y vigente (misma lectura que el apéndice de WhatsApp); no conoce la administración.
+    const allowed = new Set(["src/text-handler.ts", "src/knowledge-answers.ts", "src/quote-preparation.ts", "src/turns.ts", "src/audit.ts", "api/kapso/webhook.ts", "src/web-quote.ts", "src/web-quote-runtime.ts"]);
     for (const path of [...outsideKnowledge, ...apiFiles]) {
       // G4.1: el módulo de datos por estudio reutiliza tipos y reglas del conocimiento (y lo dice); su propia frontera se prueba en study-facts-boundaries.test.ts
       if (allowed.has(rel(path)) || rel(path).startsWith("src/study-facts/")) continue;
