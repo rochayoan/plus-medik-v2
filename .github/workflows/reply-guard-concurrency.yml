@@ -26,5 +26,11 @@ jobs:
           cache: npm
       - name: Install locked dependencies
         run: npm ci --ignore-scripts
-      - name: Reply-guard concurrency (isolated)
+      - name: Baseline concurrency (diagnostic only)
+        continue-on-error: true
         run: npx vitest run tests/reply-guard-db.test.ts tests/reply-guard-e2e.test.ts --maxWorkers=1 --no-file-parallelism
+      - name: Reproduce with monotonic reservation timestamps (temporary CI workspace only)
+        run: |
+          sed -i 's/send_reserved_at = now(),/send_reserved_at = clock_timestamp(),/' supabase/migrations/20261025000000_plusmedik_turns.sql
+          grep -q 'send_reserved_at = clock_timestamp(),' supabase/migrations/20261025000000_plusmedik_turns.sql
+          npx vitest run tests/reply-guard-db.test.ts tests/reply-guard-e2e.test.ts --maxWorkers=1 --no-file-parallelism
