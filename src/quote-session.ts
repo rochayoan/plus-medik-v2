@@ -448,7 +448,7 @@ export const QUOTE_TEXTS: QuoteTexts = {
   repeated_note: "Si repetiste algún estudio, lo conté una sola vez.",
   unreadable_image: "No pude leer esa imagen. Envíala de nuevo como foto, clara y completa.",
   identified_so_far: "Estudios anotados:",
-  confirm_done: "¿Eso es todo? Responde SÍ y te paso la cotización, o envíame los estudios que falten.",
+  confirm_done: "Tengo anotados tus estudios. ¿Deseas agregar alguno más? Si ya terminaste, responde SÍ o escribe LISTO para conocer el total.",
   ask_option_intro: "Para uno de los estudios tengo varias opciones:",
   ask_option_outro: "Responde con el número o escribe el nombre exacto del estudio.",
   ask_unresolved: "No pude identificar con certeza algunos estudios. Escribe el nombre exacto de cada uno o envía una foto de tu receta. Si no los encuentras, escribe LISTO y dejaré tu solicitud en revisión.",

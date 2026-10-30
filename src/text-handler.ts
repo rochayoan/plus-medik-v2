@@ -71,11 +71,11 @@ export interface ConversationTexts {
 // BORRADORES pendientes de aprobación del laboratorio. Sin cifras, moneda, plazos ni horarios; solo uno promete a una persona (handoff_confirmed) y solo se usa con
 // la derivación persistida.
 export const DRAFT_TEXTS: ConversationTexts = {
-  greeting: "Hola 👋 Soy el asistente de PlusMedik. Para cotizar tus estudios, envíame una foto clara y completa de tu receta.",
-  send_recipe: "Para cotizar tus estudios, envíame una foto clara y completa de tu receta.",
-  fallback: "Recibimos tu mensaje. Por este medio puedo cotizar recetas: envíame una foto clara y completa de tu receta.",
+  greeting: "Hola 👋 Soy el asistente de PlusMedik. Puedo ayudarte a cotizar tus estudios. Escríbeme los nombres de los análisis que necesitas o envíame una foto clara de tu receta.",
+  send_recipe: "Claro. Puedes escribir los nombres de los estudios o enviarme una fotografía completa de tu receta.",
+  fallback: "Recibimos tu mensaje. Para cotizar tus estudios, escribe los nombres de los análisis o envía una foto clara y completa de tu receta.",
   handoff_confirmed: "Recibimos tu solicitud. Una persona del equipo la revisará y te escribirá por este chat.",
-  handoff_unavailable: "Recibimos tu mensaje, pero por ahora no puedo derivarlo a una persona desde este chat. Si quieres una cotización, envíame una foto clara y completa de tu receta.",
+  handoff_unavailable: "Recibimos tu mensaje, pero por ahora no puedo derivarlo a una persona desde este chat. Si quieres cotizar, escribe los nombres de los estudios o envía una foto clara y completa de tu receta.",
   medical_unavailable: "Recibimos tu mensaje. No puedo darte orientación médica por este chat. Si es una urgencia, comunícate con los servicios de emergencia de tu localidad.",
   medical_handoff_confirmed: "Recibimos tu mensaje. No puedo darte orientación médica por este chat. Si es una urgencia, comunícate con los servicios de emergencia de tu localidad. Una persona del equipo revisará tu mensaje y te escribirá por este chat."
 };

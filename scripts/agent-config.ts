@@ -42,7 +42,7 @@ export function dateProblems(sections: readonly DataSection[], now: Date): { exp
 const PURPOSE: Record<string, Record<string, string>> = {
   "Conversación (src/text-handler.ts)": {
     greeting: "Saludo cuando el paciente solo saluda.",
-    send_recipe: "Pide la foto de la receta cuando el mensaje es un pedido de cotización sin foto.",
+    send_recipe: "Indica que puede escribir estudios o enviar la receta cuando pide cotizar sin estudios identificables.",
     fallback: "Mensaje que no se entiende ni se puede derivar.",
     handoff_confirmed: "Confirma la derivación a una persona. SOLO se envía con el caso ya registrado en el CRM.",
     handoff_unavailable: "Se envía cuando la derivación no se pudo registrar: no promete a una persona.",
