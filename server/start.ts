@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { routeDokployRequest } from "./router.js";
-import { InboxRepository, resolveInboxConfig } from "./inbox.js";
+import { resolveInboxConfig } from "./inbox.js";
+import { createInboxStorage } from "./inbox-storage.js";
 import { startInboxWorker } from "./worker.js";
 
 const DEFAULT_PORT = 3000;
@@ -67,7 +68,7 @@ const port = Number(portRaw);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid PORT");
 const inboxConfig = resolveInboxConfig(process.env);
 const worker = inboxConfig ? startInboxWorker(
-  new InboxRepository(inboxConfig),
+  createInboxStorage(inboxConfig),
   inboxConfig,
   async (req, schedule) => {
     const api = await import("../api/kapso/webhook.js");
