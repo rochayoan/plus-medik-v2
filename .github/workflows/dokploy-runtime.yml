@@ -1,0 +1,44 @@
+name: Dokploy runtime checks
+
+on:
+  pull_request:
+    paths:
+      - "server/**"
+      - "tests/dokploy-router.test.ts"
+      - "Dockerfile.dokploy"
+      - ".dockerignore"
+      - "tsconfig.dokploy.json"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/dokploy-runtime.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  dokploy-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install pinned dependencies
+        run: npm ci --ignore-scripts
+      - name: Typecheck all current code
+        run: npm run typecheck
+      - name: Build Dokploy Node server
+        run: npm run build:dokploy
+      - name: Check closed webhook and health endpoints
+        run: npx vitest run tests/dokploy-router.test.ts
+      - name: Build Docker runtime
+        run: docker build -f Dockerfile.dokploy -t plusmedik-dokploy:ci .
+      - name: Docker smoke test (no patient traffic)
+        run: |
+          docker run --rm -d --name plusmedik-dokploy-ci -p 127.0.0.1:37891:3000 plusmedik-dokploy:ci
+          trap 'docker rm -f plusmedik-dokploy-ci || true' EXIT
+          sleep 3
+          node -e "fetch('http://127.0.0.1:37891/healthz').then(async r=>{const j=await r.json();if(r.status!==200||j.webhookReady!==false)process.exit(1)}).catch(()=>process.exit(1))"
+          node -e "fetch('http://127.0.0.1:37891/api/kapso/webhook',{method:'POST',body:'{}'}).then(r=>{if(r.status!==503)process.exit(1)}).catch(()=>process.exit(1))"
