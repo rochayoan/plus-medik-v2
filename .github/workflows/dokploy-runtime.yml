@@ -6,7 +6,7 @@ on:
       - "server/**"
       - "tests/dokploy-router.test.ts"
       - "tests/dokploy-inbox.test.ts"
-      - "supabase/migrations/20261105000000_plusmedik_dokploy_inbox.sql"
+      - "docs/deploy/sql/plusmedik_dokploy_inbox.staging.sql"
       - "api/kapso/webhook.ts"
       - "Dockerfile.dokploy"
       - ".dockerignore"
@@ -50,7 +50,7 @@ jobs:
             sleep 1
           done
           docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "create role anon; create role authenticated; create role service_role bypassrls;"
-          docker exec -i plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres < supabase/migrations/20261105000000_plusmedik_dokploy_inbox.sql
+          docker exec -i plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres < docs/deploy/sql/plusmedik_dokploy_inbox.staging.sql
           docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "set role service_role; select public.plusmedik_dokploy_health();"
           docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "set role service_role; select public.plusmedik_dokploy_enqueue(repeat('a',64),'AAAAAAAA','BBBBBBBB','CCCCCCCC');"
           docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "set role service_role; select * from public.plusmedik_dokploy_claim('00000000-0000-4000-8000-000000000001');"
