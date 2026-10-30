@@ -52,17 +52,6 @@ jobs:
             raise SystemExit("test marker missing")
           p.write_text(source.replace(old, replacement))
           PY
-      - name: Temporarily refresh guard row under lock (diagnostic, runner only)
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path("supabase/migrations/20261029000000_plusmedik_reply_guard.sql")
-          sql = p.read_text()
-          old = "select * into v_state from public.plusmedik_reply_guard_state where contact_key = v_contact;"
-          assert sql.count(old) == 1, sql.count(old)
-          new = "update public.plusmedik_reply_guard_state set updated_at = clock_timestamp() where contact_key = v_contact;\n  " + old
-          p.write_text(sql.replace(old, new))
-          PY
       - name: Repeat synthetic concurrent reservations until first failure
         run: |
           for i in $(seq 1 24); do
