@@ -50,6 +50,8 @@ describe("detalle aprobado de la cotización: muestra, requisitos y entrega", ()
     const body = await appendApprovedQuoteStudyDetails(input);
     expect(body).toContain("Glucosa — Bs 25");
     expect(body).toContain("💰 Total: Bs 25");
+    expect(body).toContain("📋 *MUESTRAS, REQUISITOS Y ENTREGA*");
+    expect(body).toContain("▫️ *Glucosa*\n• Tipo de muestra:");
     expect(body).toContain("Tipo de muestra: Sangre venosa");
     expect(body).toContain("Seguir las indicaciones del laboratorio");
     expect(body).toContain("Tiempo de entrega: hasta 24 horas");
