@@ -20,7 +20,7 @@ import { createSupabaseStudyFactsStore, StudyFactsService } from "../../src/stud
 import { resolveQuoteSessionsConfig } from "../../src/quote-session-turns.js";
 import { resolveReplyGuard } from "../../src/reply-guard.js";
 import { BLOCKED_HANDOFF, createTextHandler, DRAFT_TEXTS } from "../../src/text-handler.js";
-import type { IncomingImage, QuoteDeps } from "../../src/whatsapp-quote.js";
+import { isAllowedPhone, type IncomingImage, type QuoteDeps } from "../../src/whatsapp-quote.js";
 
 // POST /api/kapso/webhook: recibe imágenes de WhatsApp (Kapso), las procesa con el motor de PlusMedik y responde con la cotización.
 // Variables: WEBHOOK_SECRET, KAPSO_API_KEY, KAPSO_PHONE_NUMBER_ID, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY (+ opcional ALLOWED_PHONES).
@@ -38,6 +38,11 @@ if (textPilotGate.enabled && !textPilotGate.ready) {
   console.log(JSON.stringify({ app: "plusmedik", event: "text_pilot_config_invalid", reason: textPilotGate.reason }));
 }
 const turnsEnabled = on("PLUSMEDIK_TURNS") && textPilotGate.ready;
+// Solo para los pilotos conversacionales existentes. El CRM conserva su alcance.
+const autoHumanPilot = !humanControlEnabled && textPilotGate.enabled && textPilotGate.ready && turnsEnabled;
+const autoHumanPilotScope = textPilotGate.enabled && textPilotGate.ready
+  ? [textPilotGate.pilotPhone, ...(textPilotGate.extraPhones ?? [])].join(",")
+  : "";
 // Manejador de texto (G2.1, APAGADO por defecto): PLUSMEDIK_TEXT_HANDLER=on solo tiene efecto con PLUSMEDIK_TURNS=on. Responde con textos fijos BORRADOR (pendientes de
 // aprobación del laboratorio) sin cifras, horarios ni datos médicos. La derivación a una persona permanece BLOQUEADA (BLOCKED_HANDOFF) salvo que la cola hacia el CRM (G5.0, abajo)
 // esté habilitada Y completamente configurada; mientras tanto nunca se le dice al paciente que una persona lo atenderá.
@@ -227,7 +232,8 @@ const attentionProxy: AttentionRepository = {
   status: (...args) => attention().status(...args),
   registerHumanMessage: (...args) => attention().registerHumanMessage(...args),
   recordEvent: (...args) => attention().recordEvent(...args),
-  resume: (...args) => attention().resume(...args)
+  resume: (...args) => attention().resume(...args),
+  resumeIfIdle: (...args) => attention().resumeIfIdle!(...args)
 };
 
 export async function POST(request: Request): Promise<Response> {
@@ -241,7 +247,12 @@ export async function POST(request: Request): Promise<Response> {
       ? { ...realDeps, turns: undefined, requireAuditGuard: humanControlEnabled || on("REQUIRE_AUDIT_GUARD") }
       : undefined,
     schedule: (task) => waitUntil(task),
-    humanControl: humanControlEnabled ? { labPhoneNumberId: process.env.KAPSO_PHONE_NUMBER_ID, contactKeyFor, attention: attentionProxy } : undefined,
+    humanControl: humanControlEnabled
+    ? { labPhoneNumberId: process.env.KAPSO_PHONE_NUMBER_ID, contactKeyFor, attention: attentionProxy }
+    : autoHumanPilot
+      ? { labPhoneNumberId: process.env.KAPSO_PHONE_NUMBER_ID, contactKeyFor, attention: attentionProxy,
+          covers: (phone: string) => isAllowedPhone(phone, autoHumanPilotScope), resumeIdleOnInbound: true }
+      : undefined,
     log: realDeps.log
   });
 }
