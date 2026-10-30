@@ -41,7 +41,7 @@ describe.skipIf(!bin)("guarda de respuestas contra PostgreSQL real (migración 1
   it("postflight de migración 16: SELECT real en PostgreSQL y BLOCK=0", async () => {
     const file = readFileSync(join(__dirname, "..", "supabase", "preflight", "v2_atomic_rate_post_apply_read_only.sql"), "utf8");
     const output = await db.ok(file);
-    const lines = output.trim().split("\\n").filter(Boolean);
+    const lines = output.trim().split("\n").filter(Boolean);
     const verdict = lines.find((line) => line.startsWith("0|VEREDICTO|"));
     expect(verdict).toContain("|OK|BLOCK=0|INFO");
     const rows = lines.filter((line) => !line.startsWith("0|"));
