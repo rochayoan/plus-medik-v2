@@ -19,9 +19,10 @@ export interface KapsoWebhookDeps {
   secret: string | undefined;
   allowedPhones: string | undefined;
   quote: QuoteDeps;
-  // Con piloto acotado: número que usa TURNOS + texto; todos los demás contactos
-  // conservan la ruta de fotografías. Nunca se loguea el valor.
+  // Piloto original para TURNOS + texto. Los contactos adicionales se autorizan
+  // por separado; todos los demás conservan la ruta de imágenes.
   textPilotPhone?: string;
+  textPilotExtraPhones?: readonly string[];
   // Configuración anterior para fotografías de contactos fuera del piloto.
   // Mantiene requireAuditGuard sin depender del flag global de turnos.
   legacyQuote?: QuoteDeps;
@@ -94,12 +95,14 @@ export async function handleKapsoWebhook(request: Request, deps: KapsoWebhookDep
       return text(200, "ok");
     }
 
+    const pilotScope = [deps.textPilotPhone, ...(deps.textPilotExtraPhones ?? [])].join(",");
+
     // Separar por CONTACTO, no por la lista global ALLOWED_PHONES.
     // En el mismo lote pueden venir imágenes de otros pacientes y texto piloto:
     // cada subconjunto mantiene su ruta. No duplicar imágenes del piloto.
-    const pilotTurns = turns.filter((turn) => isAllowedPhone(turn.from, deps.textPilotPhone));
+    const pilotTurns = turns.filter((turn) => isAllowedPhone(turn.from, pilotScope));
     const otherImages = extractIncomingImages(payload, request.headers.get("x-webhook-batch"))
-      .filter((image) => isAllowedPhone(image.from, deps.allowedPhones) && !isAllowedPhone(image.from, deps.textPilotPhone));
+      .filter((image) => isAllowedPhone(image.from, deps.allowedPhones) && !isAllowedPhone(image.from, pilotScope));
     const hasPilot = hasProcessableTurns(pilotTurns, deps.quote);
     if (!hasPilot && otherImages.length === 0) return text(200, "ignored");
     if (hasPilot) deps.schedule(processTurns(pilotTurns, deps.quote));

@@ -18,6 +18,8 @@ import { handleKapsoWebhook } from "../src/kapso-webhook.js";
 
 const PILOT = "59170000000";
 const OTHER = "59170000001";
+const THIRD = "59170000002";
+const OUTSIDE = "59170000003";
 const SECRET = "synthetic-webhook-secret";
 const stamp = () => String(Math.floor(Date.now() / 1000));
 const incoming = (phone: string, kind: "text" | "image", id: string) => ({
@@ -41,7 +43,7 @@ function signed(data: unknown, batch = false): Request {
   });
 }
 
-function deps(allowedPhones?: string) {
+function deps(allowedPhones?: string, extraPhones?: readonly string[]) {
   const scheduled: Promise<unknown>[] = [];
   const quote = {
     turns: { handlers: { text: async () => ({ body: "texto de prueba" }) } },
@@ -54,6 +56,7 @@ function deps(allowedPhones?: string) {
     input: {
       secret: SECRET, allowedPhones, quote,
       textPilotPhone: PILOT,
+      textPilotExtraPhones: extraPhones,
       legacyQuote: legacy,
       schedule: (task: Promise<unknown>) => { scheduled.push(task); },
       log: vi.fn()
@@ -109,6 +112,27 @@ describe("piloto de texto por contacto: fotografías heredadas intactas", () => 
     expect(spies.turns.mock.calls[0]![0]).toHaveLength(2);
     expect(spies.image).toHaveBeenCalledTimes(1);
     expect(spies.image.mock.calls[0]![0]).toMatchObject({ from: OTHER, messageId: "im-other" });
+  });
+  it("procesa textos e imágenes para dos pilotos adicionales y conserva la ruta de imágenes externa", async () => {
+    const d = deps([PILOT, OTHER, THIRD, OUTSIDE].join(","), [OTHER, THIRD]);
+    const result = await handleKapsoWebhook(signed({
+      batch: true,
+      data: [
+        incoming(PILOT, "text", "t-main"),
+        incoming(OTHER, "text", "t-extra-1"),
+        incoming(THIRD, "text", "t-extra-2"),
+        incoming(THIRD, "image", "im-extra-2"),
+        incoming(OUTSIDE, "text", "t-outside"),
+        incoming(OUTSIDE, "image", "im-outside"),
+      ]
+    }, true), d.input);
+    expect(await result.text()).toBe("ok");
+    await Promise.all(d.scheduled);
+    expect(spies.turns).toHaveBeenCalledTimes(1);
+    expect((spies.turns.mock.calls[0]![0] as Array<{ from: string }>).map((turn) => turn.from))
+      .toEqual([PILOT, OTHER, THIRD, THIRD]);
+    expect(spies.image).toHaveBeenCalledTimes(1);
+    expect(spies.image.mock.calls[0]![0]).toMatchObject({ from: OUTSIDE });
   });
   it("ALLOWED_PHONES permanece independiente y puede incluir varios pacientes", async () => {
     const d = deps("59170000000,59170000001");
