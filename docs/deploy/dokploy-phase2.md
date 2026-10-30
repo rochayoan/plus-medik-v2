@@ -30,6 +30,34 @@ El mecanismo de pausa humana, el procesamiento mixto, los tiempos largos,
 el fallo entre confirmación de envío y cierre de cola, y el reinicio
 del contenedor deben superar pruebas reales controladas antes del corte.
 
+## Usar el Supabase existente de PlusMedik: sin crear otro proyecto
+
+El laboratorio conserva su Supabase actual (`cvokrtrdzxfchntwwslz`) y sus 16 migraciones oficiales.
+La cola utiliza nombres adicionales `plusmedik_dokploy_*`, sin alterar el catálogo,
+las tablas de auditoría, las sesiones ni la configuración del CRM. No se debe aplicar
+el SQL a un Supabase de otros negocios ni a una base externa de Dokploy.
+
+**Secuencia obligatoria antes de permitir un webhook real:**
+
+1. En el SQL Editor del proyecto de PlusMedik, revisar y ejecutar SOLO la consulta
+   `docs/deploy/sql/plusmedik_dokploy_existing_db_preflight.readonly.sql`.
+   No necesita credenciales ni devuelve información de pacientes.
+2. Ejecutar también `supabase/preflight/v2_post_apply_read_only.sql` para comprobar
+   las 16 migraciones oficiales. Si cualquier fila aparece como BLOCK, investigar.
+3. Verificar la copia de seguridad y confirmar permisos y acceso del equipo.
+   El SQL aditivo `docs/deploy/sql/plusmedik_dokploy_inbox.staging.sql` es
+   **DRAFT NO APROBADO PARA PRODUCCIÓN**; no ejecutarlo todavía.
+4. Una vez revisado formalmente el SQL aditivo y aplicada la versión aprobada,
+   ejecutar `docs/deploy/sql/plusmedik_dokploy_existing_db_postflight.readonly.sql`
+   y confirmar que todas las comprobaciones están en OK.
+5. Solo después configurar las variables privadas de Dokploy y realizar pruebas
+   sintéticas controladas. **Kapso seguirá apuntando a Vercel** hasta el corte
+   autorizado y reversible.
+
+La conexión Supabase disponible en este chat actualmente no incluye el proyecto
+de PlusMedik; por eso esta secuencia de SQL Editor es manual y no se debe
+confundir un resultado sobre otro proyecto con una validación real.
+
 ## Activación segura y variables
 
 El SQL no forma parte del manifiesto oficial de migraciones (16); es exclusivo para pruebas aisladas hasta revisión y promoción formal.
