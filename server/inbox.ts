@@ -45,6 +45,12 @@ export function resolveInboxConfig(env: NodeJS.ProcessEnv = process.env): InboxC
   const serviceKey = env.SUPABASE_SERVICE_ROLE_KEY;
   const webhookSecret = env.WEBHOOK_SECRET;
   const encoded = env.PLUSMEDIK_DOKPLOY_INBOX_KEY;
+  // Never ACK an event if its worker has no transport, models or catalogue access.
+  const requiredRuntime = [
+    env.KAPSO_API_KEY, env.KAPSO_PHONE_NUMBER_ID,
+    env.OPENAI_API_KEY, env.OPENROUTER_API_KEY
+  ];
+  if (requiredRuntime.some(value => !value?.trim())) return undefined;
   if (!baseUrl || !/^https:\/\//.test(baseUrl) || !serviceKey || !webhookSecret || !encoded
       || !/^[A-Za-z0-9+/]{43}=$/.test(encoded)) return undefined;
   const encryptionKey = Buffer.from(encoded, "base64");
