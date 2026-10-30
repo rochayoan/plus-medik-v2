@@ -70,7 +70,7 @@ export async function appendApprovedQuotePreparations(input: QuotePreparationInp
   const sections = [...groups.entries()].map(([instructions, names]) => {
     // Solo cambia la presentación de las instrucciones aprobadas; no su contenido.
     const bullets = instructions.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => `• ${line}`).join("\n");
-    return `* ${names.join(" / ")}*\n${bullets}`;
+    return `▫️ *${names.join(" / ")}*\n${bullets}`;
   });
   const section = [
     "🧪 *PREPARACIÓN Y AYUNO*",
