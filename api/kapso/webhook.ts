@@ -205,7 +205,7 @@ const attentionProxy: AttentionRepository = {
   resume: (...args) => attention().resume(...args)
 };
 
-export async function POST(request: Request): Promise<Response> {
+export async function POSTWithScheduler(request: Request, schedule: (task: Promise<unknown>) => void): Promise<Response> {
   return handleKapsoWebhook(request, {
     secret: process.env.WEBHOOK_SECRET,
     allowedPhones: process.env.ALLOWED_PHONES,
@@ -214,10 +214,15 @@ export async function POST(request: Request): Promise<Response> {
     legacyQuote: textPilotGate.enabled && textPilotGate.ready && turnsEnabled
       ? { ...realDeps, turns: undefined, requireAuditGuard: humanControlEnabled || on("REQUIRE_AUDIT_GUARD") }
       : undefined,
-    schedule: (task) => waitUntil(task),
+    schedule,
     humanControl: humanControlEnabled ? { labPhoneNumberId: process.env.KAPSO_PHONE_NUMBER_ID, contactKeyFor, attention: attentionProxy } : undefined,
     log: realDeps.log
   });
+}
+
+// Vercel preserves the original waitUntil background policy unchanged.
+export async function POST(request: Request): Promise<Response> {
+  return POSTWithScheduler(request, (task) => waitUntil(task));
 }
 
 export function GET(): Response {
