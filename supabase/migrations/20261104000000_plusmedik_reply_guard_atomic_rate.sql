@@ -22,7 +22,7 @@ grant select on table public.plusmedik_guard_rate_ledger to service_role;
 -- Rescatar como máximo los últimos 1000 envíos conversacionales ya existentes:
 -- una instalación viva NO recupera artificialmente la cuota al actualizar.
 with recent as (
-  select r.contact_key, extract(epoch from r.send_reserved_at) as ts,
+  select r.contact_key, r.id as run_id, extract(epoch from r.send_reserved_at) as ts,
     row_number() over (partition by r.contact_key order by r.send_reserved_at desc, r.id) as rn
   from public.plusmedik_audit_runs r
   join public.plusmedik_turns t on t.run_id = r.id
@@ -34,14 +34,14 @@ with recent as (
     and (s.counted_since is null or r.send_reserved_at > s.counted_since)
 )
 insert into public.plusmedik_guard_rate_ledger (contact_key, state)
-select contact_key, jsonb_build_object('slots',jsonb_agg(ts order by ts), 'allowed',true)
+select contact_key, jsonb_build_object('slots',jsonb_agg(jsonb_build_object('r',run_id,'t',ts) order by ts), 'allowed',true)
 from recent where rn <= 1000 group by contact_key
 on conflict (contact_key) do nothing;
 
 -- Función privada y pura: filtra los tiempos expirados o anteriores al último
 -- reset y aplica cada regla. No puede ser invocada por el cliente.
 create or replace function public.plusmedik_guard_rate_decide(
-  p_previous jsonb, p_rules jsonb, p_now timestamptz, p_since timestamptz
+  p_previous jsonb, p_rules jsonb, p_now timestamptz, p_since timestamptz, p_run_id uuid
 ) returns jsonb language plpgsql immutable set search_path = ''
 as $$
 declare
@@ -57,9 +57,9 @@ declare
   v_max integer;
 begin
   for v_item in select value from jsonb_array_elements(coalesce(p_previous -> 'slots', '[]'::jsonb)) loop
-    v_time := (v_item::text)::numeric;
+    v_time := (v_item ->> 't')::numeric;
     if v_time > v_now - 86400 and (v_since is null or v_time > v_since) then
-      v_slots := v_slots || jsonb_build_array(v_time);
+      v_slots := v_slots || jsonb_build_array(v_item);
     end if;
   end loop;
 
@@ -67,7 +67,7 @@ begin
     v_seconds := (v_rule ->> 'windowSeconds')::integer;
     v_max := (v_rule ->> 'max')::integer;
     select count(*) into v_count from jsonb_array_elements_text(v_slots) x(ts)
-      where x.ts::numeric > v_now - v_seconds;
+      where (x.ts::jsonb ->> 't')::numeric > v_now - v_seconds;
     if v_count >= v_max then
       return jsonb_build_object(
         'slots',v_slots, 'allowed',false, 'count',v_count,
@@ -77,9 +77,9 @@ begin
     v_rule_index := v_rule_index + 1;
   end loop;
 
-  return jsonb_build_object('slots', v_slots || jsonb_build_array(v_now), 'allowed',true);
+  return jsonb_build_object('slots', v_slots || jsonb_build_array(jsonb_build_object('r',p_run_id,'t',v_now)), 'allowed',true);
 end $$;
-revoke all on function public.plusmedik_guard_rate_decide(jsonb,jsonb,timestamptz,timestamptz) from public, anon, authenticated;
+revoke all on function public.plusmedik_guard_rate_decide(jsonb,jsonb,timestamptz,timestamptz,uuid) from public, anon, authenticated;
 
 -- Migración idempotente: sustituye SOLO la función existente y mantiene
 -- exactamente la misma firma, parámetros, roles y bloqueo por atención humana.
@@ -189,9 +189,9 @@ begin
   -- no de un COUNT con snapshot anterior a la espera del bloqueo.
   if v_reason is null then
     insert into public.plusmedik_guard_rate_ledger (contact_key, state)
-    values (v_contact, public.plusmedik_guard_rate_decide('{}'::jsonb, p_guard -> 'rules', v_now, v_since))
+    values (v_contact, public.plusmedik_guard_rate_decide('{}'::jsonb, p_guard -> 'rules', v_now, v_since, p_run_id))
     on conflict (contact_key) do update
-      set state = public.plusmedik_guard_rate_decide(public.plusmedik_guard_rate_ledger.state, p_guard -> 'rules', v_now, v_since)
+      set state = public.plusmedik_guard_rate_decide(public.plusmedik_guard_rate_ledger.state, p_guard -> 'rules', v_now, v_since, p_run_id)
     returning state into v_rate_state;
 
     if v_rate_state ->> 'allowed' = 'false' then
@@ -235,7 +235,11 @@ begin
     update public.plusmedik_guard_rate_ledger
       set state = jsonb_set(
         state, '{slots}',
-        (state -> 'slots') - (jsonb_array_length(state -> 'slots') - 1)
+        coalesce((
+          select jsonb_agg(e.value)
+          from jsonb_array_elements(state -> 'slots') e
+          where e.value ->> 'r' is distinct from p_run_id::text
+        ), '[]'::jsonb)
       )
     where contact_key = v_contact;
     return v_result;
