@@ -603,8 +603,7 @@ describe.skipIf(!bin)("guarda de respuestas contra PostgreSQL real (migración 1
 
     it("es la décima (las siguientes: sesiones de cotización G4.0 y datos por estudio G4.1) y las nueve anteriores no se modificaron (hashes fijados)", () => {
       expect(MIGRATIONS[9]).toBe(GUARD);
-      expect(MIGRATIONS.slice(0, 16)).toHaveLength(16); // conserva intacto el prefijo G1–G5.9
-      expect(MIGRATIONS.slice(16)).toEqual(["20261105000000_plusmedik_dokploy_inbox.sql"]); // nueva migración independiente para Dokploy
+      expect(MIGRATIONS).toHaveLength(16); // preserva el manifiesto oficial; el SQL de staging para Dokploy se guarda fuera de migrations/
       expect(sha("20261028000000_plusmedik_knowledge_refs.sql")).toBe("aa0b8644dc0f4a2ac98c84ae4c123b03c5e261c41618f4d45ec7dc9245690021");
     });
 
