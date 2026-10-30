@@ -125,7 +125,7 @@ const quotePreparationReader = () => (quotePreparationKnowledge ??= new Knowledg
 const quoteFactsReader = () => new StudyFactsService({
   store: createSupabaseStudyFactsStore({ requestTimeoutMs: 3000, retryDelayMs: 200 }),
   revisionCheckMs: 0,
-  maxStaleMs: 0 // nunca usar una instantánea de datos por estudio cuya vigencia no se haya confirmado
+  maxStaleMs: 5_000 // lector nuevo por cotización; se comparte solo durante esta lectura, nunca entre pacientes
 });
 
 const realDeps: QuoteDeps = {
