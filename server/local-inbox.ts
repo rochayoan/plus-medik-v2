@@ -30,10 +30,24 @@ const LEASE_MS = 300000;
 const ID_PATTERN = /^[0-9a-f]{64}$/;
 
 export class LocalInboxRepository {
-  constructor(private readonly directory: string, private readonly encryptionKey: Buffer) {}
+  constructor(
+    private readonly directory: string,
+    private readonly encryptionKey: Buffer,
+    private readonly requireMountedVolume = false
+  ) {}
 
   private ensureDirectory(): void {
     // A missing or unwritable volume must not lead to an ACK.
+    if (this.requireMountedVolume) {
+      // Docker requires an actual volume mount at /data or at the spool folder.
+      // A directory inside the ephemeral container is NOT equivalent.
+      const mountInfo = readFileSync("/proc/self/mountinfo", "utf8");
+      const mounts = mountInfo.split("\n").map(line => line.split(" - ")[0]?.split(" ")[4])
+        .filter((part): part is string => typeof part === "string");
+      if (!mounts.includes("/data") && !mounts.includes(this.directory)) {
+        throw new Error("LOCAL_INBOX_VOLUME_NOT_MOUNTED");
+      }
+    }
     if (!this.directory.startsWith("/") || this.directory === "/" || this.directory.startsWith("/app/")) {
       throw new Error("LOCAL_INBOX_PATH_INVALID");
     }
