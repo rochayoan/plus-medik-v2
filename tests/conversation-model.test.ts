@@ -533,8 +533,17 @@ describe("resolveConversationModel: bandera de datos comerciales", () => {
     expect(logs).toEqual([]);
   });
 
-  it("con la bandera pero SIN ningún dato confirmado y vigente (el archivo de hoy): la conversación sigue sin datos y se registra el código", () => {
+  it("con la bandera y el horario general confirmado en el archivo real: se habilitan los datos comerciales", () => {
     const { model, logs } = resolve({ ...base, PLUSMEDIK_LLM_BUSINESS_INFO: "on" });
+    expect(model!.businessInfo).toBe(true);
+    expect(model!.categories.has("INFO_REQUEST")).toBe(true);
+    expect(logs).toEqual([]);
+  });
+
+  it("con la bandera pero SIN ningún dato confirmado: la conversación sigue sin datos y registra el código", () => {
+    const { model, logs } = resolve({ ...base, PLUSMEDIK_LLM_BUSINESS_INFO: "on" }, [
+      { id: "HORARIOS", title: "Horarios de atención", status: "PENDING", source: null, validUntil: null, text: "" }
+    ]);
     expect(model!.businessInfo).toBe(false);
     expect(logs).toEqual([["llm_conversation_config_invalid", { error: "BUSINESS_DATA_PENDING" }]]);
   });
