@@ -7,6 +7,8 @@ on:
       - "tests/dokploy-router.test.ts"
       - "tests/dokploy-inbox.test.ts"
       - "docs/deploy/sql/plusmedik_dokploy_inbox.staging.sql"
+      - "docs/deploy/sql/plusmedik_dokploy_existing_db_preflight.readonly.sql"
+      - "docs/deploy/sql/plusmedik_dokploy_existing_db_postflight.readonly.sql"
       - "tests/support/dokploy-inbox-postgres.sql"
       - "api/kapso/webhook.ts"
       - "Dockerfile.dokploy"
@@ -51,7 +53,13 @@ jobs:
             sleep 1
           done
           docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "create role anon; create role authenticated; create role service_role bypassrls;"
+          docker exec -i plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -At < docs/deploy/sql/plusmedik_dokploy_existing_db_preflight.readonly.sql > /dev/null
           docker exec -i plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres < docs/deploy/sql/plusmedik_dokploy_inbox.staging.sql
+          # Full preflight for the original sixteen migrations is checked in the
+          # separate quote-preparation workflow. This ephemeral DB has no base
+          # PlusMedik migrations, so only queue-specific postflight rows < 30
+          # are required here.
+          docker exec -i plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -At < docs/deploy/sql/plusmedik_dokploy_existing_db_postflight.readonly.sql | awk -F '|' '$1 + 0 < 30 && $3 == "BLOCK" { bad=1 } END { if (bad) exit 1 }'
           docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "set role service_role; select public.plusmedik_dokploy_health();"
           docker exec -i plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -At < tests/support/dokploy-inbox-postgres.sql | tail -n 1 | grep -qx '0'
       - name: Build Docker runtime
