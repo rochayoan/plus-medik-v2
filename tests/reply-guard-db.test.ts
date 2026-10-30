@@ -68,7 +68,14 @@ describe.skipIf(!bin)("guarda de respuestas contra PostgreSQL real (migración 1
       update public.plusmedik_reply_guard_marks set created_at = created_at - interval '${seconds} seconds' where contact_key = '${contact}';
       update public.plusmedik_reply_guard_events set created_at = created_at - interval '${seconds} seconds' where contact_key = '${contact}';
       update public.plusmedik_reply_guard_state set suppressed_until = suppressed_until - interval '${seconds} seconds', updated_at = updated_at - interval '${seconds} seconds',
-        counted_since = counted_since - interval '${seconds} seconds' where contact_key = '${contact}';`);
+        counted_since = counted_since - interval '${seconds} seconds' where contact_key = '${contact}';
+      -- Simulación del tiempo también para el ledger agregado por migración 16.
+      update public.plusmedik_guard_rate_ledger set state =
+        jsonb_set(state, '{slots}', coalesce((
+          select jsonb_agg(jsonb_set(e.value, '{t}', to_jsonb((e.value ->> 't')::numeric - ${seconds})) order by e.ord)
+          from jsonb_array_elements(state -> 'slots') with ordinality as e(value, ord)
+        ), '[]'::jsonb))
+      where contact_key = '${contact}';`);
 
   interface Turn { message: string; id: string; who: string; fence: number }
   async function turn(contact: string, who = 1, kind = "TEXT"): Promise<Turn> {
