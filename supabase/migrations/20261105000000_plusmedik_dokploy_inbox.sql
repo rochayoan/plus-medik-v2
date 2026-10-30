@@ -115,3 +115,11 @@ grant execute on function public.plusmedik_dokploy_enqueue(text,text,text,text) 
 grant execute on function public.plusmedik_dokploy_claim(uuid) to service_role;
 grant execute on function public.plusmedik_dokploy_renew(uuid,uuid,integer) to service_role;
 grant execute on function public.plusmedik_dokploy_finish(uuid,uuid,integer,boolean) to service_role;
+
+-- Lightweight readiness check; fails if this migration has not been applied.
+create or replace function public.plusmedik_dokploy_health()
+returns boolean language sql security invoker set search_path='' as $$
+ select true;
+$$;
+revoke all on function public.plusmedik_dokploy_health() from public,anon,authenticated;
+grant execute on function public.plusmedik_dokploy_health() to service_role;
