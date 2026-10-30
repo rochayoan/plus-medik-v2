@@ -185,6 +185,12 @@ describe("evaluación de la sesión al cerrar", () => {
 });
 
 describe("mensajes", () => {
+  it("la pregunta al cerrar una lista indica los comandos que realmente procesa la sesión", () => {
+    expect(QUOTE_TEXTS.confirm_done).toMatch(/SÍ/);
+    expect(QUOTE_TEXTS.confirm_done).toMatch(/LISTO/);
+    expect(QUOTE_TEXTS.confirm_done).toMatch(/agregar/i);
+  });
+
   it("los textos fijos son seguros: sin cifras, moneda, promesas ni menciones a una persona", () => {
     expect(() => assertSafeQuoteTexts(QUOTE_TEXTS)).not.toThrow();
     for (const [key, bad] of Object.entries({ full: "Tienes 5 fotos", empty: "Un asesor te atenderá", review: "Cuesta Bs 5", cancelled: "Es gratis", waiting: "El equipo te escribirá", resend: "Respuesta inmediata" })) {
