@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:crypto";
 import { verifyWebhookSignature } from "../src/whatsapp-quote.js";
 
 export interface InboxConfig {
@@ -103,7 +103,7 @@ export class InboxRepository {
     const encrypted = encryptPayload(value, this.config.encryptionKey);
     // Signature covers the raw body. A replay with mutated ancillary headers
     // remains one job; original verified headers are replayed to the core.
-    const digest = createHash("sha256").update(value.rawBody).digest("hex");
+    const digest = createHmac("sha256", this.config.encryptionKey).update("inbox-id-v1\0").update(value.rawBody).digest("hex");
     const response = await this.rpc("enqueue", {
       p_sha: digest, p_iv: encrypted.iv, p_tag: encrypted.tag, p_ciphertext: encrypted.ciphertext
     });
