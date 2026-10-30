@@ -42,6 +42,16 @@ concurrency:
   group: quote-preparation-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+  push:
+    branches:
+      - feat/pilot-text-quote-safety-gate
+    paths:
+      - ".github/workflows/quote-preparation.yml"
+      - "supabase/migrations/*.sql"
+      - "supabase/preflight/*.sql"
+      - "tests/*.test.ts"
+      - "docs/g5/20-g51-aplicacion-de-migraciones.md"
+
 permissions:
   contents: read
 
