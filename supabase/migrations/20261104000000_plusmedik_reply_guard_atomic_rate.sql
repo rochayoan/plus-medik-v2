@@ -136,12 +136,26 @@ begin
   end if;
   select coalesce((select state = 'HUMAN_PAUSED' from public.plusmedik_attention_contacts where contact_key = v_contact), false) into v_paused;
   -- Pausa humana / bloqueo previo, otro envío en vuelo y respuesta obsoleta: la función de turnos decide, antes que el tope.
+  -- No delegar una rama BUSY directamente a turn_reserve_send:
+  -- entre esta comprobación y su segunda consulta, el envío en vuelo puede
+  -- terminar y turn_reserve_send devolver RESERVED sin comprobar la cuota.
+  -- En tal caso se debe responder BUSY y reintentar bajo la guarda.
+  if exists (select 1 from public.plusmedik_audit_runs r
+             where r.contact_key = v_contact and r.id <> p_run_id
+               and r.send_state = 'RESERVED' and r.lease_expires_at > now()) then
+    return jsonb_build_object('status','busy');
+  end if;
+  -- Las rutas de prioridad mantienen su semántica anterior, pero NUNCA
+  -- conceden una reserva sin pasar por la cuota.
   if v_run.send_blocked_at is not null or v_paused
-     or exists (select 1 from public.plusmedik_audit_runs r where r.contact_key = v_contact and r.id <> p_run_id and r.send_state = 'RESERVED' and r.lease_expires_at > now())
      or (p_stale_policy = 'NEWER_TURN' and exists (
           select 1 from public.plusmedik_turns t join public.plusmedik_audit_runs r on r.id = t.run_id
           where t.contact_key = v_contact and t.seq > v_seq and r.send_state in ('RESERVED', 'ACCEPTED', 'UNKNOWN'))) then
-    return public.plusmedik_turn_reserve_send(p_run_id, p_owner, p_fence, p_kind, p_lease_seconds, p_stale_policy);
+    v_result := public.plusmedik_turn_reserve_send(p_run_id, p_owner, p_fence, p_kind, p_lease_seconds, p_stale_policy);
+    if v_result ->> 'status' = 'reserved' then
+      raise exception 'plusmedik_guard: priority state changed; retry' using errcode = 'PT409';
+    end if;
+    return v_result;
   end if;
 
   v_now := clock_timestamp();
