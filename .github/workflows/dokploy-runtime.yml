@@ -40,8 +40,13 @@ jobs:
         run: |
           docker run --rm -d --name plusmedik-inbox-pg -e POSTGRES_PASSWORD=local-only -p 127.0.0.1:54339:5432 postgres:16-alpine
           trap 'docker rm -f plusmedik-inbox-pg || true' EXIT
-          for i in $(seq 1 40); do
-            docker exec plusmedik-inbox-pg pg_isready -U postgres && break
+          # Postgres initdb briefly starts an interim server and restarts it.
+          # Two actual SQL probes, separated by 2 seconds, avoid that race.
+          for i in $(seq 1 50); do
+            if docker exec plusmedik-inbox-pg psql -U postgres -Atc "select 1" >/dev/null 2>&1; then
+              sleep 2
+              if docker exec plusmedik-inbox-pg psql -U postgres -Atc "select 1" >/dev/null 2>&1; then break; fi
+            fi
             sleep 1
           done
           docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "create role anon; create role authenticated; create role service_role bypassrls;"
