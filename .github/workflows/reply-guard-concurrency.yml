@@ -11,10 +11,6 @@ on:
       - "api/kapso/webhook.ts"
       - "supabase/migrations/*reply_guard*.sql"
 
-concurrency:
-  group: reply-guard-pr-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
   push:
     branches:
       - feat/pilot-text-quote-safety-gate
@@ -24,6 +20,11 @@ concurrency:
       - "supabase/preflight/*.sql"
       - "tests/*.test.ts"
       - "docs/g5/20-g51-aplicacion-de-migraciones.md"
+
+
+concurrency:
+  group: reply-guard-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
