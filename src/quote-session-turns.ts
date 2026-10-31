@@ -5,7 +5,7 @@ import { withAiCallObserver, type AiCallEvent } from "./cache.js";
 import type { Produced, TurnContext, TurnProducer } from "./guarded-turn.js";
 import {
   assertSafeInterpreterTexts, assertSafeQuoteTexts, DEFAULT_QUOTE_SESSIONS, evaluateSession, extractStudyRequests, formatAck, formatInterpretationNote, formatSessionQuote, formatTextReply, isGeneralQuestion, mergeInterpretation, optionsOf, parseSessionCommand, parseSessionReply, QUOTE_TEXTS,
-  summarizeSession, withNote, type ItemResult, type QuoteBeginResult, type QuoteCloseInput, type QuoteCloseResult, type QuoteReadResult, type QuoteSessionsConfig, type QuoteTexts, type SessionItem, type SessionReply, type TextDoubt
+  summarizeSession, withNote, compactQuote, type ItemResult, type QuoteBeginResult, type QuoteCloseInput, type QuoteCloseResult, type QuoteReadResult, type QuoteSessionsConfig, type QuoteTexts, type SessionItem, type SessionReply, type TextDoubt
 } from "./quote-session.js";
 import { looksAutomated, looksLikeOwnReply } from "./reply-guard.js";
 import { asksForPrice, classifyText } from "./text-handler.js";
@@ -255,13 +255,14 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
     if (read.state === "replay") {
       if (read.outcome !== "NEEDS_REVIEW") {
         const reply = replayReply(read, texts);
+        if (reply.kind === "reply" && reply.result === "quoted" && !(read.lines && deps.quotePreparations)) return { ...reply, body: compactQuote(reply.body) };
         if (reply.kind !== "reply" || reply.result !== "quoted" || !read.lines || !deps.quotePreparations) return reply;
         try {
           const catalog = await deps.loadCatalog();
           const body = await deps.quotePreparations(reply.body, read.lines.map((line) => line.studyId), catalog, ctx);
-          return { ...reply, body };
+          return { ...reply, body: compactQuote(body) };
         } catch {
-          return reply;
+          return { ...reply, body: compactQuote(reply.body) };
         }
       }
       // Ejecución que reclama el turno tras el cierre: el caso se vuelve a presentar (idempotente) para decidir con el estado REAL del CRM qué texto corresponde.
@@ -310,7 +311,7 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
           deps.log("quote_preparation_skipped", { reason: "APPEND_FAILED" });
         }
       }
-      return { kind: "reply", body, result: "quoted", processingStatus: "COMPLETED", stale: "NONE" };
+      return { kind: "reply", body: compactQuote(body), result: "quoted", processingStatus: "COMPLETED", stale: "NONE" };
     }
     if (evaluation.kind === "REVIEW") return reviewReply(ctx, read.sessionId, catalog);
     return plain(texts.resend);

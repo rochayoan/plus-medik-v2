@@ -289,3 +289,70 @@ describe("requisitos y preparaciones: solo con datos aprobados", () => {
     expect(reply).toContain("«resonancia magnetica»");
   });
 });
+
+describe("feedback del piloto (31/10/2026)", () => {
+  // Un modelo que corrige la ortografía antes de buscar, como el real.
+  const correcting = (corrections: Record<string, string>, wantsQuote = false) => (run: InterpreterRun) =>
+    output(
+      Object.entries(corrections).map(([mention, query]) => {
+        const found = JSON.parse(run.runTool("search_studies", { query })).results as Array<{ id: string; score: number }>;
+        return found.length > 0 && found[0]!.score >= 0.7 ? match(mention, found[0]!.id) : missing(mention);
+      }),
+      wantsQuote
+    );
+
+  it("«Hemogtana y tomografía» (con errores) llega al intérprete, cotiza el hemograma e informa la tomografía", async () => {
+    const w = world({ interpret: correcting({ Hemogtana: "hemograma", tomografía: "tomografia" }) });
+    const reply = await w.say("Hemogtana y tomografía");
+    expect(w.client.run).toHaveBeenCalledTimes(1);
+    expect(reply).toContain("Estudios anotados: HEMOGRAMA COMPLETO AUTOMATIZADO.");
+    expect(reply).toContain("Interpreté «Hemogtana» como HEMOGRAMA COMPLETO AUTOMATIZADO.");
+    expect(reply).toContain("No encontré en nuestro catálogo: «tomografía».");
+  });
+
+  it("no inventa: con un nombre que no se parece a nada, el modelo no recibe candidatos y no se cotiza", async () => {
+    const w = world({ interpret: correcting({ Zzxqwv: "zzxqwv" }) });
+    const reply = await w.say("Zzxqwv y tomografía");
+    expect(w.closes).toEqual([]);
+    expect(reply).not.toMatch(/Bs/);
+  });
+
+  it("«Quiero colesterol y triglicéridos» (pedido claro) se cotiza directamente, sin pedir SÍ", async () => {
+    const w = world({ interpret: correcting({ colesterol: "colesterol", triglicéridos: "trigliceridos" }) });
+    const reply = await w.say("Quiero colesterol y triglicéridos");
+    expect(quotedLines(w.closes)!.lines.map((line) => line.studyId).sort()).toEqual([COLESTEROL.id, TRIGLICERIDOS.id].sort());
+    expect(reply).toContain("Total de los estudios cotizados");
+    expect(reply).not.toContain(QUOTE_TEXTS.confirm_done);
+  });
+
+  it("nombrar o agregar estudios sin pedirlos sigue acumulando y preguntando «¿Eso es todo?», y luego se puede agregar más", async () => {
+    const w = world({ interpret: correcting({ glucoza: "glucosa" }) });
+    expect(await w.say("glucoza")).toContain(QUOTE_TEXTS.confirm_done);
+    expect(await w.say("y también hemograma")).toContain(QUOTE_TEXTS.confirm_done);
+    expect(w.closes).toEqual([]);
+    await w.say("quiero colesterol");
+    expect(quotedLines(w.closes)!.lines).toHaveLength(3);
+  });
+
+  it("la cotización de texto es compacta: sin líneas en blanco entre encabezado, estudios y total, y conserva precios, total e indicaciones", async () => {
+    const w = world({ interpret: correcting({ glucoza: "glucosa", tomografia: "tomografia" }, true), approved: { [GLUCOSA.id]: { fastingHours: 8 } } });
+    const reply = await w.say("cotiza glucoza y tomografia");
+    const lines = reply.split("\n");
+    expect(lines[0]).toBe("🩺 *PlusMedik* · Cotización");
+    expect(lines[1]).toMatch(/GLUCOSA — Bs 30$/);
+    expect(lines[2]).toMatch(/^💰 \*Total de los estudios cotizados: Bs 30\*$/);
+    expect(reply).not.toMatch(/\n\n\n/);
+    expect(reply).toContain("• Ayuno: 8 horas.");
+    expect(reply).toContain("Interpreté «glucoza» como GLUCOSA.");
+    expect(reply).toContain("No encontré en nuestro catálogo: «tomografia».");
+    expect(lines.at(-1)).toBe("Respóndenos por este chat para continuar. 😊");
+    // Más corta que la versión con espacios de antes.
+    expect(lines.filter((line) => line === "").length).toBeLessThanOrEqual(4);
+  });
+
+  it("sin datos aprobados la cotización compacta trae solo estudios, total y pie", async () => {
+    const w = world({ interpret: correcting({ glucoza: "glucosa" }, true), approved: {} });
+    const reply = await w.say("cotiza glucoza");
+    expect(reply.split("\n").filter((line) => line !== "")).toEqual(["🩺 *PlusMedik* · Cotización", "🍬 GLUCOSA — Bs 30", "💰 *Total de los estudios cotizados: Bs 30*", "Interpreté «glucoza» como GLUCOSA.", "Respóndenos por este chat para continuar. 😊"]);
+  });
+});

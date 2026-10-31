@@ -127,7 +127,8 @@ export function guardModelReply(raw: string, facts?: FactsContext): GuardResult 
   if ((body.match(/\p{Extended_Pictographic}/gu) ?? []).length > 3) return { ok: false, reason: "EMOJI" };
   const folded = fold(body);
   // El saludo «buenos días» no es un plazo.
-  const withoutGreeting = folded.replace(/\bbuen(os|as)? (dias?|tardes?|noches?)\b/g, " ");
+  // Fórmulas de cortesía que no son datos ni promesas: «buenos días» y «¿en qué puedo ayudarte hoy?».
+  const withoutGreeting = folded.replace(/\bbuen(os|as)? (dias?|tardes?|noches?)\b/g, " ").replace(/\b(ayudarte|ayudarle|ayudarles|ayudarlos|atenderte|servirte) hoy\b/g, "$1");
 
   if (!facts) {
     if (/\d/.test(folded) || CURRENCY.test(folded)) return { ok: false, reason: "DIGITS_OR_CURRENCY" };

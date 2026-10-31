@@ -215,6 +215,8 @@ export interface InterpreterClient {
 // ───────────────────────────── el intérprete ─────────────────────────────
 
 // Palabras que delatan un pedido de estudios aunque el catálogo no tenga el nombre que usó el paciente («mi mamá quiere hacerse el perfil lipídico»).
+// Un nombre con errores («hemogtana») puntúa ~0.6 contra el estudio real: la puerta es amplia a propósito, porque lo que decide es el backend (solo cuesta una llamada al modelo).
+export const GATE_SCORE = 0.6;
 const REQUEST_CUES = /\b(cotiz\w*|precio\w*|cuesta\w*|costo\w*|cuanto|hacer(me|se|nos)?|sacar(me|se)?|realizar(me|se)?|necesit\w*|quier\w*|quisier\w*|requier\w*|pidier\w*|mandar\w*|examen\w*|analisis|estudio\w*|prueba\w*|perfil\w*|chequeo\w*|laboratorio|receta\w*)\b/;
 
 export interface StudyInterpreterOptions {
@@ -242,7 +244,7 @@ export function createStudyInterpreter(options: StudyInterpreterOptions): StudyI
     const category = classifyText(text);
     // Lo médico, pedir a una persona, la información del laboratorio y los saludos tienen su camino propio (como en el productor de turnos): nunca llegan aquí.
     if (category === "MEDICAL" || category === "HUMAN_REQUEST" || category === "INFO_REQUEST" || category === "GREETING") return undefined;
-    if (!hint.hasDoubt && category !== "RECIPE_OR_QUOTE" && !REQUEST_CUES.test(normalizeStudyKey(text.slice(0, 600))) && !mentionsKnownStudy(text, catalog)) return undefined;
+    if (!hint.hasDoubt && category !== "RECIPE_OR_QUOTE" && !REQUEST_CUES.test(normalizeStudyKey(text.slice(0, 600))) && !mentionsKnownStudy(text, catalog, GATE_SCORE)) return undefined;
     const message = sanitizeForModel(text, options.maxInputChars ?? INTERPRETER_LIMITS.maxInputChars);
     if (message === "") return undefined;
     if (now() < openUntil) {

@@ -605,3 +605,12 @@ describe("manejador de texto con datos comerciales", () => {
     expect(reply).not.toHaveBeenCalled();
   });
 });
+
+describe("pruebas reales del piloto: «¿En qué puedo ayudarte hoy?»", () => {
+  it("el saludo con «hoy» no se rechaza como promesa de tiempo", () => {
+    for (const reply of ["¡Hola! 👋 ¿En qué puedo ayudarte hoy?", "¡Hola! 👋 ¿En qué puedo ayudarte hoy en PlusMedik?"]) expect(guardModelReply(reply), reply).toMatchObject({ ok: true });
+  });
+  it("pero «hoy» como promesa sigue rechazado", () => {
+    for (const reply of ["Te respondemos hoy mismo.", "Hoy te atienden sin falta.", "Estará listo hoy."]) expect(guardModelReply(reply), reply).toMatchObject({ ok: false });
+  });
+});
