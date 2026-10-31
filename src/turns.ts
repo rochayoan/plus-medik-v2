@@ -237,7 +237,19 @@ export function producerFor(turn: IncomingTurn, deps: QuoteDeps): TurnProducer |
     });
     return ok && recent;
   };
-  return sessions && turn.kind === "TEXT" ? sessionTextProducer(turn, deps, sessions, conversation, undefined, recentQuote) : conversation();
+  return withPatientMemory(turn, sessions && turn.kind === "TEXT" ? sessionTextProducer(turn, deps, sessions, conversation, undefined, recentQuote) : conversation(), deps);
+}
+
+// Memoria conversacional (apagada si falta): el mensaje de texto del paciente se guarda al empezar su turno, ANTES de producir la respuesta (el filtro de contenido decide qué se guarda de verdad). Nunca lanza ni retrasa más del tope de la memoria.
+function withPatientMemory(turn: IncomingTurn, producer: TurnProducer, deps: QuoteDeps): TurnProducer {
+  const memory = deps.turns?.memory;
+  if (!memory || turn.kind !== "TEXT" || typeof turn.text !== "string") return producer;
+  const text = turn.text;
+  return async (ctx) => {
+    const contactKey = deps.turns!.contactKeyFor(turn.from);
+    if (contactKey) await memory.rememberPatient({ contactKey, messageId: turn.messageId, text, ...(turn.timestamp ? { at: new Date(turn.timestamp * 1000) } : {}) });
+    return producer(ctx);
+  };
 }
 
 // G6.0: ¿es la repetición literal de un mensaje de texto recién procesado del mismo contacto? Solo con la atención selectiva. No aplica a lo médico, a pedir a una persona, a las respuestas cortas de una

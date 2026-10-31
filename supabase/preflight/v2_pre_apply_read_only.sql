@@ -1,4 +1,4 @@
--- PlusMedik V2 — verificación ANTES de aplicar las 16 migraciones (solo lectura)
+-- PlusMedik V2 — verificación ANTES de aplicar las 17 migraciones (solo lectura)
 -- GENERADO por scripts/migration-manifest.ts a partir de supabase/migrations/*.sql. NO editar a mano (una prueba falla si no coincide).
 -- SOLO LECTURA: una sola sentencia SELECT. No contiene DDL, DML, RPC ni datos clínicos; devuelve metadatos y conteos.
 -- Ejecutar exclusivamente en el proyecto Supabase cvokrtrdzxfchntwwslz (verificar el identificador en la URL del panel ANTES de ejecutar),
@@ -24,6 +24,7 @@
 --   14  20261102000000_plusmedik_quote_text_flow.sql  2094f37085484e0c889f3fa46a563539b7f7ba61049ffb332064a7059d17d9f5
 --   15  20261103000000_plusmedik_crm_attention_control.sql  0f14159a903f1e50d3666923fa0e46edc06d36b752ec7ef6348923b5e43c3bc9
 --   16  20261104000000_plusmedik_reply_guard_atomic_rate.sql  33b409b481cbc845ed6b07f2a3b74af86251ba936ac6b5c465127d838097568b
+--   17  20261105000000_plusmedik_conversation_memory.sql  dc498daf5ef825b9be84ae81fa643fadcc9a71346146b24efd1340ef63bb716f
 --
 -- Resultado: una tabla (orden, seccion, comprobacion, estado, detalle). Estados: OK · INFO · WARN (revisar) · BLOCK (detenerse).
 -- La primera fila es el VEREDICTO. Guardar el resultado completo: las filas INSTANTANEA deben ser IDÉNTICAS antes y después.
@@ -286,7 +287,13 @@ manifest(mig, kind, name, parent) as (
     (15, 'constraint', 'plusmedik_attention_events_outcome_crm_check', 'plusmedik_attention_events'),
     (15, 'function', 'plusmedik_attention_crm_action', ''),
     (16, 'function', 'plusmedik_guard_rate_decide', ''),
-    (16, 'table', 'plusmedik_guard_rate_ledger', '')
+    (16, 'table', 'plusmedik_guard_rate_ledger', ''),
+    (17, 'function', 'plusmedik_memory_forget', ''),
+    (17, 'function', 'plusmedik_memory_recent', ''),
+    (17, 'function', 'plusmedik_memory_record', ''),
+    (17, 'index', 'plusmedik_conversation_messages_expiry_idx', 'plusmedik_conversation_messages'),
+    (17, 'index', 'plusmedik_conversation_messages_recent_idx', 'plusmedik_conversation_messages'),
+    (17, 'table', 'plusmedik_conversation_messages', '')
 ),
 migration_files(mig, file) as (
   values
@@ -305,7 +312,8 @@ migration_files(mig, file) as (
     (13, '20261101000000_plusmedik_crm_outbox.sql'),
     (14, '20261102000000_plusmedik_quote_text_flow.sql'),
     (15, '20261103000000_plusmedik_crm_attention_control.sql'),
-    (16, '20261104000000_plusmedik_reply_guard_atomic_rate.sql')
+    (16, '20261104000000_plusmedik_reply_guard_atomic_rate.sql'),
+    (17, '20261105000000_plusmedik_conversation_memory.sql')
 ),
 service_functions(name) as (
   values
@@ -346,6 +354,9 @@ service_functions(name) as (
     ('plusmedik_kb_snapshot'),
     ('plusmedik_kb_submit'),
     ('plusmedik_kb_usage'),
+    ('plusmedik_memory_forget'),
+    ('plusmedik_memory_recent'),
+    ('plusmedik_memory_record'),
     ('plusmedik_quote_item_begin'),
     ('plusmedik_quote_item_finish'),
     ('plusmedik_quote_last_studies'),

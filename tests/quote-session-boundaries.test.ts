@@ -22,7 +22,7 @@ describe("G4.0: dónde pueden aparecer las sesiones de cotización", () => {
   });
 
   it("solo las propias sesiones, la elección de productor (turns), la configuración (guarded-turn), el repositorio (audit) y el cableado de Vercel las nombran", () => {
-    const allowed = new Set(["src/quote-session.ts", "src/quote-session-turns.ts", "src/turns.ts", "src/guarded-turn.ts", "src/audit.ts", "api/kapso/webhook.ts"]);
+    const allowed = new Set(["src/quote-session.ts", "src/quote-session-turns.ts", "src/turns.ts", "src/guarded-turn.ts", "src/audit.ts", "api/kapso/webhook.ts", "src/study-interpreter.ts", "src/study-interpreter-openai.ts"]);
     for (const path of files) {
       // G5.0: la cola de salida hacia el CRM lee los mensajes dudosos de una solicitud cerrada en revisión (plusmedik_quote_review_targets)
       if (allowed.has(rel(path)) || rel(path).startsWith("src/crm-outbox/")) continue;
@@ -61,7 +61,7 @@ describe("G4.0: dónde pueden aparecer las sesiones de cotización", () => {
     expect(importsOf(join(root, "src/study-synonyms.ts"))).toEqual(["./consensus.js"]);
     const synonyms = code(join(root, "src/study-synonyms.ts"));
     expect(synonyms).not.toMatch(/\bfetch\s*\(|process\.env|supabase|openai|priceBs|CatalogStudy|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
-    for (const path of files) if (/study-synonyms/.test(source(path)) && rel(path) !== "src/study-synonyms.ts") expect(rel(path)).toBe("src/quote-session.ts");
+    for (const path of files) if (/study-synonyms/.test(source(path)) && rel(path) !== "src/study-synonyms.ts") expect(["src/quote-session.ts", "src/catalog-search.ts"]).toContain(rel(path));
     // el resolvedor exacto del catálogo es quien acepta o rechaza cada frase
     expect(code(join(root, "src/quote-session.ts"))).toMatch(/for \(const other of synonymsOf\(key\)\) \{\s*\n\s*const resolution = resolver\.resolve\(observation\(other\)\);/);
   });
@@ -69,7 +69,7 @@ describe("G4.0: dónde pueden aparecer las sesiones de cotización", () => {
   it("G5.9: una cotización por texto solo se cierra con estudios identificados con certeza; sin «listo» nunca se manda un caso a revisión salvo lo que el paciente no puede arreglar escribiendo", () => {
     const turns = code(join(root, "src/quote-session-turns.ts"));
     expect(turns).toMatch(/command === "AUTO" && evaluation\.kind === "REVIEW" && !evaluation\.reasons\.some\(\(reason\) => reason === "STUDY_UNAVAILABLE" \|\| reason === "PRICE_INVALID"\)/);
-    expect(turns).toMatch(/if \(extraction\.wantsQuote && extraction\.result\.status === "RESOLVED"\) return await finalize\(ctx, "AUTO"\);/);
+    expect(turns).toMatch(/if \(extraction\.wantsQuote && extraction\.result\.status === "RESOLVED"\) return await finalize\(ctx, "AUTO", undefined, note\);/);
     // las respuestas por texto no llevan precios: la única cotización sale de formatSessionQuote
     expect(turns.match(/formatSessionQuote\(/g)).toHaveLength(2);
   });

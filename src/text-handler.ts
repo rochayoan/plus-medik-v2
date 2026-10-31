@@ -1,4 +1,4 @@
-import type { ConversationModel, ConversationOutcome, ModelCategory } from "./conversation-model.js";
+import type { ConversationModel, ConversationOutcome, HistoryEntry, ModelCategory } from "./conversation-model.js";
 import { decideAttention } from "./attention-filter.js";
 import { ANSWER_TEXTS, answerFromKnowledge, detectTopics, type AnswerOptions } from "./knowledge-answers.js";
 import { looksAutomated, looksLikeOwnReply, replySignature } from "./reply-guard.js";
@@ -140,6 +140,9 @@ export interface TextHandlerOptions {
   // clasificar, y opcionalmente pedidos de cotización sin foto): lo médico, pedir a una persona y la información del laboratorio NUNCA llegan al modelo, y si el modelo mismo los reconoce, su texto
   // se descarta y el mensaje sigue por el camino determinista. Cualquier falla del modelo responde con el texto fijo.
   conversation?: ConversationModel;
+  // Historial reciente (solo contactos autorizados explícitamente; ausente = el modelo solo ve el mensaje actual). Se consulta ÚNICAMENTE justo antes de llamar al modelo, es decir, nunca para
+  // lo médico, pedir a una persona, la información aprobada ni las cotizaciones. Cualquier falla equivale a «sin historial».
+  history?: (turn: IncomingTurn) => Promise<readonly HistoryEntry[]>;
   log(event: string, data: Record<string, unknown>): void;
 }
 
@@ -160,7 +163,8 @@ export function createTextHandler(options: TextHandlerOptions): (turn: IncomingT
       // G6.0: el único contexto que recibe el modelo es el ESTADO de la conversación (cuántos estudios lleva la solicitud abierta, si hay una duda, si hubo una cotización reciente), calculado por el sistema.
       // Nunca el texto de mensajes anteriores. Si no se puede calcular, el modelo recibe solo el mensaje.
       const context = options.attention ? await turnContext?.memory?.().catch(() => undefined) : undefined;
-      return await conversation.reply({ text: turn.text ?? "", category, ...(context ? { context } : {}) });
+      const history = options.history ? await options.history(turn).catch(() => undefined) : undefined;
+      return await conversation.reply({ text: turn.text ?? "", category, ...(context ? { context } : {}), ...(history && history.length > 0 ? { history } : {}) });
     } catch {
       // Nunca el texto del error ni del mensaje.
       options.log("llm_conversation", { outcome: "FALLBACK", reason: "ERROR", category });

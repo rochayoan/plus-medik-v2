@@ -1,6 +1,6 @@
 import { ExactAliasCatalogResolver } from "./catalog.js";
 import { normalizeStudyKey } from "./consensus.js";
-import { formatQuoteMessage } from "./whatsapp-quote.js";
+import { formatQuoteMessage, QUOTE_FOOTER } from "./whatsapp-quote.js";
 import { buildPublicQuote } from "./partial-auto.js";
 import { synonymsOf } from "./study-synonyms.js";
 import { asksForPrice, classifyText } from "./text-handler.js";
@@ -62,9 +62,12 @@ export interface QuoteSessionsConfig {
   // G6.0 (apagado si falta): atención selectiva. Varios mensajes seguidos del mismo contacto: la confirmación de «anotado» espera un instante y, si llegó un mensaje más nuevo, calla (el estudio ya está en
   // la solicitud; el más nuevo confirma todo junto). Un saludo, una cortesía o un agradecimiento («gracias», «ok gracias», 👍) NUNCA cierran ni tocan una solicitud abierta (G6.1), y «listo» sin nada abierto tras una cotización reciente no se responde.
   attention?: { gate: { enter(from: string, seq?: number): number; retire(from: string, ticket: number): void; isLatest(from: string, ticket: number): boolean }; settleMs: number };
+  // Intérprete de estudios escritos (apagado si falta; ver src/study-interpreter.ts): ayuda con errores de ortografía, abreviaturas y pedidos en lenguaje natural cuando el resolvedor exacto no basta. Todo lo que
+  // devuelve ya viene validado contra el catálogo; si falla o no opina, el mensaje se procesa como siempre.
+  interpreter?: StudyInterpreter;
 }
 
-export const DEFAULT_QUOTE_SESSIONS: Omit<QuoteSessionsConfig, "sleep" | "catalogForText" | "loopProtection" | "ownTexts" | "isInfoQuestion" | "attention"> = { ttlSeconds: 1800, maxItems: 20, waitRetries: 8, waitDelayMs: 1500 };
+export const DEFAULT_QUOTE_SESSIONS: Omit<QuoteSessionsConfig, "sleep" | "catalogForText" | "loopProtection" | "ownTexts" | "isInfoQuestion" | "attention" | "interpreter"> = { ttlSeconds: 1800, maxItems: 20, waitRetries: 8, waitDelayMs: 1500 };
 
 // ───────────────────────────── repositorio (lo implementa audit.ts con RPC) ─────────────────────────────
 
@@ -266,6 +269,108 @@ export function extractStudyRequests(text: string, catalog: readonly CatalogStud
     isRequest,
     wantsQuote: asksForPrice(text)
   };
+}
+
+// ───────────────────────────── interpretación de estudios escritos ─────────────────────────────
+
+// Lo que entendió el intérprete de un mensaje, YA VALIDADO por el backend contra el catálogo: cada estudio es un objeto del catálogo activo (con id de lab_tests) y nunca trae precio ni inventa nada. Los precios los
+// calcula siempre evaluateSession al cerrar, con el catálogo recargado.
+export interface InterpretedStudyRequest {
+  // ¿El mensaje pide estudios o una cotización? Falso para charla, preguntas u otros temas.
+  isQuoteRequest: boolean;
+  wantsQuote: boolean;
+  // Identificados con certeza. `exact`: el texto es literalmente el nombre o un alias del catálogo; si no, fue una interpretación (errata, abreviatura, nombre común).
+  matched: Array<{ study: CatalogStudy; mention: string; exact: boolean }>;
+  // Varios estudios del catálogo podrían ser el pedido (2 a 6): se le pregunta al paciente con opciones del catálogo.
+  ambiguous: Array<{ mention: string; candidates: CatalogStudy[] }>;
+  // Algo que parece un estudio pero no se pudo identificar con certeza: se le pide el nombre exacto.
+  unclear: string[];
+  // El catálogo NO tiene ese estudio (el backend lo comprobó): se informa cuál falta y se cotiza el resto.
+  notFound: string[];
+}
+
+export type StudyInterpreter = (text: string, catalog: readonly CatalogStudy[], hint: { hasDoubt: boolean }) => Promise<InterpretedStudyRequest | undefined>;
+
+export interface InterpretationNotes {
+  notFound: string[];
+  interpreted: Array<{ mention: string; studyName: string }>;
+}
+
+// Lo que el paciente escribió se repite al decirle qué se entendió o qué falta: solo letras, números y signos simples, corto y sin enlaces ni contactos. Nunca se guarda.
+export function cleanMention(value: string): string {
+  const clean = value.normalize("NFC").replace(/[^\p{L}\p{N} .,()+/-]+/gu, " ").replace(/\s+/g, " ").trim().slice(0, 60).trim();
+  return /https?|www|@/i.test(value) || clean.length < 2 ? "" : clean;
+}
+
+export const INTERPRETER_TEXTS = {
+  interpreted: "Interpreté",
+  interpreted_as: "como",
+  not_found: "No encontré en nuestro catálogo:",
+  not_found_outro: "Si quieres, escribe el nombre exacto de otro estudio o envíame una foto de tu receta."
+} as const;
+
+// Misma regla que los demás textos fijos: sin cifras, moneda ni promesas.
+export function assertSafeInterpreterTexts(texts: Record<string, string> = INTERPRETER_TEXTS): void {
+  for (const [key, value] of Object.entries(texts)) if (!value.trim() || /\d|\$|\b(bs|bob|usd|gratis|descuento|promocion|inmediat[a-z]*|persona|equipo|llamaremos)\b/.test(normalizeStudyKey(value))) throw new UnsafeQuoteTextError(`interpreter.${key}`);
+}
+
+// La nota que acompaña a la respuesta: qué se interpretó (solo lo que NO era un nombre del catálogo, para que el paciente pueda corregir) y qué estudios no existen en el catálogo.
+export function formatInterpretationNote(notes: InterpretationNotes | undefined, texts: typeof INTERPRETER_TEXTS = INTERPRETER_TEXTS): string | undefined {
+  if (!notes) return undefined;
+  const lines: string[] = [];
+  for (const item of notes.interpreted.slice(0, 5)) {
+    const mention = cleanMention(item.mention);
+    if (mention) lines.push(`${texts.interpreted} «${mention}» ${texts.interpreted_as} ${list([item.studyName])}.`);
+  }
+  const missing = [...new Set(notes.notFound.map(cleanMention).filter(Boolean))].slice(0, 8);
+  if (missing.length > 0) lines.push(`${texts.not_found} ${missing.map((name) => `«${name}»`).join(", ")}.`, texts.not_found_outro);
+  return lines.length > 0 ? lines.join("\n") : undefined;
+}
+
+// Une lo que entendió el resolvedor exacto con lo que entendió el intérprete. El resolvedor exacto sigue mandando en lo que identificó; el intérprete aporta lo demás. Devuelve la extracción que ya usa
+// la sesión (los estudios que no existen NO cuentan como «sin resolver»: no bloquean la cotización del resto) y las notas para el paciente.
+export function mergeInterpretation(text: string, exact: TextExtraction | undefined, interpreted: InterpretedStudyRequest): { extraction: TextExtraction | undefined; notes: InterpretationNotes } {
+  const matchedById = new Map<string, CatalogStudy>();
+  for (const study of exact?.matched ?? []) matchedById.set(study.id, study);
+  const repeated = exact?.repeatedInMessage ?? 0;
+  const interpretedNotes: InterpretationNotes["interpreted"] = [];
+  for (const item of interpreted.matched) {
+    // Ya identificado por el resolvedor exacto: es el mismo estudio visto por dos caminos, no una repetición del paciente.
+    if (matchedById.has(item.study.id)) continue;
+    matchedById.set(item.study.id, item.study);
+    if (!item.exact) interpretedNotes.push({ mention: item.mention, studyName: item.study.name });
+  }
+  // Una duda ya resuelta por otro camino no se pregunta de nuevo.
+  const groups: string[][] = [...(exact?.result.ambiguous ?? []), ...interpreted.ambiguous.map((group) => group.candidates.map((candidate) => candidate.id))].filter((group) => !group.some((id) => matchedById.has(id)));
+  const unique = new Map(groups.map((group) => [[...group].sort().join("|"), group]));
+  const ambiguous = [...unique.values()].slice(0, 20);
+  const unresolved = Math.min(interpreted.unclear.length, 50);
+  const notes: InterpretationNotes = { notFound: interpreted.notFound, interpreted: interpretedNotes };
+
+  const recognised = matchedById.size + ambiguous.length + unresolved;
+  const isRequest = recognised > 0 && (interpreted.isQuoteRequest || exact !== undefined);
+  if (!isRequest) return { extraction: undefined, notes };
+  const reasons: ItemReason[] = [];
+  if (ambiguous.length > 0) reasons.push("AMBIGUOUS_STUDY");
+  if (unresolved > 0) reasons.push("UNRESOLVED_TEXT");
+  const status: ItemStatus = unresolved > 0 ? "UNRESOLVED" : ambiguous.length > 0 ? "AMBIGUOUS" : "RESOLVED";
+  return {
+    extraction: {
+      result: { status, studyIds: [...matchedById.keys()], ambiguous, unresolved, reasons },
+      matched: [...matchedById.values()],
+      repeatedInMessage: repeated,
+      isRequest: true,
+      wantsQuote: interpreted.wantsQuote || (exact?.wantsQuote ?? false) || asksForPrice(text)
+    },
+    notes
+  };
+}
+
+// Inserta una nota en una cotización ANTES del pie común (así los apéndices de preparación que se agregan después siguen quedando antes del pie).
+export function withNote(body: string, note: string | undefined): string {
+  if (!note) return body;
+  const footer = `\n\n${QUOTE_FOOTER}`;
+  return body.endsWith(footer) ? `${body.slice(0, -footer.length)}\n\n${note}${footer}` : `${body}\n\n${note}`;
 }
 
 // ───────────────────────────── evaluación al cerrar ─────────────────────────────
@@ -490,12 +595,13 @@ export type TextDoubt = "NONE" | "OPTIONS" | "UNRESOLVED" | "RESEND";
 
 // Respuesta a un estudio escrito (G5.9): qué quedó anotado en la sesión y qué falta. Con dudas pregunta (las opciones salen del catálogo, numeradas; el texto del paciente nunca se repite); sin dudas
 // pregunta si terminó. La cotización NUNCA sale de aquí.
-export function formatTextReply(input: { texts: QuoteTexts; head?: string; names: readonly string[]; options: readonly string[]; doubt: TextDoubt; repeated: number }): string {
+export function formatTextReply(input: { texts: QuoteTexts; head?: string; names: readonly string[]; options: readonly string[]; doubt: TextDoubt; repeated: number; note?: string }): string {
   const { texts } = input;
   const lines: string[] = [];
   if (input.head) lines.push(input.head);
   if (input.names.length > 0) lines.push(`${texts.identified_so_far} ${list(input.names)}.`);
   if (input.repeated > 0) lines.push(texts.repeated_note);
+  if (input.note) lines.push(input.note);
   if (input.doubt === "OPTIONS") lines.push(texts.ask_option_intro, ...input.options.map((name, index) => `${index + 1}. ${list([name])}`), texts.ask_option_outro);
   else if (input.doubt === "UNRESOLVED") lines.push(texts.ask_unresolved);
   else if (input.doubt === "RESEND") lines.push(texts.resend);

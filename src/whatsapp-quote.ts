@@ -98,6 +98,9 @@ export const formatBs = (amount: number): string => `Bs ${Number.isInteger(amoun
 
 // Recibe SOLO la salida pública: estudios, precios y el subtotal cotizado.
 // AUTO_PARTIAL se comunica al paciente SIN exponer textos dudosos, candidatos ni datos clínicos.
+// Pie común de las cotizaciones; los apéndices (preparación, notas) se insertan ANTES de él.
+export const QUOTE_FOOTER = "Respóndenos por este chat para continuar. 😊";
+
 export function formatQuoteMessage(quote: PublicQuote, options: { partial?: boolean; instant?: boolean } = {}): string {
   const lines = quote.studies.map((study) => `${emojiFor(study.name)} ${study.name} — ${formatBs(study.priceBs)}`);
   return [
@@ -112,7 +115,7 @@ export function formatQuoteMessage(quote: PublicQuote, options: { partial?: bool
       ...(options.instant ? [] : ["Para intentar completar la cotización, envía otra foto completa y más clara de la receta, o consulta directamente al laboratorio por los estudios no incluidos."])
     ] : []),
     "",
-    ...(options.instant ? [] : ["Respóndenos por este chat para continuar. 😊"])
+    ...(options.instant ? [] : [QUOTE_FOOTER])
   ].join("\n");
 }
 
