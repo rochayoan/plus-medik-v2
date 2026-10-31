@@ -4,8 +4,8 @@ import { catalogFingerprint, processingFailureCode, type AuditLease, type AuditR
 import { withAiCallObserver, type AiCallEvent } from "./cache.js";
 import type { Produced, TurnContext, TurnProducer } from "./guarded-turn.js";
 import {
-  assertSafeQuoteTexts, DEFAULT_QUOTE_SESSIONS, evaluateSession, extractStudyRequests, formatAck, formatSessionQuote, formatTextReply, isGeneralQuestion, optionsOf, parseSessionCommand, parseSessionReply, QUOTE_TEXTS,
-  summarizeSession, type ItemResult, type QuoteBeginResult, type QuoteCloseInput, type QuoteCloseResult, type QuoteReadResult, type QuoteSessionsConfig, type QuoteTexts, type SessionItem, type SessionReply, type TextDoubt
+  assertSafeInterpreterTexts, assertSafeQuoteTexts, DEFAULT_QUOTE_SESSIONS, evaluateSession, extractStudyRequests, formatAck, formatInterpretationNote, formatSessionQuote, formatTextReply, isGeneralQuestion, mergeInterpretation, optionsOf, parseSessionCommand, parseSessionReply, QUOTE_TEXTS,
+  summarizeSession, withNote, type ItemResult, type QuoteBeginResult, type QuoteCloseInput, type QuoteCloseResult, type QuoteReadResult, type QuoteSessionsConfig, type QuoteTexts, type SessionItem, type SessionReply, type TextDoubt
 } from "./quote-session.js";
 import { looksAutomated, looksLikeOwnReply } from "./reply-guard.js";
 import { asksForPrice, classifyText } from "./text-handler.js";
@@ -77,6 +77,7 @@ const ack = (body: string, position: number): Produced => ({ kind: "reply", body
 
 export function resolveQuoteSessionsConfig(config?: Partial<QuoteSessionsConfig>): QuoteSessionsConfig {
   assertSafeQuoteTexts(QUOTE_TEXTS);
+  assertSafeInterpreterTexts();
   return { ...DEFAULT_QUOTE_SESSIONS, ...config };
 }
 
@@ -247,7 +248,8 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
     return read && read.state !== "pending" ? read : undefined;
   }
 
-  async function finalize(ctx: TurnContext, command: CloseCommand, whenNone?: () => Promise<Produced>): Promise<Produced> {
+  // `note`: lo que el intérprete le avisa al paciente (qué interpretó y qué estudios no existen en el catálogo); acompaña a la cotización o a la pregunta, nunca la reemplaza.
+  async function finalize(ctx: TurnContext, command: CloseCommand, whenNone?: () => Promise<Produced>, note?: string): Promise<Produced> {
     const read = await readSession(ctx, true);
     if (!read) return plain(texts.waiting);
     if (read.state === "replay") {
@@ -290,7 +292,7 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
     if (command === "AUTO" && evaluation.kind === "REVIEW" && !evaluation.reasons.some((reason) => reason === "STUDY_UNAVAILABLE" || reason === "PRICE_INVALID")) {
       const asked = describeSession(read.items, catalog);
       deps.log("quote_session", { event: "clarify", doubt: asked.doubt, reasons: evaluation.reasons });
-      return ask(formatTextReply({ texts, names: asked.names, options: asked.options, doubt: asked.doubt === "NONE" ? "UNRESOLVED" : asked.doubt, repeated: 0 }), read.items.length);
+      return ask(formatTextReply({ texts, names: asked.names, options: asked.options, doubt: asked.doubt === "NONE" ? "UNRESOLVED" : asked.doubt, repeated: 0, ...(note ? { note } : {}) }), read.items.length);
     }
     const input: QuoteCloseInput =
       evaluation.kind === "QUOTE" ? { sessionId: read.sessionId, outcome: "QUOTED", lines: evaluation.lines, totalBs: evaluation.totalBs, catalogFingerprint: catalogFingerprint(catalog).hash }
@@ -300,7 +302,7 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
     if (closed.status === "pending") return plain(texts.waiting);
     if (closed.status === "not_open") return plain(texts.empty);
     if (evaluation.kind === "QUOTE") {
-      let body = formatSessionQuote(evaluation.lines, evaluation.duplicates, texts);
+      let body = withNote(formatSessionQuote(evaluation.lines, evaluation.duplicates, texts), note);
       if (deps.quotePreparations) {
         try {
           body = await deps.quotePreparations(body, evaluation.lines.map((line) => line.studyId), catalog, ctx);
@@ -317,7 +319,7 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
   // Responde a un estudio escrito que ya quedó anotado: qué hay en la solicitud hasta ahora y, si hay una duda, la pregunta; si no, si eso es todo. Una sola lectura (sin esperar): si hay mensajes
   // anteriores aún en proceso se responde solo con lo de este mensaje. Con el agrupamiento de mensajes seguidos (G6.0) sí se espera, acotado, a que terminen los anteriores (están por cerrar sin respuesta):
   // el que confirma debe ver TODOS los estudios.
-  async function replyAfterAdd(ctx: TurnContext, begun: Exclude<QuoteBeginResult, { status: "full" }>, own: ItemResult, catalog: readonly CatalogStudy[], repeated: number): Promise<Produced> {
+  async function replyAfterAdd(ctx: TurnContext, begun: Exclude<QuoteBeginResult, { status: "full" }>, own: ItemResult, catalog: readonly CatalogStudy[], repeated: number, note?: string): Promise<Produced> {
     // G6.0: varios mensajes seguidos. Se espera un instante antes de confirmar; si llegó uno más nuevo, este calla (su estudio ya quedó anotado) y el más nuevo confirma todo junto.
     if (attention && attention.settleMs > 0) {
       await sleep(attention.settleMs);
@@ -332,7 +334,7 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
     const items: SessionItem[] = read && read.state === "ready" ? read.items : [{ id: begun.itemId, seq: 1, kind: "TEXT", ...own }];
     const described = describeSession(items, catalog);
     deps.log("quote_session", { event: "text_reply", doubt: described.doubt, studies: described.names.length, summary: read?.state === "ready" });
-    return ack(formatTextReply({ texts, head: texts.added_text, names: described.names, options: described.options, doubt: described.doubt, repeated }), begun.position);
+    return ack(formatTextReply({ texts, head: texts.added_text, names: described.names, options: described.options, doubt: described.doubt, repeated, ...(note ? { note } : {}) }), begun.position);
   }
 
   // «sí», «no» o el número de una opción: solo significan algo con una solicitud abierta; sin ella es un mensaje cualquiera.
@@ -392,7 +394,30 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
         deps.log("quote_session", { event: "catalog_unavailable_for_text" });
         return await handOver(ctx);
       }
-      const extraction = extractStudyRequests(text, catalog);
+      let extraction = extractStudyRequests(text, catalog);
+      // Intérprete de estudios (apagado si falta): solo cuando el resolvedor exacto no basta (no reconoció nada, o algo quedó sin resolver). Lo que devuelve ya está validado contra el catálogo; si falla, sigue
+      // el resultado exacto de siempre.
+      let note: string | undefined;
+      if (config.interpreter && (!extraction || extraction.result.unresolved > 0)) {
+        let interpreted: Awaited<ReturnType<NonNullable<typeof config.interpreter>>>;
+        try {
+          interpreted = await config.interpreter(text, catalog, { hasDoubt: extraction !== undefined });
+        } catch {
+          interpreted = undefined;
+          deps.log("quote_session", { event: "interpreter_failed" });
+        }
+        if (interpreted) {
+          const merged = mergeInterpretation(text, extraction, interpreted);
+          extraction = merged.extraction;
+          note = formatInterpretationNote(merged.notes);
+          deps.log("quote_session", { event: "interpreted", matched: merged.extraction?.matched.length ?? 0, notFound: merged.notes.notFound.length, interpretedAs: merged.notes.interpreted.length, ambiguous: merged.extraction?.result.ambiguous.length ?? 0, unclear: merged.extraction?.result.unresolved ?? 0 });
+          // Pidió solo estudios que el catálogo no tiene: se le dice cuáles y no se toca la solicitud.
+          if (!extraction && merged.notes.notFound.length > 0 && note) {
+            retire();
+            return ask(note, 0);
+          }
+        }
+      }
       if (!extraction) {
         // «¿cuánto es en total?» sin estudios nuevos: pide el precio de lo que ya está anotado. Sin una solicitud abierta es un mensaje cualquiera.
         if (asksForPrice(text)) return await finalize(ctx, "AUTO", () => handOver(ctx));
@@ -404,8 +429,8 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
       deps.log("quote_session", { event: "text_item", status: begun.status, itemStatus: extraction.result.status, studies: extraction.matched.length, ambiguous: extraction.result.ambiguous.length, unresolved: extraction.result.unresolved, wantsQuote: extraction.wantsQuote });
       if (begun.status === "full") return plain(texts.full);
       // Una lista CLARA (todo identificado con certeza) con un pedido explícito de cotizar se cotiza ya, junto con lo que la solicitud tuviera acumulado; con cualquier duda se pregunta.
-      if (extraction.wantsQuote && extraction.result.status === "RESOLVED") return await finalize(ctx, "AUTO");
-      return await replyAfterAdd(ctx, begun, extraction.result, catalog, extraction.repeatedInMessage);
+      if (extraction.wantsQuote && extraction.result.status === "RESOLVED") return await finalize(ctx, "AUTO", undefined, note);
+      return await replyAfterAdd(ctx, begun, extraction.result, catalog, extraction.repeatedInMessage, note);
     } catch (error) {
       const errorCode = processingFailureCode("OTHER");
       deps.log("processing_failed", { messageId: turn.messageId, phone: who, errorCode, ...(error instanceof SessionUnavailableError ? { stage: error.stage } : {}) });

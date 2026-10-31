@@ -12,6 +12,7 @@ import { createSupabaseKnowledgeStore, KnowledgeService } from "../../src/knowle
 import { ANSWER_TEXTS, detectTopics, lazyKnowledge, ttlCache } from "../../src/knowledge-answers.js";
 import { resolveConversationModel } from "../../src/conversation-openai.js";
 import { resolveConversationMemory } from "../../src/conversation-memory.js";
+import { resolveStudyInterpreter } from "../../src/study-interpreter-openai.js";
 import { resolveCrmOutbox } from "../../src/crm-outbox/config.js";
 import { createCrmHandoffSink } from "../../src/crm-outbox/handoff-sink.js";
 import { QUOTE_TEXTS } from "../../src/quote-session.js";
@@ -82,6 +83,8 @@ if (replyGuard.enabled && "error" in replyGuard) logLine("reply_guard_config_inv
 const conversationModel = turnsEnabled && textHandlerEnabled ? resolveConversationModel(process.env, logLine, { responseGuardActive: replyGuard.enabled && !("error" in replyGuard) }) : undefined;
 // Memoria conversacional corta (APAGADA por defecto; ver .env.example y src/conversation-memory.ts): para todos los pacientes que atienda el agente, sin listas de teléfonos.
 const conversationMemory = resolveConversationMemory(process.env, logLine, { conversationActive: conversationModel !== undefined, isAutomated: looksAutomated });
+// Intérprete de estudios escritos (APAGADO por defecto; ver .env.example y src/study-interpreter.ts): errores de ortografía, abreviaturas y pedidos en lenguaje natural; el backend valida todo contra el catálogo.
+const studyInterpreter = resolveStudyInterpreter(process.env, logLine, { textQuotesActive: quoteSessionsEnabled && !replyGuardInvalid });
 // Atención selectiva (G6.0, APAGADA por defecto): PLUSMEDIK_ATTENTION_FILTER=on solo tiene efecto con PLUSMEDIK_TURNS=on y PLUSMEDIK_TEXT_HANDLER=on. NO ignora lo médico, pedir a una persona ni nada que pueda ser una
 // solicitud: solo saludos aislados, cortesías, mensajes sin letras y repeticiones literales (sin responder, sin modelo y sin consultas), y agrupa las confirmaciones de varios mensajes seguidos. Con las sesiones de cotización
 // y la conversación con modelo, el modelo recibe además el ESTADO de la conversación (cantidades, no textos). Opcionales: PLUSMEDIK_ATTENTION_REPEAT_SECONDS (5-600) y PLUSMEDIK_ATTENTION_SETTLE_MS (0-10000). Un valor inválido
@@ -207,7 +210,7 @@ const realDeps: QuoteDeps = {
   turns: turnsEnabled ? { contactKeyFor, replyGuard: replyGuardConfig, attention: attentionConfig, instantPhotoQuotes: instantPhotoQuotesEnabled, memory: conversationMemory,
     crmHandoff: crmOutbox,
     quoteSessions: quoteSessionsEnabled && !replyGuardInvalid
-      ? resolveQuoteSessionsConfig({ catalogForText: ttlCache(() => loadActiveCatalog(), 60_000), loopProtection: replyGuard.enabled, attention: attentionConfig ? { gate: attentionConfig.gate, settleMs: attentionConfig.settleMs } : undefined, ownTexts: [...Object.values(DRAFT_TEXTS), ...Object.values(ANSWER_TEXTS), ...Object.values(QUOTE_TEXTS)], isInfoQuestion: knowledgeAnswersEnabled ? (text) => detectTopics(text, studyInfoEnabled).length > 0 : undefined })
+      ? resolveQuoteSessionsConfig({ interpreter: studyInterpreter, catalogForText: ttlCache(() => loadActiveCatalog(), 60_000), loopProtection: replyGuard.enabled, attention: attentionConfig ? { gate: attentionConfig.gate, settleMs: attentionConfig.settleMs } : undefined, ownTexts: [...Object.values(DRAFT_TEXTS), ...Object.values(ANSWER_TEXTS), ...Object.values(QUOTE_TEXTS)], isInfoQuestion: knowledgeAnswersEnabled ? (text) => detectTopics(text, studyInfoEnabled).length > 0 : undefined })
       : undefined,
     handlers: textHandlerEnabled && !replyGuardInvalid ? { text: createTextHandler({
     handoff: crmOutbox ? createCrmHandoffSink() : BLOCKED_HANDOFF,

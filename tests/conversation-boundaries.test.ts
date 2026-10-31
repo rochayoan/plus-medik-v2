@@ -22,7 +22,7 @@ describe("G5.3: dónde puede aparecer la conversación con modelo", () => {
   });
 
   it("solo la propia capa, el manejador de texto (como TIPO) y el cableado de Vercel la nombran", () => {
-    const allowed = new Set(["src/conversation-model.ts", "src/conversation-openai.ts", "src/conversation-facts.ts", "src/system-prompt.ts", "src/text-handler.ts", "src/conversation-memory.ts", "api/kapso/webhook.ts"]);
+    const allowed = new Set(["src/conversation-model.ts", "src/conversation-openai.ts", "src/conversation-facts.ts", "src/system-prompt.ts", "src/text-handler.ts", "src/conversation-memory.ts", "src/study-interpreter.ts", "api/kapso/webhook.ts"]);
     for (const path of files) {
       if (allowed.has(rel(path))) continue;
       expect(source(path), rel(path)).not.toMatch(MENTION);
