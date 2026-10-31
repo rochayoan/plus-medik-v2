@@ -302,3 +302,21 @@ describe("fronteras de los módulos del intérprete (análisis estático)", () =
     for (const call of calls) expect(call[0]).not.toMatch(/\b(text|message|mention|reply)\b\s*[,:}]/);
   });
 });
+
+describe("compactQuote y wantsQuoteNow (cotizaciones de texto)", () => {
+  it("compactQuote no pierde ninguna línea con contenido", async () => {
+    const { compactQuote } = await import("../src/quote-session.js");
+    const original = ["🩺 *PlusMedik* · Cotización de tu receta", "", "🍬 GLUCOSA — Bs 30", "", "💰 *Total: Bs 30*", "", "Interpreté «x» como GLUCOSA.", "", "🧪 *PREPARACIÓN Y AYUNO*", "", "▫️ *GLUCOSA*", "• Ayuno: 8 horas.", "", "Respóndenos por este chat para continuar. 😊"].join("\n");
+    const compact = compactQuote(original);
+    const content = (text: string) => text.split("\n").filter((line) => line.trim() !== "").map((line) => line.replace("Cotización de tu receta", "Cotización"));
+    expect(content(compact)).toEqual(content(original));
+    expect(compact.length).toBeLessThan(original.length);
+    expect(compactQuote(compact)).toBe(compact);
+  });
+
+  it("wantsQuoteNow: pedir cotiza; nombrar o agregar no", async () => {
+    const { wantsQuoteNow } = await import("../src/quote-session.js");
+    for (const text of ["Quiero colesterol y triglicéridos", "necesito un hemograma", "cotiza glucosa", "me gustaría hacerme el perfil", "¿cuánto cuesta la glucosa?"]) expect(wantsQuoteNow(text), text).toBe(true);
+    for (const text of ["glucosa", "hemograma, glucosa", "y también TSH", "agrega glucosa", "quiero también glucosa", "hola"]) expect(wantsQuoteNow(text), text).toBe(false);
+  });
+});

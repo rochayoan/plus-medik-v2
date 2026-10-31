@@ -136,6 +136,16 @@ function variants(segment: string): string[] {
   return [...new Set(out)];
 }
 
+// ¿El mensaje PIDE los estudios («quiero colesterol», «necesito un hemograma», «cotiza…») y no solo los va nombrando? Un pedido claro se cotiza directamente; nombrar estudios sueltos o decir que se agregan
+// («y también TSH», «agrega glucosa») sigue acumulando y preguntando «¿Eso es todo?».
+const ASKS_FOR = /\b(quiero|quisiera|necesito|requiero|deseo|ocupo|me gustaria|hacerme|hacerse|sacarme|sacarse|realizarme|realizarse)\b/;
+const ADDING = /\b(agrega\w*|anade\w*|suma\w*|incluy\w*|tambien|ademas|falta\w*|otro|otra|mas)\b/;
+export function wantsQuoteNow(text: string): boolean {
+  if (asksForPrice(text)) return true;
+  const key = plain(text.slice(0, 300));
+  return ASKS_FOR.test(key) && !ADDING.test(key);
+}
+
 export interface TextExtraction {
   result: ItemResult;
   // Estudios identificados con certeza en este mensaje (sin repetidos) y cuántos se repitieron dentro del propio mensaje.
@@ -267,7 +277,7 @@ export function extractStudyRequests(text: string, catalog: readonly CatalogStud
     matched: [...matchedById.values()],
     repeatedInMessage: repeated,
     isRequest,
-    wantsQuote: asksForPrice(text)
+    wantsQuote: wantsQuoteNow(text)
   };
 }
 
@@ -360,7 +370,7 @@ export function mergeInterpretation(text: string, exact: TextExtraction | undefi
       matched: [...matchedById.values()],
       repeatedInMessage: repeated,
       isRequest: true,
-      wantsQuote: interpreted.wantsQuote || (exact?.wantsQuote ?? false) || asksForPrice(text)
+      wantsQuote: interpreted.wantsQuote || (exact?.wantsQuote ?? false) || wantsQuoteNow(text)
     },
     notes
   };
@@ -607,6 +617,24 @@ export function formatTextReply(input: { texts: QuoteTexts; head?: string; names
   else if (input.doubt === "RESEND") lines.push(texts.resend);
   else lines.push(texts.confirm_done);
   return lines.join("\n");
+}
+
+// Cotización más corta para WhatsApp (solo cotizaciones por texto): sin líneas en blanco entre el encabezado, los estudios y el total, y una sola línea en blanco entre bloques (notas, preparación, requisitos, pie).
+// No quita ni cambia ninguna línea con contenido (salvo «de tu receta» del encabezado): precios, total e indicaciones aprobadas quedan idénticos.
+export function compactQuote(body: string): string {
+  const lines = body.replaceAll("\r\n", "\n").split("\n");
+  const isNote = (line: string) => line.startsWith(INTERPRETER_TEXTS.interpreted + " «") || line.startsWith(INTERPRETER_TEXTS.not_found);
+  const out: string[] = [];
+  let previous = "";
+  for (const line of lines) {
+    if (line.trim() === "") continue;
+    const startsBlock = line.startsWith("🧪 *") || line.startsWith("📋 *") || line === QUOTE_FOOTER || (isNote(line) && !isNote(previous));
+    if (out.length > 0 && startsBlock) out.push("");
+    out.push(line);
+    previous = line;
+  }
+  if (out[0]) out[0] = out[0].replace("Cotización de tu receta", "Cotización");
+  return out.join("\n");
 }
 
 export function formatSessionQuote(lines: readonly QuoteLine[], duplicates: number, texts: QuoteTexts): string {

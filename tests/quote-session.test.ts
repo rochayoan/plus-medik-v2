@@ -292,7 +292,8 @@ describe("G5.9 · listas de estudios", () => {
     expect(extractStudyRequests("¿cuánto cuesta el hemograma?", CATALOG)).toMatchObject({ wantsQuote: true });
     expect(extractStudyRequests("quiero que me cotices la glucosa", CATALOG)).toMatchObject({ wantsQuote: true });
     expect(extractStudyRequests("hemograma y glucosa", CATALOG)).toMatchObject({ wantsQuote: false });
-    expect(extractStudyRequests("necesito hacerme una glucosa", CATALOG)).toMatchObject({ wantsQuote: false });
+    // Piloto 31/10/2026: un pedido claro («necesito…», «quiero…») se cotiza directamente; nombrar estudios sueltos sigue acumulando.
+    expect(extractStudyRequests("necesito hacerme una glucosa", CATALOG)).toMatchObject({ wantsQuote: true });
   });
 });
 
