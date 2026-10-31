@@ -60,7 +60,8 @@ const replyGuardInvalid = replyGuard.enabled && "error" in replyGuard;
 // sin ella las fotos y los textos de cotización responden con el aviso técnico (falla cerrado). Los estudios y precios son SIEMPRE los de lab_tests al momento de cotizar.
 const quoteSessionsEnabled = on("PLUSMEDIK_QUOTE_SESSIONS") && turnsEnabled && textHandlerEnabled;
 // Piloto opt-in: cada foto entrega SU propia cotización, sin pedir LISTO. No desactiva las cotizaciones por texto ni cambia el ruteo de otros pacientes.
-const instantPhotoQuotesEnabled = on("PLUSMEDIK_INSTANT_PHOTO_QUOTES") && quoteSessionsEnabled && textPilotGate.enabled && textPilotGate.ready;
+// Sirve igual con la puerta del piloto encendida (solo el piloto) o apagada (todos los contactos usan la misma ruta de turnos).
+const instantPhotoQuotesEnabled = on("PLUSMEDIK_INSTANT_PHOTO_QUOTES") && quoteSessionsEnabled && textPilotGate.ready;
 // Opt-in: anexar preparaciones clínicas aprobadas a la cotización, sin llamadas al modelo.
 // Exige turnos auditables, respuesta de texto y conocimiento (falla cerrado si falta cualquiera).
 const quotePreparationsEnabled = on("PLUSMEDIK_QUOTE_PREPARATIONS") && turnsEnabled && textHandlerEnabled && knowledgeAnswersEnabled && replyGuard.enabled && !replyGuardInvalid;
@@ -85,6 +86,11 @@ const conversationModel = turnsEnabled && textHandlerEnabled ? resolveConversati
 // Memoria conversacional corta (APAGADA por defecto; ver .env.example y src/conversation-memory.ts): para todos los pacientes que atienda el agente, sin listas de teléfonos.
 // Tope de respuestas del agente por contacto (APAGADO por defecto; ver .env.example y src/daily-reply-cap.ts): 5 cada 24 horas, aplicado por la base al reservar el envío.
 const dailyReplyCap = resolveDailyReplyCap(process.env, logLine, { turnsActive: turnsEnabled });
+// Alcance real del agente, sin números de teléfono: permite comprobar en los registros de Vercel, tras cada cambio de variables, quién usa la ruta de turnos y si el tope cubre a todos.
+const allContactsOnTurns = turnsEnabled && !textPilotGate.enabled;
+logLine("agent_scope", { turns: turnsEnabled, textHandler: textHandlerEnabled, pilotGate: textPilotGate.enabled, allContactsOnTurns, allowedPhonesRestricted: Boolean(process.env.ALLOWED_PHONES?.trim()), dailyCap: dailyReplyCap !== undefined, instantPhotoQuotes: instantPhotoQuotesEnabled, humanControl: humanControlEnabled });
+// Con la puerta del piloto encendida, los demás contactos siguen por la ruta anterior de fotos, que no pasa por los turnos y por tanto NO tiene el tope: el tope no cubre a todos.
+if (dailyReplyCap && textPilotGate.enabled) logLine("daily_cap_partial_scope", { reason: "PILOT_GATE_ON" });
 const conversationMemory = resolveConversationMemory(process.env, logLine, { conversationActive: conversationModel !== undefined, isAutomated: looksAutomated });
 // Intérprete de estudios escritos (APAGADO por defecto; ver .env.example y src/study-interpreter.ts): errores de ortografía, abreviaturas y pedidos en lenguaje natural; el backend valida todo contra el catálogo.
 const studyInterpreter = resolveStudyInterpreter(process.env, logLine, { textQuotesActive: quoteSessionsEnabled && !replyGuardInvalid });
