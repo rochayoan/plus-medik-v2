@@ -50,6 +50,7 @@ Orden = orden de nombre de archivo (el prefijo numérico es la versión). Depend
 | 15 | `20261103000000_plusmedik_crm_attention_control.sql` | 158 | 0 | 0 | 1 | 0 | 0 | 0+2 | `0f14159a903f…` | 05 (agrega la pausa/reactivación manual del CRM y amplía dos restricciones de `plusmedik_attention_events`) |
 | 16 | `20261104000000_plusmedik_reply_guard_atomic_rate.sql` | 283 | 1 | 0 | 2 | 0 | 0 | 0+0 | `33b409b481cb…` | 01, 03, 04, 05, 06, 10 (cuota atómica del rate limiter; sustituye solo la función de guarda) |
 | 17 | `20261105000000_plusmedik_conversation_memory.sql` | 115 | 1 | 0 | 3 | 0 | 2 | 0+0 | `dc498daf5ef8…` | ninguna (aditiva: memoria conversacional corta por contacto y línea; texto cifrado por la aplicación, sin teléfono, con vencimiento; se accede solo por funciones `plusmedik_memory_*`) |
+| 18 | `20261106000000_plusmedik_daily_reply_cap.sql` | 81 | 0 | 0 | 1 | 0 | 0 | 0+0 | `c16ed9d3088c…` | 01, 03, 04, 05, 06, 10, 16 (aditiva: reserva de envío con tope de respuestas del agente por contacto en ventana móvil; cuenta corridas con envío reservado/aceptado/incierto; no cuenta mensajes humanos) |
 
 Totales tras la migración 16: **26 tablas, 1 vista, 256 objetos en el manifiesto, 59 funciones con `EXECUTE` para `service_role`**. El sha256 completo de cada archivo (con saltos de línea LF) está en el encabezado de ambos SQL de verificación.
 

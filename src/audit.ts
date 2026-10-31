@@ -69,7 +69,7 @@ export interface AuditRepository {
   // Reserva de envío bajo bloqueo de fila: debe concederse ANTES de llamar a Kapso y es la comprobación de pausa (ver block_send en la migración).
   // options.stale (modo turnos) usa plusmedik_turn_reserve_send: además un solo envío en vuelo por contacto y el descarte de respuestas obsoletas.
   // options.guard (G3.2) usa plusmedik_turn_reserve_send_guarded: además el tope por contacto y ventana y las señales de bucle, atómicos con la reserva.
-  reserveSend(runId: string, kind: SendableResult, lease: AuditLease, options?: { stale: StalePolicy; guard?: ReplyGuardRequest }): Promise<SendReservation>;
+  reserveSend(runId: string, kind: SendableResult, lease: AuditLease, options?: { stale: StalePolicy; guard?: ReplyGuardRequest; cap?: { max: number; windowSeconds: number } }): Promise<SendReservation>;
   // Comprobación final, lo más cerca posible de la llamada a Kapso: si el contacto se pausó, la reserva (aún sin usar) se libera. No elimina la carrera residual
   // entre esta respuesta y la llamada externa.
   confirmSend(runId: string, lease: AuditLease): Promise<SendConfirmation>;
@@ -501,14 +501,17 @@ export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}
       try {
         // Modo turnos: la función de turnos envuelve a la de siempre (misma pausa humana y mismo fencing) y agrega 'busy' y 'superseded'.
         const turnArgs = { ...leaseArgs(runId, lease), p_kind: kind, p_lease_seconds: sendLeaseSeconds, p_stale_policy: reserveOptions?.stale };
-        const result = reserveOptions?.guard
+        const guardArg = reserveOptions?.guard ? { ...reserveOptions.guard.config, ...(reserveOptions.guard.signature ? { signature: reserveOptions.guard.signature } : {}) } : null;
+        const result = reserveOptions?.cap
+          ? await rpc("plusmedik_turn_reserve_send_capped", { ...turnArgs, p_guard: guardArg, p_cap: reserveOptions.cap })
+          : reserveOptions?.guard
           ? await rpc("plusmedik_turn_reserve_send_guarded", { ...turnArgs, p_guard: { ...reserveOptions.guard.config, ...(reserveOptions.guard.signature ? { signature: reserveOptions.guard.signature } : {}) } })
           : reserveOptions
             ? await rpc("plusmedik_turn_reserve_send", turnArgs)
             : await rpc("plusmedik_audit_reserve_send", { ...leaseArgs(runId, lease), p_kind: kind, p_lease_seconds: sendLeaseSeconds });
         if (result.status === "reserved" || result.status === "blocked") return result.status;
         if (reserveOptions && (result.status === "busy" || result.status === "superseded")) return result.status;
-        if (reserveOptions?.guard && result.status === "limited") return "limited";
+        if ((reserveOptions?.guard || reserveOptions?.cap) && result.status === "limited") return "limited";
         return "lost";
       } catch (error) {
         if (error instanceof AuditWriteError && error.kind === "LEASE_LOST") return "lost";

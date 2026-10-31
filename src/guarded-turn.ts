@@ -44,6 +44,9 @@ export interface TurnsConfig {
   // G6.0 (apagado si falta): atención selectiva. Descarta las repeticiones literales ANTES de reclamar el turno y, con las sesiones de cotización, agrupa las confirmaciones de varios mensajes seguidos.
   // El resto del filtro (saludos, cortesías y ruido) lo aplica el manejador de texto. Ver src/attention-filter.ts.
   attention?: AttentionConfig;
+  // Tope de respuestas del agente por contacto en una ventana móvil (apagado si falta; ver src/daily-reply-cap.ts). Lo aplica la base dentro de la reserva de envío y cuenta TODO lo que el agente envía
+  // (texto, cotizaciones y fotos); los mensajes humanos de recepción no se cuentan.
+  dailyCap?: { max: number; windowSeconds: number };
   // Memoria conversacional corta (apagada si falta; ver src/conversation-memory.ts): se guardan los mensajes de texto del paciente y las respuestas conversacionales confirmadas como enviadas.
   memory?: ConversationMemory;
   // Quién responde a los mensajes que no son imágenes. Sin manejador, ese tipo de mensaje ni se reclama ni se responde.
@@ -171,7 +174,7 @@ export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claime
         try {
           // La guarda (G3.2) solo acompaña a lo conversacional; la base lo vuelve a comprobar (una imagen o una cotización nunca se limitan).
           const guard = deps.turns?.replyGuard && ref.kind !== "IMAGE" && (result === "conversation" || result === "technical_issue") ? { config: deps.turns.replyGuard, ...(produced.signature ? { signature: produced.signature } : {}) } : undefined;
-          reservation = deps.turns ? await deps.audit!.reserveSend(auditRunId!, result, lease!, guard ? { stale, guard } : { stale }) : await deps.audit!.reserveSend(auditRunId!, result, lease!);
+          reservation = deps.turns ? await deps.audit!.reserveSend(auditRunId!, result, lease!, { stale, ...(guard ? { guard } : {}), ...(deps.turns.dailyCap ? { cap: deps.turns.dailyCap } : {}) }) : await deps.audit!.reserveSend(auditRunId!, result, lease!);
         } catch (error) {
           reservation = "unavailable";
           deps.log("audit_unavailable", { stage: "reserve", ...writeErrorKind(error) });
