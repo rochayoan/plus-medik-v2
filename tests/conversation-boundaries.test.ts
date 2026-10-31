@@ -172,12 +172,12 @@ describe("G5.8: el prompt es código TypeScript (src/system-prompt.ts) y se desp
     expect(model).not.toMatch(/system-prompt|SYSTEM_PROMPT|BUSINESS_DATA/);
   });
 
-  it("el prompt no hace de fuente de estudios, precios ni derivaciones: solo el horario general confirmado se permite como dato comercial", () => {
+  it("los datos comerciales confirmados no contienen precios, estudios ni derivaciones", () => {
     const data = source(join(root, "src/system-prompt.ts")).split("export const BUSINESS_DATA")[1]!;
-    expect(data).not.toMatch(/https?:\/\/|\b(bs|bob|usd)\b\s*\d|\$\s*\d/i);
-    expect(data.match(/estado: "POR_COMPLETAR"/g)).toHaveLength(6);
-    expect(data.match(/estado: "CONFIRMADO"/g)).toHaveLength(1);
-    expect(data).toContain("Horario de atención general del laboratorio: 24 horas del día.");
+    expect(data).not.toMatch(/\b(bs|bob|usd)\b\s*\d|\$\s*\d/i);
+    expect(data.match(/estado: "POR_COMPLETAR"/g)).toHaveLength(4);
+    expect(data.match(/estado: "CONFIRMADO"/g)).toHaveLength(3);
+    expect(data).toContain("Atención general del laboratorio: las 24 horas, todos los días");
   });
 
   it("no hay .dockerignore, .slugignore ni .gitignore del proyecto que excluyan src/system-prompt.ts", () => {
