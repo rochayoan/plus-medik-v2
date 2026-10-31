@@ -25,25 +25,23 @@ const check = (data: BusinessData, now = NOW) => {
 describe("src/system-prompt.ts real de PlusMedik", () => {
   const report = validateBusinessData(BUSINESS_DATA);
 
-  it("solo el horario general está confirmado por el usuario; otras seis secciones siguen pendientes", () => {
+  it("confirma negocio, horario y servicios; deja pendientes datos no verificados", () => {
     expect(report.problems).toEqual([]);
     expect(report.sections.map((section) => section.id)).toEqual([...DATA_SECTION_IDS]);
-    for (const section of report.sections.filter((item) => item.id !== "HORARIOS")) {
+    for (const section of report.sections.filter((item) => !["NEGOCIO", "HORARIOS", "SERVICIOS"].includes(item.id))) {
       expect(section, section.id).toMatchObject({ status: "PENDING", text: "", source: null, validUntil: null });
     }
-    expect(report.sections.find((section) => section.id === "HORARIOS")).toMatchObject({
-      status: "CONFIRMED", source: "confirmacion_usuario_2026-10-30", validUntil: "2026-12-31",
-      text: "- Horario de atención general del laboratorio: 24 horas del día."
-    });
+    for (const id of ["NEGOCIO", "HORARIOS", "SERVICIOS"]) {
+      expect(report.sections.find((section) => section.id === id)).toMatchObject({ status: "CONFIRMED", validUntil: "2026-12-31" });
+    }
+    expect(report.sections.find((section) => section.id === "HORARIOS")?.text).toContain("las 24 horas, todos los días");
   });
 
-  it("lista lo que falta con el nombre de cada dato (nombre comercial, direcciones, horarios, teléfonos, servicios, pagos, políticas)", () => {
+  it("solo señala como pendientes las secciones no confirmadas", () => {
     const missing = Object.fromEntries(report.pending.map((item) => [item.section, item.missing]));
-    expect(missing.NEGOCIO).toContain("Nombre comercial");
+    expect(Object.keys(missing).sort()).toEqual(["METODOS_DE_PAGO", "POLITICAS", "SUCURSALES", "TELEFONOS"]);
     expect(missing.SUCURSALES).toContain("Sucursal 1 — Dirección");
-    expect(missing).not.toHaveProperty("HORARIOS");
     expect(missing.TELEFONOS).toContain("WhatsApp de atención");
-    expect(missing.SERVICIOS).toContain("Toma de muestras a domicilio");
     expect(missing.METODOS_DE_PAGO).toContain("Métodos aceptados");
     expect(missing.POLITICAS).toContain("Facturación");
     expect(check(BUSINESS_DATA).complete).toBe(false);
@@ -65,11 +63,11 @@ describe("src/system-prompt.ts real de PlusMedik", () => {
     expect(SYSTEM_PROMPT).not.toMatch(/https?:\/\/|@|\+?\d[\d ]{6,}\d|\b(bs|bob|usd)\b|\$/i);
   });
 
-  it("solo permite afirmar el horario general confirmado, sin inventar días, servicios o sucursales", () => {
+  it("permite los datos confirmados sin inventar plazos ni horarios específicos", () => {
     const facts = renderFacts(report.sections, new Date("2026-10-30T12:00:00Z"));
-    expect(facts.included).toEqual(["HORARIOS"]);
-    expect(guardModelReply("El laboratorio atiende las 24 horas del día.", facts.context)).toMatchObject({ ok: true });
-    expect(guardModelReply("Atendemos de lunes a viernes.", facts.context)).toMatchObject({ ok: false });
+    expect(facts.included).toEqual(["NEGOCIO", "HORARIOS", "SERVICIOS"]);
+    expect(facts.block).toContain("las 24 horas, todos los días");
+    expect(facts.block).toContain("https://maps.app.goo.gl/oj24D8D3fCiofd9R8");
     expect(guardModelReply("Abrimos a las 08:00.", facts.context)).toMatchObject({ ok: false });
     expect(guardModelReply("El resultado del hemograma tarda 24 horas.", facts.context)).toMatchObject({ ok: false });
     expect(renderFacts(report.sections, new Date("2027-01-01T12:00:00Z")).included).not.toContain("HORARIOS");
