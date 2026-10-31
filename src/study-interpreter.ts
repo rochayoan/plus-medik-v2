@@ -29,6 +29,7 @@ QUÉ HACER
 2. Para CADA mención llama a search_studies. Si no hay resultados, prueba la forma correcta del nombre o la abreviatura desarrollada. Con get_study puedes ver los alias de un candidato.
 3. Clasifica cada mención:
    - MATCH: estás seguro de que la mención es ESE estudio (mismo nombre, abreviatura estándar, error de ortografía o nombre común equivalente) y apareció en los resultados. studyIds con exactamente 1 id. confidence HIGH solo si estás seguro; si dudas, LOW.
+   - Un error de ortografía o una abreviatura de un nombre que existe ("glucoza", "emograma", "trigliseridos") es MATCH con el estudio de nombre base más simple (p. ej. GLUCOSA, no GLUCOSA NEONATAL ni POSTCARGA) cuando ese candidato lidera claramente la puntuación. Las variantes con apellido (NEONATAL, POSTPANDRIAL, LDL, EN ORINA...) solo se eligen si el paciente las menciona.
    - AMBIGUOUS: dos o más estudios de los resultados podrían ser lo que pidió y no puedes decidir cuál (studyIds de 2 a ${MAX_AMBIGUOUS_OPTIONS} ids).
    - NOT_FOUND: tras buscar, el catálogo no tiene ese estudio. studyIds vacío. NUNCA lo reemplaces por un estudio parecido pero distinto.
 4. Usa SOLO ids devueltos por las herramientas. No inventes ids.
