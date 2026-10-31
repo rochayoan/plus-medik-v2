@@ -22,13 +22,13 @@ describe("G5.3: dónde puede aparecer la conversación con modelo", () => {
   });
 
   it("solo la propia capa, el manejador de texto (como TIPO) y el cableado de Vercel la nombran", () => {
-    const allowed = new Set(["src/conversation-model.ts", "src/conversation-openai.ts", "src/conversation-facts.ts", "src/system-prompt.ts", "src/text-handler.ts", "api/kapso/webhook.ts"]);
+    const allowed = new Set(["src/conversation-model.ts", "src/conversation-openai.ts", "src/conversation-facts.ts", "src/system-prompt.ts", "src/text-handler.ts", "src/conversation-memory.ts", "api/kapso/webhook.ts"]);
     for (const path of files) {
       if (allowed.has(rel(path))) continue;
       expect(source(path), rel(path)).not.toMatch(MENTION);
     }
     // el manejador de texto solo importa TIPOS de la capa: no depende de ella ni del proveedor en tiempo de ejecución
-    expect(source(join(root, "src/text-handler.ts"))).toMatch(/^import type \{ ConversationModel, ConversationOutcome, ModelCategory \} from "\.\/conversation-model\.js";$/m);
+    expect(source(join(root, "src/text-handler.ts"))).toMatch(/^import type \{ ConversationModel, ConversationOutcome, HistoryEntry, ModelCategory \} from "\.\/conversation-model\.js";$/m);
     expect(importsOf(join(root, "src/text-handler.ts")).filter((imported) => /conversation|openai/i.test(imported))).toEqual(["./conversation-model.js"]);
   });
 });
@@ -68,7 +68,7 @@ describe("G5.3: privacidad y registro", () => {
     expect(model).toMatch(/sanitizeForModel\(text, maxInputChars\)/);
     expect(model).not.toMatch(/turn\.from|contactPhone|\.phone/);
     // G6.0: además del mensaje, solo el ESTADO de la conversación (cantidades), y únicamente con la atención selectiva
-    expect(code(join(root, "src/text-handler.ts"))).toMatch(/conversation\.reply\(\{ text: turn\.text \?\? "", category, \.\.\.\(context \? \{ context \} : \{\}\) \}\)/);
+    expect(code(join(root, "src/text-handler.ts"))).toMatch(/conversation\.reply\(\{ text: turn\.text \?\? "", category, \.\.\.\(context \? \{ context \} : \{\}\), \.\.\.\(history && history\.length > 0 \? \{ history \} : \{\}\) \}\)/);
     expect(code(join(root, "src/text-handler.ts"))).toMatch(/const context = options\.attention \? await turnContext\?\.memory\?\.\(\)\.catch\(\(\) => undefined\) : undefined;/);
   });
 });

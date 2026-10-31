@@ -1,5 +1,6 @@
 import { AuditWriteError, type AuditLease, type AuditRepository, type SendableResult, type SendConfirmation, type SendReservation, type StalePolicy, type TurnKind } from "./audit.js";
 import type { AttentionConfig } from "./attention-filter.js";
+import type { ConversationMemory } from "./conversation-memory.js";
 import type { CrmHandoff } from "./crm-outbox/types.js";
 import type { QuoteSessionsConfig } from "./quote-session.js";
 import type { ReplyGuardConfig } from "./reply-guard.js";
@@ -43,6 +44,8 @@ export interface TurnsConfig {
   // G6.0 (apagado si falta): atención selectiva. Descarta las repeticiones literales ANTES de reclamar el turno y, con las sesiones de cotización, agrupa las confirmaciones de varios mensajes seguidos.
   // El resto del filtro (saludos, cortesías y ruido) lo aplica el manejador de texto. Ver src/attention-filter.ts.
   attention?: AttentionConfig;
+  // Memoria conversacional corta (apagada si falta; ver src/conversation-memory.ts): se guardan los mensajes de texto del paciente y las respuestas conversacionales confirmadas como enviadas.
+  memory?: ConversationMemory;
   // Quién responde a los mensajes que no son imágenes. Sin manejador, ese tipo de mensaje ni se reclama ni se responde.
   handlers?: TurnHandlers;
 }
@@ -212,14 +215,20 @@ export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claime
       }
     }
 
+    let delivered: { providerMessageId?: string } | undefined;
     try {
       const sent = await deps.sendText(ref.from, reply);
+      delivered = sent ?? {};
       deps.log("reply_sent", { messageId: ref.messageId, phone: ref.who, result });
       await context.persist("reply", (audit, runId, held) => audit.recordReply(runId, { state: "ACCEPTED", result, processingStatus, providerMessageId: sent?.providerMessageId }, held));
     } catch (error) {
       deps.log("send_failed", { messageId: ref.messageId, phone: ref.who, errorCode: "KAPSO_SEND_UNCERTAIN" });
       // No se reintenta: un error de transporte no demuestra que Kapso no aceptó el mensaje.
       await context.persist("reply", (audit, runId, held) => audit.recordReply(runId, { state: "UNKNOWN", result, processingStatus }, held));
+    }
+    // Memoria conversacional: SOLO una respuesta que Kapso aceptó (un envío incierto no se guarda) y solo lo conversacional (las cotizaciones y las fotos no). Fuera del try: una falla de la memoria nunca altera el resultado del envío.
+    if (delivered && result === "conversation" && contactKey && deps.turns?.memory) {
+      await deps.turns.memory.rememberReply({ contactKey, messageId: delivered.providerMessageId ?? `reply:${ref.messageId}`, text: reply });
     }
     return result;
   }
