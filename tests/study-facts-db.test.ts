@@ -478,7 +478,7 @@ describe.skipIf(!bin)("datos aprobados por estudio contra PostgreSQL real (migra
 
     it("es la duodécima (la 13 es la cola de salida hacia el CRM, G5.0) y las once anteriores no se modificaron (hash de la 11 fijado)", () => {
       expect(MIGRATIONS[11]).toBe(FACTS);
-      expect(MIGRATIONS).toHaveLength(17);
+      expect(MIGRATIONS).toHaveLength(18);
       expect(sha("20261030000000_plusmedik_quote_sessions.sql")).toBe("af0b7ed8399ccda325b343b07b025a8e7978317659a533b2a2fb7eb2a68ad314");
     });
 

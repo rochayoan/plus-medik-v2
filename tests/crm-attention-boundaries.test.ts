@@ -98,7 +98,7 @@ describe("Fase 1: la pausa manual es real, no un mensaje de WhatsApp simulado", 
 describe("Fase 1: la migración 15 es aditiva y de acceso restringido", () => {
   const sql = code(MIGRATION);
   it("es la decimoquinta, no borra ni vacía nada, no toca el esquema crm ni las tablas de otras capas", () => {
-    expect(readdirSync(join(root, "supabase/migrations")).filter((name) => name.endsWith(".sql")).sort().at(-3)).toBe("20261103000000_plusmedik_crm_attention_control.sql");
+    expect(readdirSync(join(root, "supabase/migrations")).filter((name) => name.endsWith(".sql")).sort().at(-4)).toBe("20261103000000_plusmedik_crm_attention_control.sql");
     expect(sql).not.toMatch(/\b(drop table|drop function|delete from|truncate|drop schema|alter table public\.plusmedik_audit_runs)\b/i);
     expect(sql).not.toMatch(/\bcrm\./i);
     expect(sql).not.toMatch(/\blab_tests\b/);
