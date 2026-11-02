@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@kapso/whatsapp-cloud-api", () => ({ WhatsAppClient: class { messages = { sendText: vi.fn() }; media = { download: vi.fn() }; rawFetch = vi.fn(); fetch = vi.fn(); } }));
 vi.mock("@vercel/functions", () => ({ waitUntil: () => undefined }));
 
-const NAMES = ["PLUSMEDIK_TURNS", "PLUSMEDIK_TEXT_HANDLER", "PLUSMEDIK_QUOTE_SESSIONS", "PLUSMEDIK_INSTANT_PHOTO_QUOTES", "PLUSMEDIK_DAILY_REPLY_CAP", "PLUSMEDIK_DAILY_REPLY_CAP_MAX", "PLUSMEDIK_DAILY_REPLY_CAP_HOURS", "PLUSMEDIK_TEXT_PILOT_GUARD", "PLUSMEDIK_TEXT_PILOT_EXTRA_PHONES", "PLUSMEDIK_AGENT_CONTROL_PHONES", "ALLOWED_PHONES", "PLUSMEDIK_HUMAN_CONTROL", "PLUSMEDIK_REPLY_GUARD", "PLUSMEDIK_KNOWLEDGE_ANSWERS", "PLUSMEDIK_LLM_CONVERSATION", "PLUSMEDIK_CONVERSATION_MEMORY", "PLUSMEDIK_SMART_QUOTES", "PLUSMEDIK_BATCH_ENGINE"];
+const NAMES = ["PLUSMEDIK_TURNS", "PLUSMEDIK_TEXT_HANDLER", "PLUSMEDIK_QUOTE_SESSIONS", "PLUSMEDIK_INSTANT_PHOTO_QUOTES", "PLUSMEDIK_DAILY_REPLY_CAP", "PLUSMEDIK_DAILY_REPLY_CAP_MAX", "PLUSMEDIK_DAILY_REPLY_CAP_HOURS", "PLUSMEDIK_TEXT_PILOT_GUARD", "PLUSMEDIK_TEXT_PILOT_EXTRA_PHONES", "PLUSMEDIK_AGENT_CONTROL_PHONES", "ALLOWED_PHONES", "PLUSMEDIK_HUMAN_CONTROL", "PLUSMEDIK_REPLY_GUARD", "PLUSMEDIK_KNOWLEDGE_ANSWERS", "PLUSMEDIK_LLM_CONVERSATION", "PLUSMEDIK_CONVERSATION_MEMORY", "PLUSMEDIK_SMART_QUOTES", "PLUSMEDIK_BATCH_ENGINE", "PLUSMEDIK_AUDIO", "PLUSMEDIK_AUDIO_LANGUAGE", "PLUSMEDIK_AUDIO_MAX_BYTES", "OPENAI_API_KEY", "OPENAI_TRANSCRIPTION_MODEL"];
 const saved: Record<string, string | undefined> = {};
 const BASE = { PLUSMEDIK_TURNS: "on", PLUSMEDIK_TEXT_HANDLER: "on", PLUSMEDIK_QUOTE_SESSIONS: "on", PLUSMEDIK_INSTANT_PHOTO_QUOTES: "on", PLUSMEDIK_DAILY_REPLY_CAP: "on" };
 
@@ -49,6 +49,59 @@ describe("alcance del agente según el entorno", () => {
   it("las fotos instantáneas son opt-in: sin su bandera, abierto a todos no se activan", async () => {
     const { scope: s } = await scope({ ...BASE, PLUSMEDIK_INSTANT_PHOTO_QUOTES: "" });
     expect(s).toMatchObject({ allContactsOnTurns: true, instantPhotoQuotes: false });
+  });
+
+  describe("audios (PLUSMEDIK_AUDIO)", () => {
+    const FULL = { PLUSMEDIK_AUDIO: "on", OPENAI_API_KEY: "sk-prueba", OPENAI_TRANSCRIPTION_MODEL: "modelo-de-prueba" };
+    const load = async (env: Record<string, string>) => {
+      for (const name of NAMES) delete process.env[name];
+      Object.assign(process.env, env);
+      const lines: Array<Record<string, any>> = [];
+      const spy = vi.spyOn(console, "log").mockImplementation((line: unknown) => {
+        try { lines.push(JSON.parse(String(line))); } catch { /* otras líneas */ }
+      });
+      vi.resetModules();
+      const mod = await import("../api/kapso/webhook.js");
+      spy.mockRestore();
+      return { lines, scope: lines.find((line) => line.event === "audio_scope") };
+    };
+
+    it("APAGADOS por defecto: sin la variable (o en blanco/off/otro valor) no hay procesamiento de audios y no se registra ningún aviso", async () => {
+      for (const value of [undefined, "", "off", "true", "1"]) {
+        const { lines, scope: s } = await load({ ...BASE, ...FULL, ...(value === undefined ? { PLUSMEDIK_AUDIO: "" } : { PLUSMEDIK_AUDIO: value }) });
+        // ni una línea nueva en el registro de arranque
+        expect(s, String(value)).toBeUndefined();
+        expect(lines.map((line) => line.event).filter((event) => /audio/.test(event)), String(value)).toEqual([]);
+        expect(lines.map((line) => line.event), String(value)).not.toContain("audio_config_invalid");
+        expect(lines.map((line) => line.event), String(value)).not.toContain("audio_inactive");
+      }
+    });
+
+    it("«on» con la clave de OpenAI y el modelo y los turnos con texto: encendido; no pide clave de cifrado, base de datos, cron ni migraciones", async () => {
+      const { scope: s } = await load({ ...BASE, ...FULL });
+      expect(s).toEqual(expect.objectContaining({ enabled: true }));
+    });
+
+    it("configuración incompleta o inválida: queda APAGADO y registra solo un código (nunca el valor)", async () => {
+      const cases: Array<[Record<string, string>, string]> = [
+        [{ OPENAI_API_KEY: "" }, "MISSING_API_KEY"], [{ OPENAI_TRANSCRIPTION_MODEL: "" }, "MISSING_MODEL"],
+        [{ PLUSMEDIK_AUDIO_LANGUAGE: "espanol" }, "INVALID_LANGUAGE"], [{ PLUSMEDIK_AUDIO_MAX_BYTES: "12" }, "INVALID_MAX_BYTES"]
+      ];
+      for (const [override, error] of cases) {
+        const { lines, scope: s } = await load({ ...BASE, ...FULL, ...override });
+        expect(s, error).toEqual(expect.objectContaining({ enabled: false }));
+        expect(lines.find((line) => line.event === "audio_config_invalid"), error).toEqual(expect.objectContaining({ error }));
+        expect(JSON.stringify(lines)).not.toContain("sk-prueba");
+      }
+    });
+
+    it("sin turnos o sin manejador de texto no se activa (y se registra el motivo): un audio no tendría quién lo atienda", async () => {
+      for (const missing of ["PLUSMEDIK_TURNS", "PLUSMEDIK_TEXT_HANDLER"]) {
+        const { lines, scope: s } = await load({ ...BASE, ...FULL, [missing]: "" });
+        expect(s, missing).toEqual(expect.objectContaining({ enabled: false }));
+        expect(lines.find((line) => line.event === "audio_inactive"), missing).toEqual(expect.objectContaining({ reason: "TURNS_AND_TEXT_HANDLER_REQUIRED" }));
+      }
+    });
   });
 
   describe("motor global de lotes (PLUSMEDIK_BATCH_ENGINE)", () => {

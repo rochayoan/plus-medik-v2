@@ -1,4 +1,6 @@
 import { repeatCandidate } from "./attention-filter.js";
+import { audioFailureProducer, resolveAudioTurns } from "./audio-turns.js";
+import type { AudioFailureCode } from "./audio/types.js";
 import { engineCanDecide, engineReply, photoOutcomeOf, shadowAfter, shadowBefore } from "./batch-engine.js";
 import { AuditWriteError, processingFailureCode, type KnowledgeRefRecord } from "./audit.js";
 import { beginTurn, type ClaimedTurn, type Produced, type StalePolicy, type TurnContext, type TurnKind, type TurnOutcome, type TurnProducer, type TurnRef } from "./guarded-turn.js";
@@ -20,7 +22,11 @@ import { imageProducer, maskPhone, TECHNICAL_ISSUE_MESSAGE, type IncomingImage, 
 export interface IncomingTurn {
   messageId: string;
   from: string;
-  kind: TurnKind;
+  // AUDIO: nota de voz aún sin escuchar (solo con el procesamiento de audios encendido). Se transcribe ANTES de atender al contacto y pasa a ser TEXT (la transcripción) o OTHER con `audioFailure`.
+  kind: TurnKind | "AUDIO";
+  audioFailure?: AudioFailureCode;
+  // El texto es la transcripción de un audio (no lo escribió el paciente).
+  fromAudio?: true;
   // Solo en memoria: el contenido de un mensaje de texto NUNCA se registra, ni en el log ni en la auditoría.
   text?: string;
   mediaUrl?: string;
@@ -78,6 +84,8 @@ export interface TurnHandlers {
 //   · mensajes importados del historial (origin history_sync);
 //   · mensajes viejos (más de maxAgeSeconds), del futuro lejano o sin instante conocido: nadie debe recibir una respuesta a un mensaje de hace horas.
 export interface ExtractOptions {
+  // Reconocer los audios entrantes (kind AUDIO). Apagado, un audio sigue siendo un mensaje de otro tipo y se ignora.
+  audio?: boolean;
   eventName?: string | null;
   nowSeconds?: number;
   maxAgeSeconds?: number;
@@ -122,6 +130,13 @@ export function extractIncomingTurns(payload: Record<string, any>, batchHeader?:
       if (typeof body !== "string" || body.trim() === "") continue;
       if (!fresh(timestamp, message.kapso?.origin)) continue;
       out.push({ ...base, kind: "TEXT", text: body });
+    } else if (options.audio && (type === "audio" || message.audio)) {
+      if (!fresh(timestamp, message.kapso?.origin)) continue;
+      // El medio se baja SOLO del enlace de Kapso (media_url o media_data.url), nunca de uno de Meta; sin enlace, por el id del audio con el SDK oficial.
+      const candidates = [message.kapso?.media_url, message.kapso?.media_data?.url];
+      const mediaUrl = candidates.find((c): c is string => typeof c === "string" && c.trim() !== "")?.trim();
+      const mediaId = typeof message.audio?.id === "string" && message.audio.id.trim() !== "" ? message.audio.id : undefined;
+      out.push({ ...base, kind: "AUDIO", ...(mediaUrl ? { mediaUrl } : {}), ...(mediaId ? { mediaId } : {}) });
     } else if (type && type !== "reaction") {
       if (!fresh(timestamp, message.kapso?.origin)) continue;
       out.push({ ...base, kind: "OTHER" });
@@ -142,7 +157,8 @@ export interface TurnReport {
 }
 
 const imageOf = (turn: IncomingTurn): IncomingImage => ({ messageId: turn.messageId, from: turn.from, mediaUrl: turn.mediaUrl, mediaId: turn.mediaId });
-const refOf = (turn: IncomingTurn): TurnRef => ({ messageId: turn.messageId, mediaId: turn.mediaId, from: turn.from, kind: turn.kind, who: maskPhone(turn.from) });
+// Un audio se reclama como un mensaje de texto: su respuesta se comporta como la de un texto (guarda de respuestas, tope diario, pausa humana).
+const refOf = (turn: IncomingTurn): TurnRef => ({ messageId: turn.messageId, mediaId: turn.mediaId, from: turn.from, kind: turn.kind === "AUDIO" ? "TEXT" : turn.kind, who: maskPhone(turn.from) });
 
 const DEFAULT_CONTEXT_SECONDS = 86_400;
 
@@ -230,6 +246,8 @@ export function conversationProducer(turn: IncomingTurn, handler: (turn: Incomin
 // Qué turnos se procesan con la configuración actual: las imágenes siempre; un texto u otro tipo solo si hay un manejador para ese tipo.
 export function producerFor(turn: IncomingTurn, deps: QuoteDeps): TurnProducer | undefined {
   const handlers = deps.turns?.handlers;
+  // Audios: ya transcritos son TEXT y siguen la ruta de texto; uno sin escuchar o que falló solo produce su aviso (nunca contenido inventado). Sin el procesamiento de audios no se procesa.
+  if (turn.kind === "AUDIO" || turn.audioFailure) return deps.turns?.audio && handlers?.text ? audioFailureProducer(turn, deps) : undefined;
   const sessions = deps.turns?.quoteSessions;
   // Con sesiones, la foto no se cotiza sola: se agrega a la sesión del contacto (la cotización sale con «listo»). Solo si hay manejador de texto (si no, nadie podría cerrar la sesión).
   if (turn.kind === "IMAGE") return sessions && handlers?.text && !deps.turns?.instantPhotoQuotes ? sessionImageProducer(imageOf(turn), deps, sessions) : imageProducer(imageOf(turn), deps);
@@ -269,7 +287,8 @@ function isRepeatedMessage(turn: IncomingTurn, deps: QuoteDeps): boolean {
   return attention.repeats.seen(turn.from, turn.text);
 }
 
-export const hasProcessableTurns = (turns: IncomingTurn[], deps: QuoteDeps): boolean => turns.some((turn) => turn.kind === "IMAGE" || (turn.kind === "TEXT" ? deps.turns?.handlers?.text : deps.turns?.handlers?.other));
+export const hasProcessableTurns = (turns: IncomingTurn[], deps: QuoteDeps): boolean =>
+  turns.some((turn) => turn.kind === "IMAGE" || (turn.kind === "AUDIO" ? deps.turns?.audio && deps.turns.handlers?.text : turn.kind === "TEXT" ? deps.turns?.handlers?.text : deps.turns?.handlers?.other));
 
 // Procesa los turnos recibidos EN EL ORDEN DADO (extractIncomingTurns ya los ordena por el instante del mensaje):
 //   1. los claims se hacen UNO por UNO, en ese orden, así la numeración del contacto respeta el orden en que el paciente escribió;
@@ -279,7 +298,13 @@ export const hasProcessableTurns = (turns: IncomingTurn[], deps: QuoteDeps): boo
 // solicitud con UNA respuesta: los textos seguidos se leen como uno, cada foto conserva su análisis y todo sale en un solo mensaje, con una sola reserva de envío (cuenta una vez para el
 // tope de respuestas, y la pausa humana se comprueba una vez). Un contacto con un solo mensaje sigue exactamente la ruta de siempre.
 // Un fallo en un turno no impide los demás. Nunca se registra el contenido de un mensaje.
-export async function processTurns(turns: IncomingTurn[], deps: QuoteDeps): Promise<TurnReport[]> {
+export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Promise<TurnReport[]> {
+  // Copia local: los audios se sustituyen en su lugar por su transcripción (o su aviso) sin tocar lo que recibió quien llama.
+  const turns = input.map((turn) => ({ ...turn }));
+  const audio = deps.turns?.audio;
+  const resolveFor = async (indices: readonly number[]): Promise<void> => {
+    if (audio) await resolveAudioTurns({ indices, turns, claims, audio, deps });
+  };
   const reports: TurnReport[] = turns.map((turn) => ({ messageId: turn.messageId, result: "skipped" }));
   const live: number[] = [];
   for (const [index, turn] of turns.entries()) {
@@ -329,10 +354,12 @@ export async function processTurns(turns: IncomingTurn[], deps: QuoteDeps): Prom
   };
   const work: Promise<void>[] = [];
   for (const index of live) {
-    const turn = turns[index]!;
     const claimed = claims.get(index);
-    if (!claimed || batched.has(turn.from)) continue;
+    if (!claimed || batched.has(turns[index]!.from)) continue;
     work.push((async () => {
+      // Un audio se escucha (transcribe) antes de atender el mensaje.
+      await resolveFor([index]);
+      const turn = turns[index]!;
       try {
         const result = await claimed.run(producerFor(turn, deps)!);
         reports[index] = { messageId: turn.messageId, result };
@@ -345,7 +372,13 @@ export async function processTurns(turns: IncomingTurn[], deps: QuoteDeps): Prom
       }
     })());
   }
-  for (const from of batched) work.push(processContactBatch(perContact.get(from)!, turns, claims, reports, deps, forget));
+  // Un contacto con varios mensajes espera a que TODOS sus audios estén escuchados antes de que el agente le responda (una sola respuesta coherente, en el orden en que escribió).
+  for (const from of batched) {
+    work.push((async () => {
+      await resolveFor(perContact.get(from)!);
+      await processContactBatch(perContact.get(from)!, turns, claims, reports, deps, forget);
+    })());
+  }
   await Promise.all(work);
   return reports;
 }

@@ -2,6 +2,8 @@ import { resolveTextPilotGate } from "../../src/text-pilot-gate.js";
 import { WhatsAppClient } from "@kapso/whatsapp-cloud-api";
 import { waitUntil } from "@vercel/functions";
 import { analyzeImage } from "../../src/analyze.js";
+import { resolveAudio } from "../../src/audio/config.js";
+import type { MediaFetcher } from "../../src/audio/media.js";
 import { resolveBatchEngine } from "../../src/batch-engine.js";
 import { resolveAttentionFilter } from "../../src/attention-filter.js";
 import { createSupabaseAuditRepository, type AuditRepository } from "../../src/audit.js";
@@ -153,6 +155,23 @@ const quoteFactsReader = () => new StudyFactsService({
   maxStaleMs: 5_000 // lector nuevo por cotización; se comparte solo durante esta lectura, nunca entre pacientes
 });
 
+// Audios (APAGADOS por defecto; ver docs/g6/04-audios.md): PLUSMEDIK_AUDIO=on solo tiene efecto con PLUSMEDIK_TURNS=on y PLUSMEDIK_TEXT_HANDLER=on, y exige OPENAI_API_KEY y OPENAI_TRANSCRIPTION_MODEL (sin valor
+// por defecto). No necesita migraciones. Los audios se bajan SOLO de los enlaces de Kapso (o por el id del medio con el SDK oficial); la credencial de Kapso solo viaja a servidores de Kapso.
+const audioFetcher: MediaFetcher = {
+  rawFetch: (url, init) => kapsoClient().rawFetch(url, init),
+  authedFetch: (url, init) => kapsoClient().fetch(url, init),
+  async sdkDownload(mediaId) {
+    return (await kapsoClient().media.download({ mediaId, phoneNumberId: phoneNumberId(), as: "arrayBuffer" })) as ArrayBuffer;
+  }
+};
+const audioRequested = on("PLUSMEDIK_AUDIO");
+const audioPipeline = audioRequested && turnsEnabled && textHandlerEnabled ? resolveAudio(process.env, logLine, { fetcher: audioFetcher }) : undefined;
+if (audioRequested && !(turnsEnabled && textHandlerEnabled)) logLine("audio_inactive", { reason: "TURNS_AND_TEXT_HANDLER_REQUIRED" });
+// Con la bandera apagada no se escribe NI UNA línea nueva en el registro (el arranque es idéntico al de antes).
+if (audioRequested) logLine("audio_scope", { enabled: audioPipeline !== undefined });
+// Los audios solo se activan si están realmente encendidos (turnos, manejador de texto y guarda de respuestas válida).
+const audioActive = Boolean(audioPipeline && turnsEnabled && textHandlerEnabled && !replyGuardInvalid);
+
 const realDeps: QuoteDeps = {
   async downloadImage(image: IncomingImage) {
     const client = kapsoClient();
@@ -229,6 +248,7 @@ const realDeps: QuoteDeps = {
   turns: turnsEnabled ? { contactKeyFor, replyGuard: replyGuardConfig, attention: attentionConfig, instantPhotoQuotes: instantPhotoQuotesEnabled, dailyCap: dailyReplyCap, memory: conversationMemory,
     crmHandoff: crmOutbox,
     ...(batchEngineMode ? { batchEngine: { mode: batchEngineMode } } : {}),
+    ...(audioActive ? { audio: audioPipeline } : {}),
     quoteSessions: quoteSessionsEnabled && !replyGuardInvalid
       ? resolveQuoteSessionsConfig({ interpreter: studyInterpreter, catalogForText: ttlCache(() => loadActiveCatalog(), 60_000), loopProtection: replyGuard.enabled, attention: attentionConfig ? { gate: attentionConfig.gate, settleMs: attentionConfig.settleMs } : undefined, ownTexts: [...Object.values(DRAFT_TEXTS), ...Object.values(ANSWER_TEXTS), ...Object.values(QUOTE_TEXTS)], isInfoQuestion: knowledgeAnswersEnabled ? (text) => detectTopics(text, studyInfoEnabled).length > 0 : undefined })
       : undefined,

@@ -87,7 +87,7 @@ export async function handleKapsoWebhook(request: Request, deps: KapsoWebhookDep
   // Modo turnos (deps.quote.turns, apagado por defecto): imágenes y, si hay manejador, texto u otros mensajes se procesan como turnos del contacto (ver turns.ts).
   // La política de ACK no cambia: 200 de inmediato y el trabajo en segundo plano.
   if (deps.quote.turns) {
-    const turns = extractIncomingTurns(payload, request.headers.get("x-webhook-batch"), { eventName: eventName, nowSeconds: Date.now() / 1000 })
+    const turns = extractIncomingTurns(payload, request.headers.get("x-webhook-batch"), { eventName: eventName, nowSeconds: Date.now() / 1000, audio: Boolean(deps.quote.turns.audio && deps.quote.turns.handlers?.text) })
       .filter((turn) => isAllowedPhone(turn.from, deps.allowedPhones));
     if (!deps.textPilotPhone) {
       if (!hasProcessableTurns(turns, deps.quote)) return text(200, "ignored");
