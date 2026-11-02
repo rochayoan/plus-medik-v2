@@ -1,5 +1,6 @@
 import { AuditWriteError, type AuditLease, type AuditRepository, type SendableResult, type SendConfirmation, type SendReservation, type StalePolicy, type TurnKind } from "./audit.js";
 import type { AttentionConfig } from "./attention-filter.js";
+import type { AudioPipeline } from "./audio/service.js";
 import type { ConversationMemory } from "./conversation-memory.js";
 import type { CrmHandoff } from "./crm-outbox/types.js";
 import type { QuoteSessionsConfig } from "./quote-session.js";
@@ -55,6 +56,9 @@ export interface TurnsConfig {
   //   shadow: la ruta de siempre responde y escribe como hoy; el motor nuevo solo decide en paralelo y deja una línea de registro con códigos para comparar (no ejecuta ni envía nada).
   //   on: el motor nuevo atiende el texto del lote; la ruta de siempre queda de respaldo si falla antes de tocar nada.
   batchEngine?: { mode: "shadow" | "on" };
+  // Audios (notas de voz) de WhatsApp (apagado si falta; ver src/audio): se transcriben con OpenAI dentro del mismo procesamiento del turno y entran al agente como un texto más del paciente, en su lugar
+  // del lote. Exige el manejador de texto. Sin esto, un audio se ignora como hasta ahora.
+  audio?: AudioPipeline;
 }
 
 export interface TurnRef {
