@@ -22,7 +22,7 @@ describe("G4.1: dónde pueden aparecer los datos por estudio", () => {
   });
 
   it("solo su módulo, la capa de respuestas, el manejador, los turnos, la auditoría, la configuración de turnos y el cableado de Vercel los nombran", () => {
-    const allowed = new Set(["src/knowledge-answers.ts", "src/quote-study-details.ts", "src/text-handler.ts", "src/turns.ts", "src/audit.ts", "src/guarded-turn.ts", "api/kapso/webhook.ts"]);
+    const allowed = new Set(["src/knowledge-answers.ts", "src/quote-study-details.ts", "src/text-handler.ts", "src/turns.ts", "src/audit.ts", "src/guarded-turn.ts", "src/batch-execution.ts", "api/kapso/webhook.ts"]);
     for (const path of files) {
       if (allowed.has(rel(path)) || rel(path).startsWith("src/study-facts/")) continue;
       expect(source(path), rel(path)).not.toMatch(MENTION);

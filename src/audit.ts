@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { AnalysisResult } from "./analyze.js";
 import type { AiCallEvent } from "./cache.js";
-import type { QuoteBeginResult, QuoteCloseInput, QuoteCloseResult, QuoteReadResult, ItemResult } from "./quote-session.js";
+import type { QuoteBeginResult, QuoteCloseInput, QuoteCloseResult, QuoteReadResult, ShadowPeekResult, ItemResult } from "./quote-session.js";
 import type { ReplyGuardRequest } from "./reply-guard.js";
 import type { CatalogStudy } from "./types.js";
 import type { IncomingImage, QuoteResult } from "./whatsapp-quote.js";
@@ -91,6 +91,8 @@ export interface AuditRepository {
   quoteFinish?(runId: string, lease: AuditLease, result: ItemResult): Promise<void>;
   quoteRead?(runId: string, lease: AuditLease): Promise<QuoteReadResult>;
   quoteClose?(runId: string, lease: AuditLease, input: QuoteCloseInput): Promise<QuoteCloseResult>;
+  // Modo sombra del motor de lotes (migración 20): la solicitud abierta visible para el turno y si hubo una cotización reciente, SIN escribir, bloquear filas ni vencer sesiones (función STABLE en la base).
+  quoteShadowPeek?(runId: string, lease: AuditLease, recentSeconds: number): Promise<ShadowPeekResult>;
   recordReply(runId: string, reply: { state: ReplyAuditState; result: SendableResult; processingStatus: "COMPLETED" | "FAILED"; providerMessageId?: string }, lease: AuditLease): Promise<void>;
 }
 
@@ -585,6 +587,15 @@ export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}
           ...(Array.isArray(result.lines) ? { lines: result.lines as never, totalBs: Number(result.totalBs) } : {})
         };
       }
+      throw new AuditWriteError("REJECTED");
+    },
+    async quoteShadowPeek(runId, lease, recentSeconds) {
+      const result = await rpc("plusmedik_quote_shadow_peek", { ...leaseArgs(runId, lease), p_recent_seconds: recentSeconds });
+      const state = str(result.state);
+      const recent = result.recent === true;
+      if (state === "none" || state === "replay" || state === "unavailable" || state === "lease_lost") return { state, recent };
+      if (state === "pending") return { state, pending: Number(result.pending ?? 1), recent };
+      if (state === "ready" && Array.isArray(result.items)) return { state, items: result.items as never, recent };
       throw new AuditWriteError("REJECTED");
     },
     async quoteClose(runId, lease, input) {

@@ -1,6 +1,7 @@
 import { repeatCandidate } from "./attention-filter.js";
+import { engineCanDecide, engineReply, photoOutcomeOf, shadowAfter, shadowBefore } from "./batch-engine.js";
 import { AuditWriteError, processingFailureCode, type KnowledgeRefRecord } from "./audit.js";
-import { beginTurn, type ClaimedTurn, type Produced, type StalePolicy, type TurnKind, type TurnOutcome, type TurnProducer, type TurnRef } from "./guarded-turn.js";
+import { beginTurn, type ClaimedTurn, type Produced, type StalePolicy, type TurnContext, type TurnKind, type TurnOutcome, type TurnProducer, type TurnRef } from "./guarded-turn.js";
 import type { CaseOutcome } from "./crm-outbox/types.js";
 import { parseSessionCommand, parseSessionReply, summarizeSession } from "./quote-session.js";
 import { sessionImageProducer, sessionTextProducer } from "./quote-session-turns.js";
@@ -378,7 +379,9 @@ async function processContactBatch(
     const quoteSessions = deps.turns!.quoteSessions!;
     units = await joinStudyFragments(units, () => (quoteSessions.catalogForText ?? deps.loadCatalog)());
   }
-  deps.log("turn_batch", { phone: maskPhone(turns[indices[0]!]!.from), messages: indices.length, claimed: mine.length, requests: units.length, textsMerged: contactTurns.length - textUnits, ...(textUnits !== units.length ? { fragmentsJoined: textUnits - units.length } : {}) });
+  // Motor global de lotes (PLUSMEDIK_BATCH_ENGINE, apagado por defecto): solo con sesiones de cotización y al menos un texto en el lote. Apagado, nada de lo que sigue cambia.
+  const engine = sessions && contactTurns.some((turn) => turn.kind === "TEXT" && typeof turn.text === "string") ? deps.turns?.batchEngine?.mode : undefined;
+  deps.log("turn_batch", { phone: maskPhone(turns[indices[0]!]!.from), messages: indices.length, claimed: mine.length, requests: units.length, textsMerged: contactTurns.length - textUnits, ...(textUnits !== units.length ? { fragmentsJoined: textUnits - units.length } : {}), ...(engine ? { engine } : {}) });
 
   const runnable: Array<{ unit: BatchUnit; index: number; claimed: ClaimedTurn; produce: TurnProducer }> = [];
   const quiet: Promise<void>[] = [];
@@ -400,8 +403,35 @@ async function processContactBatch(
     const responder = runnable[runnable.length - 1]!;
     const drafts = runnable.slice(0, -1);
     let included: boolean[] = [];
+    // Modo sombra: el motor nuevo necesita leer la solicitud abierta TAL COMO ESTABA antes de este lote. La base cuenta como «pendientes» los turnos anteriores aún en proceso, así que la lectura se hace al
+    // empezar el PRIMER turno del lote (el de menor número; los demás esperan a que termine la lectura) y después de que los miembros ya unidos hayan cerrado. De paso se anota lo que produjo cada foto.
+    // Ninguno de los dos pasos cambia lo que el turno produce.
+    const photoResults: Produced[] = [];
+    let shadowRead: Awaited<ReturnType<typeof shadowBefore>> = { state: "skipped", reason: "UNAVAILABLE" };
+    if (engine === "shadow") {
+      let release!: () => void;
+      const read = new Promise<void>((resolve) => (release = resolve));
+      runnable.forEach((item, position) => {
+        const inner = item.produce;
+        item.produce = async (ctx) => {
+          if (position === 0) {
+            try {
+              await Promise.all(quiet);
+              shadowRead = await shadowBefore({ ctx, deps, config: deps.turns!.quoteSessions!, contactTurns });
+            } finally {
+              release();
+            }
+          } else {
+            await read;
+          }
+          const result = await inner(ctx);
+          if (item.unit.turn.kind === "IMAGE") photoResults.push(result);
+          return result;
+        };
+      });
+    }
     // El último turno es el que responde: hace su trabajo y, además, integra lo que produjeron los anteriores (que no reservan ni envían nada por su cuenta).
-    const produce: TurnProducer = drafts.length === 0
+    const legacy: TurnProducer = drafts.length === 0
       ? responder.produce
       : async (ctx) => {
           const own = deferClosing(ctx);
@@ -420,6 +450,94 @@ async function processContactBatch(
           if (merged.produced.kind === "none") await own.flush();
           return merged.produced;
         };
+    let produce: TurnProducer = legacy;
+    const from = contactTurns[0]!.from;
+    if (engine === "shadow") {
+      // La ruta de siempre responde y escribe EXACTAMENTE como hoy. El motor nuevo solo decide en paralelo (sin ejecutar ni enviar nada) y deja una línea de registro con códigos.
+      const quoteSessions = deps.turns!.quoteSessions!;
+      produce = async (ctx) => {
+        const produced = await legacy(ctx);
+        shadowAfter({ before: shadowRead, deps, config: quoteSessions, from, messages: contactTurns.length, photos: photoResults.map((result) => photoOutcomeOf(result)), current: produced });
+        return produced;
+      };
+    } else if (engine === "on") {
+      const quoteSessions = deps.turns!.quoteSessions!;
+      const handlers = deps.turns!.handlers!;
+      type Item = (typeof runnable)[number];
+      const isText = (item: Item) => item.unit.turn.kind === "TEXT";
+      const textTurns = contactTurns.filter((turn) => turn.kind === "TEXT" && typeof turn.text === "string");
+      const textItems = runnable.filter(isText);
+      const hasPhotos = runnable.some((item) => item.unit.turn.kind === "IMAGE");
+      const technicalFailure: Produced = { kind: "reply", body: TECHNICAL_ISSUE_MESSAGE, result: "technical_issue", processingStatus: "FAILED", stale: "NEWER_TURN" };
+      produce = async (ctx) => {
+        // 0. Respaldo: si el motor ni siquiera puede entender y decidir este lote (catálogo, comprensión o política), el lote sigue COMPLETO por la ruta de siempre, que todavía no ha tocado nada.
+        const verdict = await engineCanDecide({ deps, config: quoteSessions, contactTurns });
+        if (!verdict.ok) {
+          deps.log("batch_engine_fallback_used", { messages: contactTurns.length });
+          return legacy(ctx);
+        }
+        // Una cancelación junto con fotos: de la posición de cada foto respecto a la cancelación depende cuáles sobreviven, y las fotos ya están anotadas antes de que el motor lea. Ese orden no se puede
+        // reconstruir con seguridad desde aquí, así que el lote sigue por la ruta de siempre (no se descarta ni se conserva nada por suposición).
+        if (verdict.cancelled && hasPhotos) {
+          deps.log("batch_engine_skipped", { reason: "CANCEL_WITH_PHOTOS", messages: contactTurns.length });
+          return legacy(ctx);
+        }
+        const own = deferClosing(ctx);
+        const results = new Map<Item, Produced>();
+        // 1. Fotos y otros tipos de mensaje: el trabajo de siempre (cada uno con su propio lease: análisis, evidencia, deduplicación, sesión; no reservan ni envían). Si el último mensaje no es texto, ese turno
+        //    hace aquí su propio trabajo y es el que luego responde.
+        const otherDrafts = runnable.filter((item) => !isText(item) && item !== responder);
+        const absorbedOthers = await Promise.all(otherDrafts.map((item) => item.claimed.absorb(item.produce, ctx, BATCH_TRACE_STAGES)));
+        otherDrafts.forEach((item, position) => results.set(item, absorbedOthers[position]!));
+        if (!isText(responder)) {
+          results.set(responder, await responder.produce(own.ctx).catch((): Produced => {
+            deps.log("turn_failed", { stage: "batch_responder", kind: responder.unit.turn.kind });
+            return { kind: "none" };
+          }));
+        }
+        await Promise.all(quiet);
+
+        // 2. Memoria conversacional: los textos del paciente se guardan antes de responder, como siempre (idempotente por mensaje).
+        const memory = deps.turns?.memory;
+        if (memory) {
+          await Promise.all(textTurns.map(async (turn) => {
+            const contactKey = deps.turns!.contactKeyFor(turn.from);
+            if (contactKey) await memory.rememberPatient({ contactKey, messageId: turn.messageId, text: turn.text!, ...(turn.timestamp ? { at: new Date(turn.timestamp * 1000) } : {}) });
+          }));
+        }
+
+        // 3. El texto del lote se anota desde el turno de texto MÁS RECIENTE (`host`) y los demás textos se reclaman y se cierran sin respuesta: la base cuenta como «pendientes» los turnos anteriores aún en
+        //    proceso. Si el último mensaje del lote es ese texto, el mismo turno lo hace todo. Si es una foto (u otro tipo), el texto lo anota el `host` —que ya no tiene otro ítem— y el turno que responde,
+        //    el último, que sí ve todo lo anotado (fotos incluidas), cierra la solicitud y cotiza.
+        const host = textItems[textItems.length - 1]!;
+        await Promise.all(textItems.filter((item) => item !== host).map((item) => item.claimed.skip().catch(() => undefined)));
+        const photos = runnable.filter((item) => item.unit.turn.kind === "IMAGE").map((item) => photoOutcomeOf(results.get(item)!));
+        const handle = (turn: IncomingTurn) => conversationProducer(turn, (t, c) => handlers.text!.call(handlers, t, c), deps)(own.ctx);
+        const run = (extra: { recordCtx?: TurnContext; beforeClose?: () => Promise<void> }) =>
+          engineReply({ ctx: own.ctx, deps, config: quoteSessions, from, texts: textTurns, contactTurns, photos, handle, ...extra }).catch((): Produced => technicalFailure);
+        const engineProduced = host === responder
+          ? await run({})
+          : await host.claimed.absorb(async (hostCtx) => {
+              // El turno del `host` termina (queda cerrado sin envío propio) en cuanto anotó, o al terminar si el motor no llegó a anotar.
+              let settled: Promise<void> | undefined;
+              const settle = () => (settled ??= hostCtx.persist("fold", (audit, runId, lease) => (audit.foldTurn ? audit.foldTurn(runId, lease) : audit.recordIgnored(runId, "NO_REPLY", lease))).then(() => undefined));
+              try {
+                return await run({ recordCtx: hostCtx, beforeClose: settle });
+              } finally {
+                await settle();
+              }
+            }, ctx, BATCH_TRACE_STAGES);
+
+        // 4. Lo que dejaron las fotos ya está en la sesión y en los avisos del motor; los otros tipos de mensaje (audios, documentos...) se integran con su aviso de siempre.
+        const rest = runnable.map((item, position) => ({ item, position })).filter(({ item }) => item.unit.turn.kind === "OTHER");
+        const merged = mergeProduced([...rest.map(({ item }) => results.get(item)!), engineProduced]);
+        included = runnable.map((item) => item.unit.turn.kind !== "OTHER");
+        rest.forEach(({ position }, index) => { if (merged.included[index]) included[position] = true; });
+        if (merged.produced.kind === "none") await own.flush();
+        return merged.produced;
+      };
+    }
+
     let outcome: TurnReport["result"];
     try {
       outcome = await responder.claimed.run(produce);

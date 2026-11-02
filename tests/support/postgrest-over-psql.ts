@@ -10,7 +10,7 @@ export const PARAM_TYPES: Record<string, string> = {
   p_refs: "jsonb", p_key: "text", p_actor_id: "text", p_actor_type: "text", p_actor_role: "text", p_source_ref: "text", p_valid_from: "timestamptz", p_valid_until: "timestamptz", p_version_id: "uuid", p_status: "text",
   p_reason: "text", p_turn_kind: "text", p_stale_policy: "text", p_contact_key: "text", p_event_key: "text", p_occurred_at: "timestamptz", p_source: "text", p_actor: "text", p_detail: "jsonb", p_guard: "jsonb", p_cap: "jsonb",
   p_image_hash: "text", p_result: "jsonb", p_ttl_seconds: "integer", p_max_items: "integer", p_session_id: "uuid", p_outcome: "text", p_lines: "jsonb", p_total: "numeric", p_reasons: "text[]", p_catalog_fingerprint: "text",
-  p_fact_id: "uuid", p_lab_test_id: "uuid", p_max_age_seconds: "integer", p_operation_id: "text", p_action: "text",
+  p_recent_seconds: "integer", p_fact_id: "uuid", p_lab_test_id: "uuid", p_max_age_seconds: "integer", p_operation_id: "text", p_action: "text",
   p_origin_run_id: "uuid", p_kapso_message_id: "text", p_cipher: "text", p_hash: "text", p_evidence: "jsonb", p_outbox_id: "uuid", p_force: "boolean", p_http_status: "integer", p_duration_ms: "integer", p_event_ids: "text[]"
 };
 
