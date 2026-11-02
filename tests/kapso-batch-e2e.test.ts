@@ -13,7 +13,7 @@ import { ANSWER_TEXTS } from "../src/knowledge-answers.js";
 import { createTextHandler, DRAFT_TEXTS } from "../src/text-handler.js";
 import type { TurnHandlers } from "../src/turns.js";
 import type { CatalogStudy } from "../src/types.js";
-import type { QuoteDeps } from "../src/whatsapp-quote.js";
+import { TECHNICAL_ISSUE_MESSAGE, type QuoteDeps } from "../src/whatsapp-quote.js";
 import { findPostgresBin, startEphemeralPostgres, SUPABASE_BOOTSTRAP_SQL, type EphemeralPostgres, type PgDatabase } from "./support/ephemeral-postgres.js";
 import { newNetwork, postgrestOverPsql } from "./support/postgrest-over-psql.js";
 
@@ -94,7 +94,7 @@ describe.skipIf(!bin)("buffering nativo de Kapso (lotes batch:true + data[]) con
     return { phone, key: contactKeyFor(phone)! };
   };
 
-  interface Options { sessions?: boolean; handlers?: TurnHandlers; verdicts?: Record<string, Verdict>; dailyCap?: { max: number; windowSeconds: number }; gates?: Record<string, Promise<void>> }
+  interface Options { sessions?: boolean; handlers?: TurnHandlers; verdicts?: Record<string, Verdict>; dailyCap?: { max: number; windowSeconds: number }; gates?: Record<string, Promise<void>>; failTags?: string[] }
   function setup(options: Options = {}) {
     const sends: Array<{ to: string; body: string }> = [];
     const logs: Array<[string, Record<string, unknown>]> = [];
@@ -110,6 +110,7 @@ describe.skipIf(!bin)("buffering nativo de Kapso (lotes batch:true + data[]) con
         const tag = /TAG:([^:]+):/.exec(Buffer.from(imageBase64, "base64").toString("latin1"))?.[1] ?? "?";
         analyzed.push(tag);
         await options.gates?.[tag];
+        if (options.failTags?.includes(tag)) throw new Error("fallo simulado del análisis");
         return analysisOf(world.verdicts[tag] ?? { kind: "COMPLETE", ids: [1] }, catalog);
       }),
       sendText: vi.fn(async (to: string, body: string) => { sends.push({ to, body }); return { providerMessageId: `wamid.out-${sends.length}` }; }),
@@ -306,6 +307,106 @@ describe.skipIf(!bin)("buffering nativo de Kapso (lotes batch:true + data[]) con
     expect(await itemCount(p.key)).toBe(1);
     await deliverOne(w, textEvent(id("txt"), p.phone, "listo"));
     expect(w.sends.at(-1)!.body).toContain("GLUCOSA EN AYUNAS — Bs 30,50");
+  });
+
+  // ───────────────────────────── composición final del mensaje del lote ─────────────────────────────
+
+  describe("composición final: lo más completo y actualizado, sin instrucciones genéricas ya resueltas", () => {
+    const GENERIC = [DRAFT_TEXTS.send_recipe, DRAFT_TEXTS.greeting, DRAFT_TEXTS.fallback];
+    const noGeneric = (body: string) => { for (const text of GENERIC) expect(body).not.toContain(text); };
+
+    it("«Quiero cotizar» + «Hemograma completo» + «Y glucosa»: UNA burbuja con el resumen de estudios y SIN la respuesta genérica que pide los estudios", async () => {
+      const p = patient();
+      const w = setup({ sessions: true });
+      await deliver(w, textEvent(id("txt"), p.phone, "Quiero cotizar"), textEvent(id("txt"), p.phone, "Hemograma completo"), textEvent(id("txt"), p.phone, "Y glucosa"));
+      expect(w.sends).toHaveLength(1);
+      const body = w.sends[0]!.body;
+      noGeneric(body);
+      expect(body).toContain("HEMOGRAMA COMPLETO");
+      expect(body).toContain("GLUCOSA EN AYUNAS");
+      // el resumen de la solicitud aparece una sola vez, con TODOS los estudios, y conserva la pregunta que SÍ falta (¿eso es todo?)
+      expect(body.match(/Estudios anotados/g)).toHaveLength(1);
+      expect(body).toContain("Estudios anotados: HEMOGRAMA COMPLETO, GLUCOSA EN AYUNAS.");
+      expect(body).toContain("¿Eso es todo?");
+      expect(hasPrice(body)).toBe(false);
+      expect(await itemCount(p.key)).toBe(2);
+    });
+
+    it("lo genérico tampoco se cuela si llega DESPUÉS de los estudios, ni con un saludo delante", async () => {
+      const p = patient();
+      const w = setup({ sessions: true });
+      await deliver(w, textEvent(id("txt"), p.phone, "Hola"), textEvent(id("txt"), p.phone, "Hemograma completo"), textEvent(id("txt"), p.phone, "Y glucosa"));
+      expect(w.sends).toHaveLength(1);
+      noGeneric(w.sends[0]!.body);
+      expect(w.sends[0]!.body).toContain("GLUCOSA EN AYUNAS");
+    });
+
+    it("si TODO lo que hay es genérico (saludo + «quiero cotizar»), sale solo la última, no las dos", async () => {
+      const p = patient();
+      const w = setup({ sessions: true });
+      await deliver(w, textEvent(id("txt"), p.phone, "Hola"), textEvent(id("txt"), p.phone, "Quiero cotizar"));
+      expect(w.sends).toEqual([{ to: p.phone, body: DRAFT_TEXTS.send_recipe }]);
+    });
+
+    it("un aviso MÉDICO se conserva (y la respuesta genérica se va): estudios anotados + urgencia en una burbuja", async () => {
+      const p = patient();
+      const w = setup({ sessions: true });
+      await deliver(w, textEvent(id("txt"), p.phone, "Quiero cotizar"), textEvent(id("txt"), p.phone, "Hemograma completo"), textEvent(id("txt"), p.phone, "me duele mucho el pecho"));
+      expect(w.sends).toHaveLength(1);
+      expect(w.sends[0]!.body).toContain(DRAFT_TEXTS.medical_unavailable);
+      noGeneric(w.sends[0]!.body);
+      expect(await itemCount(p.key)).toBe(1);
+    });
+
+    it("una solicitud de ATENCIÓN HUMANA se conserva junto al resumen y sin la respuesta genérica", async () => {
+      const p = patient();
+      const w = setup({ sessions: true });
+      await deliver(w, textEvent(id("txt"), p.phone, "Quiero cotizar"), textEvent(id("txt"), p.phone, "Hemograma completo"), textEvent(id("txt"), p.phone, "quiero hablar con una persona"));
+      expect(w.sends).toHaveLength(1);
+      const body = w.sends[0]!.body;
+      expect(body).toContain(DRAFT_TEXTS.handoff_unavailable.split(".")[0]!);
+      expect(body).toContain("HEMOGRAMA COMPLETO");
+      expect(body).not.toContain(DRAFT_TEXTS.send_recipe);
+      expect(body).not.toContain(DRAFT_TEXTS.greeting);
+    });
+
+    it("un ERROR (foto que falla) se conserva y la respuesta genérica se va", async () => {
+      const p = patient();
+      const w = setup({ sessions: true, failTags: ["X"] });
+      await deliver(w, textEvent(id("txt"), p.phone, "Quiero cotizar"), imageEvent(id("img"), p.phone, "X"));
+      expect(w.sends).toHaveLength(1);
+      expect(w.sends[0]!.body).toContain(TECHNICAL_ISSUE_MESSAGE);
+      noGeneric(w.sends[0]!.body);
+    });
+
+    it("una COTIZACIÓN se conserva completa y sin respuesta genérica ni acuses intermedios", async () => {
+      const p = patient();
+      const w = setup({ sessions: true });
+      await deliver(w, textEvent(id("txt"), p.phone, "Quiero cotizar"), textEvent(id("txt"), p.phone, "Hemograma completo"), textEvent(id("txt"), p.phone, "Y glucosa"), textEvent(id("txt"), p.phone, "listo"));
+      expect(w.sends).toHaveLength(1);
+      const body = w.sends[0]!.body;
+      noGeneric(body);
+      expect(body).toContain("HEMOGRAMA COMPLETO — Bs 45");
+      expect(body).toContain("GLUCOSA EN AYUNAS — Bs 30,50");
+      expect(body).toContain("Total de los estudios cotizados: Bs 75,50");
+      expect(body).not.toContain("Estudios anotados");
+    });
+
+    it("cotización de una foto + «Quiero cotizar»: la cotización sale y la respuesta genérica no", async () => {
+      const p = patient();
+      const w = setup({ verdicts: { A: { kind: "COMPLETE", ids: [1] } } });
+      await deliver(w, textEvent(id("txt"), p.phone, "Quiero cotizar"), imageEvent(id("img"), p.phone, "A"));
+      expect(w.sends).toHaveLength(1);
+      expect(w.sends[0]!.body).toContain("HEMOGRAMA COMPLETO — Bs 45");
+      noGeneric(w.sends[0]!.body);
+    });
+
+    it("un mensaje suelto «Quiero cotizar» (sin lote) sigue recibiendo la respuesta genérica de siempre", async () => {
+      const p = patient();
+      const w = setup({ sessions: true });
+      await deliverOne(w, textEvent(id("txt"), p.phone, "Quiero cotizar"));
+      expect(w.sends).toEqual([{ to: p.phone, body: DRAFT_TEXTS.send_recipe }]);
+    });
   });
 
   // ───────────────────────────── mensajes duplicados ─────────────────────────────

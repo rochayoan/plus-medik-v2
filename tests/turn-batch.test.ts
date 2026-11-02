@@ -4,6 +4,7 @@ import type { AuditClaim, AuditLease, AuditRepository } from "../src/audit.js";
 import type { Produced, TurnContext } from "../src/guarded-turn.js";
 import { deferClosing, groupByContact, mergeContactTurns, mergeProduced } from "../src/turn-batch.js";
 import { processTurns, type IncomingTurn, type TurnHandlers, type TurnReply } from "../src/turns.js";
+import { DRAFT_TEXTS } from "../src/text-handler.js";
 import { TECHNICAL_ISSUE_MESSAGE, type QuoteDeps } from "../src/whatsapp-quote.js";
 
 // Buffering nativo de Kapso (lotes de 15 s: batch:true + data[]) SIN base de datos: la fusión de mensajes y de respuestas (funciones puras) y el procesamiento de un lote con una
@@ -133,6 +134,98 @@ describe("mergeProduced: todas las respuestas de un lote salen en UN mensaje", (
     expect(merged.included).toEqual([false, true, true]);
   });
 });
+
+describe("mergeProduced: las respuestas genéricas ya resueltas no se concatenan", () => {
+  const generic = (body: string, overrides: Partial<Extract<Produced, { kind: "reply" }>> = {}) => reply(body, { generic: true, ...overrides });
+
+  it("genérica + resumen de la sesión (ack): sale solo el resumen, esté la genérica antes o después", () => {
+    const before = mergeProduced([generic("Con gusto te ayudo a cotizar"), reply("Anoté: HEMOGRAMA, GLUCOSA", { signature: "QUOTE_ADDED:2" })]);
+    expect(before.produced).toMatchObject({ body: "Anoté: HEMOGRAMA, GLUCOSA" });
+    expect(before.included).toEqual([false, true]);
+    const after = mergeProduced([reply("Anoté: HEMOGRAMA, GLUCOSA", { signature: "QUOTE_ADDED:2" }), generic("Con gusto te ayudo a cotizar")]);
+    expect(after.produced).toMatchObject({ body: "Anoté: HEMOGRAMA, GLUCOSA" });
+    expect(after.included).toEqual([true, false]);
+  });
+
+  it("el caso reportado: genérica + acuse parcial + acuse completo -> solo el acuse completo y actualizado", () => {
+    const merged = mergeProduced([generic("Con gusto te ayudo a cotizar"), reply("Anoté: HEMOGRAMA", { signature: "QUOTE_ADDED:1" }), reply("Anoté: HEMOGRAMA, GLUCOSA", { signature: "QUOTE_ADDED:2" })]);
+    expect(merged.produced).toMatchObject({ kind: "reply", body: "Anoté: HEMOGRAMA, GLUCOSA", signature: "QUOTE_ADDED:2" });
+    expect(merged.included).toEqual([false, false, true]);
+  });
+
+  it("se conservan, junto al resto, un aviso MÉDICO, una solicitud de ATENCIÓN HUMANA, un ERROR técnico y una COTIZACIÓN; lo genérico se va", () => {
+    const medical = reply("No puedo darte orientación médica por este chat", { stale: "NEWER_TURN" });
+    const human = reply("Una persona del equipo la revisará", { stale: "NONE" });
+    const error = reply(TECHNICAL_ISSUE_MESSAGE, { result: "technical_issue", processingStatus: "FAILED" });
+    const quote = reply("HEMOGRAMA — Bs 45", { result: "quoted", stale: "NONE" });
+    for (const kept of [medical, human, error, quote]) {
+      const merged = mergeProduced([generic("Con gusto te ayudo a cotizar"), kept]);
+      expect(merged.produced).toBe(kept);
+      expect(merged.included).toEqual([false, true]);
+    }
+    const all = mergeProduced([generic("Hola, ¿en qué te ayudo?"), medical, human, error, quote, generic("¿Sobre qué quieres saber?")]);
+    const body = (all.produced as { body: string }).body;
+    for (const expected of ["orientación médica", "Una persona del equipo", TECHNICAL_ISSUE_MESSAGE, "HEMOGRAMA — Bs 45"]) expect(body).toContain(expected);
+    expect(body).not.toContain("en qué te ayudo");
+    expect(body).not.toContain("Sobre qué quieres saber");
+    expect(all.produced).toMatchObject({ result: "quoted", stale: "NONE", processingStatus: "FAILED" });
+    expect(all.included).toEqual([false, true, true, true, true, false]);
+  });
+
+  it("si TODO es genérico, sale solo la más reciente (no varias)", () => {
+    const merged = mergeProduced([generic("¡Hola!"), generic("Con gusto te ayudo a cotizar"), generic("¿Sobre qué quieres saber?")]);
+    expect(merged.produced).toMatchObject({ body: "¿Sobre qué quieres saber?" });
+    expect(merged.included).toEqual([false, false, true]);
+  });
+
+  it("una genérica sola pasa tal cual, y una respuesta que no es genérica nunca se descarta por parecerse a una", () => {
+    const only = generic("Con gusto te ayudo a cotizar");
+    expect(mergeProduced([{ kind: "none" }, only]).produced).toBe(only);
+    const concrete = reply("Con gusto te ayudo a cotizar");
+    expect(mergeProduced([concrete, generic("¿Sobre qué quieres saber?")]).produced).toBe(concrete);
+  });
+
+  it("lo genérico no cuenta como respuesta que sustituye un acuse o una pregunta de la sesión", () => {
+    const ask = reply("¿Cuál de estas opciones? 1. A 2. B", { signature: "QUOTE_ASK:2" });
+    const merged = mergeProduced([ask, generic("Con gusto te ayudo a cotizar")]);
+    expect(merged.produced).toBe(ask);
+  });
+});
+
+describe("processTurns: qué respuestas se marcan como genéricas", () => {
+  it("los tres textos fijos que solo piden estudios o la receta se descartan del lote; el resto de las respuestas del mismo manejador, no", async () => {
+    for (const body of [DRAFT_TEXTS.send_recipe, DRAFT_TEXTS.greeting, DRAFT_TEXTS.fallback]) {
+      const t = setup({ handlers: { text: answer(body) } });
+      await processTurns([text("m1", "quiero cotizar"), image("p2")], t.deps);
+      expect(t.sends, body).toHaveLength(1);
+      expect(t.sends[0], body).toContain("HEMOGRAMA");
+      expect(t.sends[0], body).not.toContain(body);
+    }
+  });
+
+  it("un aviso médico, una derivación o una respuesta cualquiera del manejador se conservan junto a la cotización", async () => {
+    for (const body of [DRAFT_TEXTS.medical_unavailable, DRAFT_TEXTS.handoff_unavailable, DRAFT_TEXTS.handoff_confirmed, "Abrimos de lunes a viernes"]) {
+      const t = setup({ handlers: { text: answer(body) } });
+      await processTurns([text("m1", "algo"), image("p2")], t.deps);
+      expect(t.sends[0], body).toContain(body);
+      expect(t.sends[0], body).toContain("HEMOGRAMA");
+    }
+  });
+
+  it("con textos personalizados (distintos de los fijos) no se marca nada y se conserva todo", async () => {
+    const t = setup({ handlers: { text: answer("Con gusto te ayudo a cotizar, escribe tus estudios") } });
+    await processTurns([text("m1", "quiero cotizar"), image("p2")], t.deps);
+    expect(t.sends[0]).toContain("Con gusto te ayudo a cotizar, escribe tus estudios");
+    expect(t.sends[0]).toContain("HEMOGRAMA");
+  });
+
+  it("un mensaje genérico SOLO, sin lote, se envía igual que siempre", async () => {
+    const t = setup({ handlers: { text: answer(DRAFT_TEXTS.send_recipe) } });
+    await processTurns([text("m1", "quiero cotizar")], t.deps);
+    expect(t.sends).toEqual([DRAFT_TEXTS.send_recipe]);
+  });
+});
+
 
 describe("deferClosing: el turno que responde no cierra su corrida mientras haya algo por enviar", () => {
   function fakeContext(guarded = true) {

@@ -63,6 +63,9 @@ export function mergeContactTurns(turns: readonly IncomingTurn[], standalone: (t
 
 // Las respuestas de varios turnos de un mismo contacto se envían como UN mensaje. Reglas:
 //   · un acuse o pregunta de la sesión de cotización («anoté tu foto», «¿cuál de estas?») se descarta solo si otro acuse/pregunta de la sesión o una cotización MÁS NUEVA del lote ya recoge el estado completo;
+//   · una respuesta GENÉRICA (la que solo pide escribir los estudios o enviar la receta: saludo, «con gusto te ayudo a cotizar», «¿sobre qué quieres saber?») se descarta si el lote trae cualquier otra
+//     cosa más concreta —resumen de la solicitud, pregunta, cotización, aviso médico, atención humana, error—, lleguen antes o después: esa instrucción ya está resuelta. Si todo lo que hay es genérico, sale
+//     solo la última (la más reciente), no varias;
 //   · todo lo demás se conserva, en orden (cotizaciones, respuestas de conocimiento, avisos de foto ilegible, aviso técnico), sin repetir textos idénticos;
 //   · el tipo de resultado es el de más peso (una cotización siempre manda); la respuesta nunca se descarta por «obsoleta» si lleva una cotización.
 // `included[i]` indica si lo que produjo el turno i quedó dentro del mensaje.
@@ -78,7 +81,10 @@ export function mergeProduced(items: readonly Produced[]): { produced: Produced;
   // Si lo único que sigue es otra cosa (p. ej. una respuesta de información), la pregunta pendiente se conserva: si no, el paciente nunca vería las opciones.
   const coversSession = (produced: Extract<Produced, { kind: "reply" }>) => isSessionAck(produced) || produced.result === "quoted";
   const afterAcks = replies.filter((reply, position) => !(isSessionAck(reply.produced) && replies.slice(position + 1).some((later) => coversSession(later.produced))));
-  let kept = afterAcks;
+  // Lo genérico solo se queda si no hay nada más concreto; y entonces, solo lo más reciente.
+  const concrete = afterAcks.filter((reply) => reply.produced.generic !== true);
+  const afterGeneric = concrete.length > 0 ? concrete : afterAcks.slice(-1);
+  let kept = afterGeneric;
   // Sin repetir el mismo texto (p. ej. varios avisos idénticos de «tipo de mensaje no soportado»).
   const seen = new Set<string>();
   kept = kept.filter((reply) => {
@@ -97,7 +103,7 @@ export function mergeProduced(items: readonly Produced[]): { produced: Produced;
   for (const reply of kept) included[reply.index] = true;
   // Lo que se descartó por repetido sigue «incluido»: su mismo texto ya va en el mensaje. Lo que se descartó por el tope de longitud o por un acuse sustituido, no.
   const keptBodies = new Set(kept.map((reply) => reply.produced.body.trim()));
-  for (const reply of afterAcks) if (!included[reply.index] && keptBodies.has(reply.produced.body.trim())) included[reply.index] = true;
+  for (const reply of afterGeneric) if (!included[reply.index] && keptBodies.has(reply.produced.body.trim())) included[reply.index] = true;
 
   if (kept.length === 1) return { produced: kept[0]!.produced, included };
 
