@@ -22,12 +22,50 @@ describe("G4.0: dónde pueden aparecer las sesiones de cotización", () => {
   });
 
   it("solo las propias sesiones, la elección de productor (turns), la configuración (guarded-turn), el repositorio (audit) y el cableado de Vercel las nombran", () => {
-    const allowed = new Set(["src/quote-session.ts", "src/quote-session-turns.ts", "src/turns.ts", "src/guarded-turn.ts", "src/audit.ts", "api/kapso/webhook.ts", "src/study-interpreter.ts", "src/study-interpreter-openai.ts"]);
+    // src/text-fragments.ts: reconstruye nombres de estudios partidos entre mensajes de un lote de Kapso; solo reutiliza funciones PURAS del módulo de sesiones (interpretar y reconocer comandos) y únicamente lo conecta turns.ts.
+    const allowed = new Set(["src/quote-session.ts", "src/quote-session-turns.ts", "src/turns.ts", "src/guarded-turn.ts", "src/audit.ts", "api/kapso/webhook.ts", "src/study-interpreter.ts", "src/study-interpreter-openai.ts", "src/text-fragments.ts"]);
     for (const path of files) {
       // G5.0: la cola de salida hacia el CRM lee los mensajes dudosos de una solicitud cerrada en revisión (plusmedik_quote_review_targets)
       if (allowed.has(rel(path)) || rel(path).startsWith("src/crm-outbox/")) continue;
       expect(source(path), rel(path)).not.toMatch(MENTION);
     }
+  });
+
+  // Excepción de arriba: text-fragments.ts reconstruye nombres de estudios partidos entre mensajes de un lote. Estas pruebas la acotan: es PURO (solo lee y devuelve las mismas unidades) y no toca sesiones,
+  // reservas, auditoría, red ni estado. Si alguien le agrega esas responsabilidades, la excepción deja de valer y estas pruebas fallan.
+  describe("excepción: text-fragments.ts solo reconstruye nombres", () => {
+    const FRAGMENTS = join(root, "src/text-fragments.ts");
+
+    it("solo importa funciones puras de lectura/clasificación y tipos: nada de auditoría, repositorios, entrega ni de las producciones de las sesiones", () => {
+      expect(importsOf(FRAGMENTS).sort()).toEqual(["./consensus.js", "./quote-session.js", "./text-handler.js", "./turn-batch.js", "./types.js"]);
+      // de las sesiones toma SOLO el intérprete de texto y el reconocimiento de comandos: no las operaciones que abren, anotan, cierran o leen una sesión
+      const fromSessions = /import\s*\{([^}]*)\}\s*from\s*"\.\/quote-session\.js"/.exec(source(FRAGMENTS))?.[1]?.split(",").map((name) => name.trim()).filter(Boolean).sort();
+      expect(fromSessions).toEqual(["extractStudyRequests", "parseSessionCommand", "parseSessionReply"]);
+    });
+
+    it("no hace E/S ni toca estado: ni red, ni base, ni variables de entorno, ni auditoría, reservas, leases, reclamos, envíos o escritura de sesión", () => {
+      const text = code(FRAGMENTS);
+      expect(text).not.toMatch(/\bfetch\s*\(|process\.env|supabase|createClient|XMLHttpRequest|require\(|import\(/i);
+      expect(text).not.toMatch(/audit|reserve|persist|lease|claim|\brpc\b|recordIgnored|recordReply|recordFailure|foldTurn|releaseTurn|confirmSend|quoteBegin|quoteFinish|quoteRead|quoteClose|sendText|\bctx\b|\bdeps\b/i);
+      expect(text).not.toMatch(/Date\.now|Math\.random|setTimeout|setInterval|writeFile|localStorage|globalThis|\bglobal\./);
+    });
+
+    it("solo exporta las dos funciones de reconstrucción", () => {
+      expect([...source(FRAGMENTS).matchAll(/^export\s+(?:async\s+)?(?:function|const|class|let|var)\s+(\w+)/gm)].map((match) => match[1]).sort()).toEqual(["continuesStudyName", "joinStudyFragments"]);
+    });
+
+    it("solo lo conecta turns.ts (la elección de qué se interpreta); ningún otro archivo del servicio lo importa", () => {
+      const importers = files.filter((path) => importsOf(path).some((imported) => /text-fragments/.test(imported))).map(rel);
+      expect(importers).toEqual(["src/turns.ts"]);
+    });
+
+    it("recibe el catálogo por parámetro (no lo carga por su cuenta) y devuelve unidades nuevas sin tocar las recibidas", () => {
+      const text = code(FRAGMENTS);
+      expect(text).toMatch(/loadCatalog:\s*\(\)\s*=>\s*Promise</);
+      expect(text).not.toMatch(/loadActiveCatalog|supabase-catalog/);
+      // nunca asigna sobre las unidades de entrada (solo construye objetos nuevos)
+      expect(text).not.toMatch(/\bunits\s*\[[^\]]*\]\s*=[^=]|\bunits\.(push|splice|pop|shift|unshift|sort|reverse)\(|\.members\.(push|splice)\(|\.turn\.text\s*=[^=]/);
+    });
   });
 
   it("whatsapp-quote.ts (el flujo de imágenes de siempre) no importa nada de las sesiones; son las sesiones las que reutilizan sus funciones", () => {
