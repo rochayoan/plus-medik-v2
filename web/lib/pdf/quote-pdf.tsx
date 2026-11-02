@@ -1,6 +1,7 @@
 import { Document, Image, Page, StyleSheet, Text, View } from "@react-pdf/renderer";
 import { formatBs, formatDate, formatFolio } from "../format";
 import type { QuoteDetail } from "../quotes";
+import { splitStudyName } from "../study-name";
 import type { BrandForText } from "../whatsapp-text";
 
 const colors = { primary: "#0f766e", text: "#1f2933", muted: "#61707d", line: "#d9e2e8", band: "#f1f6f8" };
@@ -74,7 +75,7 @@ export function QuotePdf({ quote, brand, logo }: { quote: QuoteDetail; brand: Br
           <View key={item.labTestId} style={styles.row} wrap={false}>
             <Text style={styles.colNum}>{index + 1}</Text>
             <View style={styles.colName}>
-              <Text>{item.name}</Text>
+              <Text>{splitStudyName(item.name).title}</Text>
               {item.code ? <Text style={styles.code}>Cód. {item.code}</Text> : null}
             </View>
             <Text style={styles.colSample}>{item.sampleType ?? ""}</Text>

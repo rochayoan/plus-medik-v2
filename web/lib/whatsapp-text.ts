@@ -1,4 +1,5 @@
 import { formatBs, formatDate, formatFolio } from "./format";
+import { splitStudyName } from "./study-name";
 
 export interface QuoteForText {
   folio: number;
@@ -22,7 +23,7 @@ export function buildWhatsAppText(quote: QuoteForText, brand: BrandForText): str
   const lines = [`*Cotización ${brand.name} N° ${formatFolio(quote.folio)}*`];
   if (quote.patientName) lines.push(`Paciente: ${quote.patientName}`);
   lines.push(`Fecha: ${formatDate(quote.createdAt)} · Válida hasta: ${formatDate(quote.validUntil)}`, "");
-  for (const item of quote.items) lines.push(`• ${item.name} — ${formatBs(item.priceBs)}`);
+  for (const item of quote.items) lines.push(`• ${splitStudyName(item.name).title} — ${formatBs(item.priceBs)}`);
   lines.push("", `*Total: ${formatBs(quote.totalBs)}*`);
   const contact = [brand.address && `📍 ${brand.address}`, brand.hours && `🕒 ${brand.hours}`, brand.phone && `📞 ${brand.phone}`].filter(Boolean) as string[];
   if (contact.length > 0) lines.push("", ...contact);

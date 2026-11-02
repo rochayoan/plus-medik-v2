@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { ORGANIZATION_KINDS, requireAdmin } from "@/lib/admin";
 import { adminClient } from "@/lib/supabase/admin";
-import { updateOrganization } from "./actions";
+import { updateOrganization, updateOrganizationContact } from "./actions";
 import { CreateOrgForm } from "./create-org-form";
 
 export const metadata: Metadata = { title: "Organizaciones" };
@@ -13,6 +13,9 @@ interface OrgRow {
   kind: keyof typeof ORGANIZATION_KINDS;
   tariff_id: string | null;
   active: boolean;
+  address: string | null;
+  phone: string | null;
+  note: string | null;
   profiles: Array<{ count: number }>;
 }
 
@@ -20,7 +23,7 @@ export default async function OrganizationsPage() {
   await requireAdmin();
   const db = adminClient();
   const [{ data: orgs }, { data: tariffs }] = await Promise.all([
-    db.from("organizations").select("id, name, kind, tariff_id, active, profiles(count)").order("name"),
+    db.from("organizations").select("id, name, kind, tariff_id, active, address, phone, note, profiles(count)").order("name"),
     db.from("tariffs").select("id, name").order("name")
   ]);
   const tariffList = (tariffs ?? []) as Array<{ id: string; name: string }>;
@@ -54,6 +57,16 @@ export default async function OrganizationsPage() {
                 {org.active ? "Desactivar" : "Activar"}
               </button>
             </form>
+            <details className="w-full">
+              <summary className="cursor-pointer text-xs text-brand-700 underline">Datos para la cotización</summary>
+              <form action={updateOrganizationContact} className="mt-2 grid gap-2 sm:grid-cols-2">
+                <input type="hidden" name="id" value={org.id} />
+                <input name="address" defaultValue={org.address ?? ""} maxLength={240} placeholder="Dirección" aria-label={`Dirección de ${org.name}`} className="input" />
+                <input name="phone" defaultValue={org.phone ?? ""} maxLength={60} placeholder="Teléfono" aria-label={`Teléfono de ${org.name}`} className="input" />
+                <textarea name="note" defaultValue={org.note ?? ""} maxLength={400} rows={2} placeholder="Nota al pie (opcional)" aria-label={`Nota de ${org.name}`} className="input sm:col-span-2" />
+                <button type="submit" className="btn-secondary min-h-10 px-3 py-1.5 sm:col-span-2 sm:justify-self-start">Guardar datos</button>
+              </form>
+            </details>
           </li>
         ))}
         {(orgs ?? []).length === 0 ? <li className="px-4 py-6 text-center text-sm text-muted">Aún no hay organizaciones.</li> : null}

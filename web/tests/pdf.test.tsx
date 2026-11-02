@@ -13,6 +13,7 @@ const quote: QuoteDetail = {
   validUntil: "2026-11-18",
   createdAt: "2026-10-19T14:00:00Z",
   organizationName: "Clínica Santa Cruz",
+  organizationContact: null,
   createdByName: "Dra. Ana Rojas",
   items: Array.from({ length: 40 }, (_, index) => ({
     labTestId: `t${index}`,

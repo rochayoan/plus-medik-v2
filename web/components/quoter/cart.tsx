@@ -3,6 +3,7 @@
 import { Bookmark, FileText, LoaderCircle, Trash2, X } from "lucide-react";
 import type { ClientStudy } from "@/lib/catalog-types";
 import { formatBs } from "@/lib/format";
+import { StudyName } from "@/components/study-name";
 
 interface CartProps {
   ids: string[];
@@ -46,7 +47,7 @@ export function Cart(props: CartProps) {
                 <div className="min-w-0 flex-1">
                   {study ? (
                     <>
-                      <p className="text-sm leading-snug">{study.name}</p>
+                      <StudyName name={study.name} className="text-sm leading-snug" />
                       {study.sampleType ? <p className="text-xs text-muted">{study.sampleType}</p> : null}
                     </>
                   ) : (

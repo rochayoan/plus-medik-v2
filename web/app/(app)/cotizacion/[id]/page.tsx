@@ -3,10 +3,12 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getBranding } from "@/lib/branding";
+import { brandForQuote } from "@/lib/org-brand";
 import { formatBs, formatDate, formatFolio } from "@/lib/format";
 import { getQuote } from "@/lib/quotes";
 import { buildWhatsAppText } from "@/lib/whatsapp-text";
 import { QuoteActions } from "./quote-actions";
+import { StudyName } from "@/components/study-name";
 
 export const metadata: Metadata = { title: "Cotización" };
 
@@ -17,7 +19,7 @@ export default async function QuoteDetailPage({ params }: { params: Promise<{ id
 
   const text = buildWhatsAppText(
     { folio: quote.folio, patientName: quote.patientName, createdAt: quote.createdAt, validUntil: quote.validUntil, totalBs: quote.totalBs, items: quote.items },
-    getBranding()
+    brandForQuote(getBranding(), quote)
   );
 
   return (
@@ -41,7 +43,7 @@ export default async function QuoteDetailPage({ params }: { params: Promise<{ id
             <li key={item.labTestId} className="flex items-center gap-3 px-4 py-2.5 text-sm">
               <span className="w-5 text-xs text-muted tabular-nums">{index + 1}</span>
               <div className="min-w-0 flex-1">
-                <p>{item.name}</p>
+                <StudyName name={item.name} />
                 {item.sampleType || item.code ? <p className="text-xs text-muted">{[item.code && `Cód. ${item.code}`, item.sampleType].filter(Boolean).join(" · ")}</p> : null}
               </div>
               <span className="tabular-nums">{formatBs(item.priceBs)}</span>

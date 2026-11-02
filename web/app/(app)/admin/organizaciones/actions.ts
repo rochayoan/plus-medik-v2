@@ -34,3 +34,16 @@ export async function updateOrganization(formData: FormData): Promise<void> {
   await adminClient().from("organizations").update({ tariff_id: parsed.data.tariffId, active: parsed.data.active === "true" }).eq("id", parsed.data.id);
   revalidatePath("/admin/organizaciones");
 }
+
+const optionalText = (max: number) => z.string().trim().max(max).transform((value) => value || null);
+
+// Datos que encabezan las cotizaciones de la organización (todos opcionales).
+export async function updateOrganizationContact(formData: FormData): Promise<void> {
+  await requireAdmin();
+  const parsed = z.object({ id: z.guid(), address: optionalText(240), phone: optionalText(60), note: optionalText(400) })
+    .safeParse({ id: formData.get("id"), address: formData.get("address") ?? "", phone: formData.get("phone") ?? "", note: formData.get("note") ?? "" });
+  if (!parsed.success) return;
+  const { id, ...contact } = parsed.data;
+  await adminClient().from("organizations").update(contact).eq("id", id);
+  revalidatePath("/admin/organizaciones");
+}
