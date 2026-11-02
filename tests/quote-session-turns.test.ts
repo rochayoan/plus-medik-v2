@@ -197,8 +197,8 @@ describe("texto en modo sesión", () => {
   it("un texto sin estudios (saludo, información) lo atiende el manejador de siempre sin tocar la sesión", async () => {
     const w = setup();
     await processTurns([text("hola", "t1"), text("¿a qué hora abren?", "t2")], w.deps);
-    // mismo lote: cada mensaje conserva su camino y las respuestas salen juntas, en un solo mensaje
-    expect(w.sends).toEqual([`${DRAFT_TEXTS.greeting}\n\n${DRAFT_TEXTS.handoff_unavailable}`]);
+    // mismo lote: cada mensaje conserva su camino, pero el saludo genérico (que solo pide estudios o la receta) se omite cuando el lote trae algo más concreto; la respuesta a la pregunta se conserva
+    expect(w.sends).toEqual([DRAFT_TEXTS.handoff_unavailable]);
     expect(w.audit.quoteBegin).not.toHaveBeenCalled();
   });
 

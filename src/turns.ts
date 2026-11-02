@@ -4,7 +4,7 @@ import { beginTurn, type ClaimedTurn, type Produced, type StalePolicy, type Turn
 import type { CaseOutcome } from "./crm-outbox/types.js";
 import { parseSessionCommand, parseSessionReply, summarizeSession } from "./quote-session.js";
 import { sessionImageProducer, sessionTextProducer } from "./quote-session-turns.js";
-import { classifyText } from "./text-handler.js";
+import { classifyText, DRAFT_TEXTS } from "./text-handler.js";
 import { deferClosing, mergeContactTurns, mergeProduced, type BatchUnit } from "./turn-batch.js";
 import { imageProducer, maskPhone, TECHNICAL_ISSUE_MESSAGE, type IncomingImage, type QuoteDeps } from "./whatsapp-quote.js";
 
@@ -144,6 +144,10 @@ const refOf = (turn: IncomingTurn): TurnRef => ({ messageId: turn.messageId, med
 
 const DEFAULT_CONTEXT_SECONDS = 86_400;
 
+// Respuestas fijas que solo piden al paciente que escriba sus estudios o envíe la receta (saludo, «con gusto te ayudo a cotizar», «¿sobre qué quieres saber?»). Dentro de un lote de Kapso se descartan si
+// el lote ya trae algo más concreto (ver mergeProduced). Se reconocen por su texto fijo; con textos personalizados no se marca nada y se conserva todo (el caso seguro).
+const GENERIC_PROMPTS: ReadonlySet<string> = new Set([DRAFT_TEXTS.greeting, DRAFT_TEXTS.send_recipe, DRAFT_TEXTS.fallback]);
+
 export function conversationProducer(turn: IncomingTurn, handler: (turn: IncomingTurn, context?: TurnHandlerContext) => Promise<TurnReply | undefined>, deps: QuoteDeps): TurnProducer {
   return async (ctx) => {
     try {
@@ -210,7 +214,7 @@ export function conversationProducer(turn: IncomingTurn, handler: (turn: Incomin
         await ctx.persist("close", (audit, runId, lease) => audit.recordIgnored(runId, "NO_REPLY", lease));
         return { kind: "none" };
       }
-      return { kind: "reply", body: reply.body, result: "conversation", processingStatus: "COMPLETED", stale: reply.stale ?? "NEWER_TURN", ...(reply.signature ? { signature: reply.signature } : {}) };
+      return { kind: "reply", body: reply.body, result: "conversation", processingStatus: "COMPLETED", stale: reply.stale ?? "NEWER_TURN", ...(reply.signature ? { signature: reply.signature } : {}), ...(GENERIC_PROMPTS.has(reply.body) ? { generic: true as const } : {}) };
     } catch {
       // Nunca se registra el texto del error (puede traer el contenido del mensaje): solo el código de la etapa.
       const errorCode = processingFailureCode("OTHER");

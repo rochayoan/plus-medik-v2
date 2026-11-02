@@ -65,7 +65,7 @@ export interface TurnRef {
 // Lo que el trabajo de un turno decide: nada que enviar (el trabajo ya cerró la corrida si hacía falta) o una respuesta.
 export type Produced =
   | { kind: "none" }
-  | { kind: "reply"; body: string; result: SendableResult; processingStatus: "COMPLETED" | "FAILED"; stale?: StalePolicy; signature?: string };
+  | { kind: "reply"; body: string; result: SendableResult; processingStatus: "COMPLETED" | "FAILED"; stale?: StalePolicy; signature?: string; generic?: true };
 
 export interface TurnContext {
   // Número del turno dentro de su contacto, en el orden de llegada a la base (solo en modo turnos).
