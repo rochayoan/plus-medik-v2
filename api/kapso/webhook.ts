@@ -2,6 +2,7 @@ import { resolveTextPilotGate } from "../../src/text-pilot-gate.js";
 import { WhatsAppClient } from "@kapso/whatsapp-cloud-api";
 import { waitUntil } from "@vercel/functions";
 import { analyzeImage } from "../../src/analyze.js";
+import { resolveBatchEngine } from "../../src/batch-engine.js";
 import { resolveAttentionFilter } from "../../src/attention-filter.js";
 import { createSupabaseAuditRepository, type AuditRepository } from "../../src/audit.js";
 import { loadActiveCatalog } from "../../src/supabase-catalog.js";
@@ -86,9 +87,16 @@ const conversationModel = turnsEnabled && textHandlerEnabled ? resolveConversati
 // Memoria conversacional corta (APAGADA por defecto; ver .env.example y src/conversation-memory.ts): para todos los pacientes que atienda el agente, sin listas de teléfonos.
 // Tope de respuestas del agente por contacto (APAGADO por defecto; ver .env.example y src/daily-reply-cap.ts): 5 cada 24 horas, aplicado por la base al reservar el envío.
 const dailyReplyCap = resolveDailyReplyCap(process.env, logLine, { turnsActive: turnsEnabled });
+// Motor global de lotes (APAGADO por defecto; ver docs/g6/03-conexion-del-motor-de-lotes.md): PLUSMEDIK_BATCH_ENGINE=shadow compara en los registros la decisión del motor nuevo con la ruta de siempre SIN cambiar
+// ninguna respuesta ni escribir nada propio; =on hace que el motor nuevo atienda el texto de los lotes de Kapso (varios mensajes de un contacto) con la ruta de siempre de respaldo. Solo tiene efecto con las sesiones de
+// cotización activas. Cualquier otro valor lo deja apagado (y se registra un código).
+const batchEngineResolution = resolveBatchEngine(process.env);
+if ("error" in batchEngineResolution && batchEngineResolution.error) logLine("batch_engine_config_invalid", { error: batchEngineResolution.error });
+const batchEngineMode = quoteSessionsEnabled && !replyGuardInvalid ? batchEngineResolution.mode : undefined;
+if (batchEngineResolution.mode && !batchEngineMode) logLine("batch_engine_inactive", { reason: "QUOTE_SESSIONS_REQUIRED" });
 // Alcance real del agente, sin números de teléfono: permite comprobar en los registros de Vercel, tras cada cambio de variables, quién usa la ruta de turnos y si el tope cubre a todos.
 const allContactsOnTurns = turnsEnabled && !textPilotGate.enabled;
-logLine("agent_scope", { turns: turnsEnabled, textHandler: textHandlerEnabled, pilotGate: textPilotGate.enabled, allContactsOnTurns, allowedPhonesRestricted: Boolean(process.env.ALLOWED_PHONES?.trim()), dailyCap: dailyReplyCap !== undefined, instantPhotoQuotes: instantPhotoQuotesEnabled, humanControl: humanControlEnabled });
+logLine("agent_scope", { turns: turnsEnabled, textHandler: textHandlerEnabled, pilotGate: textPilotGate.enabled, allContactsOnTurns, allowedPhonesRestricted: Boolean(process.env.ALLOWED_PHONES?.trim()), dailyCap: dailyReplyCap !== undefined, instantPhotoQuotes: instantPhotoQuotesEnabled, humanControl: humanControlEnabled, batchEngine: batchEngineMode ?? "off" });
 // Con la puerta del piloto encendida, los demás contactos siguen por la ruta anterior de fotos, que no pasa por los turnos y por tanto NO tiene el tope: el tope no cubre a todos.
 if (dailyReplyCap && textPilotGate.enabled) logLine("daily_cap_partial_scope", { reason: "PILOT_GATE_ON" });
 const conversationMemory = resolveConversationMemory(process.env, logLine, { conversationActive: conversationModel !== undefined, isAutomated: looksAutomated });
@@ -211,7 +219,8 @@ const realDeps: QuoteDeps = {
     quoteBegin: (...args) => audit().quoteBegin!(...args),
     quoteFinish: (...args) => audit().quoteFinish!(...args),
     quoteRead: (...args) => audit().quoteRead!(...args),
-    quoteClose: (...args) => audit().quoteClose!(...args)
+    quoteClose: (...args) => audit().quoteClose!(...args),
+    quoteShadowPeek: (...args) => audit().quoteShadowPeek!(...args)
   },
   log: logLine,
   requireAuditGuard: humanControlEnabled || turnsEnabled || on("REQUIRE_AUDIT_GUARD"),
@@ -219,6 +228,7 @@ const realDeps: QuoteDeps = {
   scopedControl: scopedContactControl ? { contactKeyFor, covers: scopedContactControl.covers } : undefined,
   turns: turnsEnabled ? { contactKeyFor, replyGuard: replyGuardConfig, attention: attentionConfig, instantPhotoQuotes: instantPhotoQuotesEnabled, dailyCap: dailyReplyCap, memory: conversationMemory,
     crmHandoff: crmOutbox,
+    ...(batchEngineMode ? { batchEngine: { mode: batchEngineMode } } : {}),
     quoteSessions: quoteSessionsEnabled && !replyGuardInvalid
       ? resolveQuoteSessionsConfig({ interpreter: studyInterpreter, catalogForText: ttlCache(() => loadActiveCatalog(), 60_000), loopProtection: replyGuard.enabled, attention: attentionConfig ? { gate: attentionConfig.gate, settleMs: attentionConfig.settleMs } : undefined, ownTexts: [...Object.values(DRAFT_TEXTS), ...Object.values(ANSWER_TEXTS), ...Object.values(QUOTE_TEXTS)], isInfoQuestion: knowledgeAnswersEnabled ? (text) => detectTopics(text, studyInfoEnabled).length > 0 : undefined })
       : undefined,

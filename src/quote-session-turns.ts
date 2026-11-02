@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { AnalysisResult } from "./analyze.js";
 import { catalogFingerprint, processingFailureCode, type AuditLease, type AuditRepository, type ProcessingPhase } from "./audit.js";
 import { withAiCallObserver, type AiCallEvent } from "./cache.js";
-import type { Produced, TurnContext, TurnProducer } from "./guarded-turn.js";
+import type { PhotoReport, Produced, TurnContext, TurnProducer } from "./guarded-turn.js";
 import {
   assertSafeInterpreterTexts, assertSafeQuoteTexts, DEFAULT_QUOTE_SESSIONS, evaluateSession, extractStudyRequests, formatAck, formatInterpretationNote, formatSessionQuote, formatTextReply, isGeneralQuestion, mergeInterpretation, optionsOf, parseSessionCommand, parseSessionReply, QUOTE_TEXTS,
   summarizeSession, withNote, compactQuote, type ItemResult, type QuoteBeginResult, type QuoteCloseInput, type QuoteCloseResult, type QuoteReadResult, type QuoteSessionsConfig, type QuoteTexts, type SessionItem, type SessionReply, type TextDoubt
@@ -16,7 +16,7 @@ import { buildAnalysisLog, detectImageMime, MAX_IMAGE_BYTES, maskPhone, TECHNICA
 // solo cuando el paciente escribe «listo». Todo lo demás (claim con lease, reserva de envío, pausa humana, guarda antibucles, un envío incierto jamás se reenvía) sigue siendo
 // la máquina común de guarded-turn.ts. Con sesiones apagadas este archivo no se usa y el flujo de imágenes (whatsapp-quote.ts) queda exactamente como estaba.
 
-class SessionUnavailableError extends Error {
+export class SessionUnavailableError extends Error {
   constructor(readonly stage: string) {
     super(`quote session unavailable: ${stage}`);
     this.name = "SessionUnavailableError";
@@ -46,12 +46,12 @@ export function itemFromAnalysis(analysis: AnalysisResult): ItemResult {
     : { status: "UNCERTAIN", studyIds, ambiguous: [], unresolved: 0, reasons: ["ENGINE_PARTIAL"] };
 }
 
-const namesOf = (ids: readonly string[], catalog: readonly CatalogStudy[]): string[] => {
+export const namesOf = (ids: readonly string[], catalog: readonly CatalogStudy[]): string[] => {
   const byId = new Map(catalog.map((study) => [study.id, study.name]));
   return ids.map((id) => byId.get(id)).filter((name): name is string => Boolean(name));
 };
 
-function needs<K extends "quoteBegin" | "quoteFinish" | "quoteRead" | "quoteClose">(audit: AuditRepository, method: K): NonNullable<AuditRepository[K]> {
+export function needs<K extends "quoteBegin" | "quoteFinish" | "quoteRead" | "quoteClose">(audit: AuditRepository, method: K): NonNullable<AuditRepository[K]> {
   const fn = audit[method];
   if (!fn) throw new SessionUnavailableError(method);
   return fn.bind(audit) as NonNullable<AuditRepository[K]>;
@@ -59,7 +59,7 @@ function needs<K extends "quoteBegin" | "quoteFinish" | "quoteRead" | "quoteClos
 
 // Ejecuta una operación de sesión con el lease de ESTA ejecución y devuelve su resultado. Un fallo (base caída, migración sin aplicar, lease perdido) no se oculta: el turno sigue por
 // la ruta de fallo técnico y NUNCA se responde como si se hubiera anotado algo.
-async function withSession<T>(ctx: TurnContext, stage: string, action: (audit: AuditRepository, runId: string, lease: AuditLease) => Promise<T>): Promise<T> {
+export async function withSession<T>(ctx: TurnContext, stage: string, action: (audit: AuditRepository, runId: string, lease: AuditLease) => Promise<T>): Promise<T> {
   if (!ctx.guarded) throw new SessionUnavailableError(stage);
   let value: { v: T } | undefined;
   const ok = await ctx.persist(stage, async (audit, runId, lease) => {
@@ -69,6 +69,8 @@ async function withSession<T>(ctx: TurnContext, stage: string, action: (audit: A
   return value.v;
 }
 
+// Anota en la respuesta de una foto lo que aportó a la solicitud (ver PhotoReport); el texto y el envío no cambian.
+const withPhoto = (produced: Produced, photo: PhotoReport): Produced => (produced.kind === "reply" ? { ...produced, photo } : produced);
 const failureReply = (): Produced => ({ kind: "reply", body: TECHNICAL_ISSUE_MESSAGE, result: "technical_issue", processingStatus: "FAILED", stale: "NEWER_TURN" });
 const plain = (body: string): Produced => ({ kind: "reply", body, result: "no_quote", processingStatus: "COMPLETED", stale: "NONE" });
 // Pregunta al paciente (una duda por aclarar, o si ya terminó): su firma lleva la cantidad de mensajes, así dos preguntas distintas no cuentan como una repetición para la guarda antibucles.
@@ -122,7 +124,8 @@ export function sessionImageProducer(image: IncomingImage, deps: QuoteDeps, conf
       const catalog = await deps.loadCatalog();
       if (begun.status === "exists" && begun.itemStatus !== "PROCESSING") {
         // Una ejecución anterior ya terminó el análisis de ESTA foto (reclamó el lease tras una caída): no se vuelve a analizar.
-        return ack(formatAck({ texts, kind: "IMAGE", names: namesOf(begun.studyIds, catalog), position: begun.position, hasDoubt: begun.itemStatus !== "RESOLVED", repeated: 0 }), begun.position);
+        const known: PhotoReport["status"] = begun.itemStatus === "RESOLVED" ? "RESOLVED" : begun.itemStatus === "UNREADABLE" ? "UNREADABLE" : "UNCERTAIN";
+        return withPhoto(ack(formatAck({ texts, kind: "IMAGE", names: namesOf(begun.studyIds, catalog), position: begun.position, hasDoubt: begun.itemStatus !== "RESOLVED", repeated: 0 }), begun.position), { status: known, studyIds: begun.studyIds });
       }
       phase = "AI_ANALYSIS";
       const analysis = await withAiCallObserver(
@@ -135,8 +138,8 @@ export function sessionImageProducer(image: IncomingImage, deps: QuoteDeps, conf
       await ctx.persist("evidence", (audit, runId, lease) => audit.recordEvidence(runId, { analysis, aiCalls, catalog: catalogFingerprint(catalog) }, lease));
       const item = itemFromAnalysis(analysis);
       await withSession(ctx, "quote_finish", (audit, runId, lease) => needs(audit, "quoteFinish")(runId, lease, item));
-      if (item.status === "UNREADABLE") return plain(texts.unreadable_image);
-      return ack(formatAck({ texts, kind: "IMAGE", names: namesOf(item.studyIds, catalog), position: begun.position, hasDoubt: item.status !== "RESOLVED", repeated: 0 }), begun.position);
+      if (item.status === "UNREADABLE") return withPhoto(plain(texts.unreadable_image), { status: "UNREADABLE", studyIds: [] });
+      return withPhoto(ack(formatAck({ texts, kind: "IMAGE", names: namesOf(item.studyIds, catalog), position: begun.position, hasDoubt: item.status !== "RESOLVED", repeated: 0 }), begun.position), { status: item.status === "RESOLVED" ? "RESOLVED" : "UNCERTAIN", studyIds: item.studyIds });
     } catch (error) {
       const errorCode = processingFailureCode(error instanceof SessionUnavailableError ? "OTHER" : phase);
       deps.log("processing_failed", { messageId: image.messageId, phone: who, errorCode, ...(error instanceof SessionUnavailableError ? { stage: error.stage } : {}) });

@@ -52,6 +52,7 @@ Orden = orden de nombre de archivo (el prefijo numérico es la versión). Depend
 | 17 | `20261105000000_plusmedik_conversation_memory.sql` | 115 | 1 | 0 | 3 | 0 | 2 | 0+0 | `dc498daf5ef8…` | ninguna (aditiva: memoria conversacional corta por contacto y línea; texto cifrado por la aplicación, sin teléfono, con vencimiento; se accede solo por funciones `plusmedik_memory_*`) |
 | 18 | `20261106000000_plusmedik_daily_reply_cap.sql` | 81 | 0 | 0 | 1 | 0 | 0 | 0+0 | `c16ed9d3088c…` | 01, 03, 04, 05, 06, 10, 16 (aditiva: reserva de envío con tope de respuestas del agente por contacto en ventana móvil; cuenta corridas con envío reservado/aceptado/incierto; no cuenta mensajes humanos) |
 | 19 | `20261107000000_plusmedik_batch_fold.sql` | 60 | 0 | 0 | 1 | 0 | 0 | 0+0 | `c64848610b18…` | 01, 03, 04, 05, 06 (aditiva: cierra sin enviar la corrida de un mensaje de un lote de Kapso cuyo contenido viajó dentro de la respuesta de otro; nunca envía, reserva ni cancela un envío) |
+| 20 | `20261108000000_plusmedik_quote_shadow_peek.sql` | 74 | 0 | 0 | 1 | 0 | 0 | 0+0 | `82d45e295d56…` | 01, 03, 04, 11 (aditiva y de SOLO LECTURA: función STABLE que devuelve la solicitud abierta visible para un turno y si hubo una cotización reciente, para el modo sombra del motor de lotes; la base no le permite escribir ni bloquear filas; no cambia ninguna función existente) |
 
 Totales tras la migración 16: **26 tablas, 1 vista, 256 objetos en el manifiesto, 59 funciones con `EXECUTE` para `service_role`**. El sha256 completo de cada archivo (con saltos de línea LF) está en el encabezado de ambos SQL de verificación.
 
@@ -141,6 +142,6 @@ Se regeneran con `npx tsx scripts/migration-manifest.ts` y una prueba falla si l
 
 | Dato | Valor |
 | --- | --- |
-| `tests/migration-preflight-db.test.ts` | **19 pruebas** (6 estáticas y 13 contra PostgreSQL 18 efímero; aplican las 15 migraciones) |
+| `tests/migration-preflight-db.test.ts` | **19 pruebas** (6 estáticas y 13 contra PostgreSQL 18 efímero; aplican las 20 migraciones) |
 | Cubre | base limpia; aplicar las 15 de una vez y **de a una** (tras cada una, lo aplicado completo y lo siguiente pendiente); reintento de las 15; parcial; hueco de orden; catálogo ausente, id de otro tipo, columna o privilegio de `service_role` faltante; relación de otro tipo, restricción o índice homónimo en otra tabla, objeto de V2 en `crm`; 12 permisos o ajustes de más (anon, authenticated, public, columna, RLS, EXECUTE, `search_path`, propietario, trigger deshabilitado, lectura de la carga cifrada); versiones viejas de las funciones redefinidas; registro de migraciones; filas previas; rol ausente; ejecución dentro de `begin read only`; instantánea idéntica antes/después |
 | Gasto / red | cero llamadas remotas |

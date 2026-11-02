@@ -21,10 +21,10 @@ describe("migración 19 (plusmedik_turn_fold): forma estática", () => {
   const raw = readFileSync(join(dir, FOLD), "utf8").replaceAll("\r\n", "\n");
   const code = raw.split("\n").filter((line) => !/^\s*--/.test(line)).join("\n");
 
-  it("es la última de la cadena (19), posterior a la del tope diario, y las 18 anteriores no cambian de nombre ni de orden", () => {
-    expect(MIGRATIONS).toHaveLength(19);
-    expect(MIGRATIONS.at(-1)).toBe(FOLD);
-    expect(MIGRATIONS.at(-2)).toBe("20261106000000_plusmedik_daily_reply_cap.sql");
+  it("es la 19 de la cadena (posterior a la del tope diario; la 20 es de solo lectura) y las 18 anteriores no cambian de nombre ni de orden", () => {
+    expect(MIGRATIONS.length).toBeGreaterThanOrEqual(19);
+    expect(MIGRATIONS[18]).toBe(FOLD);
+    expect(MIGRATIONS[17]).toBe("20261106000000_plusmedik_daily_reply_cap.sql");
   });
 
   it("es ADITIVA: una sola función y nada destructivo; no toca el CRM, el catálogo ni otras capas", () => {

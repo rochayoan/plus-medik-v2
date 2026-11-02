@@ -51,6 +51,10 @@ export interface TurnsConfig {
   memory?: ConversationMemory;
   // Quién responde a los mensajes que no son imágenes. Sin manejador, ese tipo de mensaje ni se reclama ni se responde.
   handlers?: TurnHandlers;
+  // Motor global de lotes (apagado si falta; ver src/batch-engine.ts). Solo actúa en un lote de Kapso (varios mensajes de un contacto) y exige las sesiones de cotización y el manejador de texto.
+  //   shadow: la ruta de siempre responde y escribe como hoy; el motor nuevo solo decide en paralelo y deja una línea de registro con códigos para comparar (no ejecuta ni envía nada).
+  //   on: el motor nuevo atiende el texto del lote; la ruta de siempre queda de respaldo si falla antes de tocar nada.
+  batchEngine?: { mode: "shadow" | "on" };
 }
 
 export interface TurnRef {
@@ -65,7 +69,14 @@ export interface TurnRef {
 // Lo que el trabajo de un turno decide: nada que enviar (el trabajo ya cerró la corrida si hacía falta) o una respuesta.
 export type Produced =
   | { kind: "none" }
-  | { kind: "reply"; body: string; result: SendableResult; processingStatus: "COMPLETED" | "FAILED"; stale?: StalePolicy; signature?: string; generic?: true };
+  | { kind: "reply"; body: string; result: SendableResult; processingStatus: "COMPLETED" | "FAILED"; stale?: StalePolicy; signature?: string; generic?: true; photo?: PhotoReport };
+
+// Lo que dejó el análisis de UNA foto en la solicitud (solo estado e ids de lab_tests; nunca precios ni texto). Lo informa el productor de las fotos para que el motor de lotes sepa qué aportó cada una sin
+// tener que leerlo de la base: una foto con un número de turno posterior al del texto que anota el lote no es visible para él. No altera ningún envío.
+export interface PhotoReport {
+  status: "RESOLVED" | "UNCERTAIN" | "UNREADABLE";
+  studyIds: readonly string[];
+}
 
 export interface TurnContext {
   // Número del turno dentro de su contacto, en el orden de llegada a la base (solo en modo turnos).

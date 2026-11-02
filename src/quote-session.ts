@@ -86,6 +86,12 @@ export type QuoteCloseInput =
   | { sessionId: string; outcome: "NEEDS_REVIEW"; reasons: ReviewReason[] }
   | { sessionId: string; outcome: "NEEDS_RESEND" | "CANCELLED" };
 
+// Lectura de SOLO LECTURA de la solicitud abierta para el modo sombra (migración 20, función STABLE: la base no permite que escriba ni bloquee filas). `recent`: ¿hubo una cotización entregada hace poco? (solo un booleano).
+export type ShadowPeekResult =
+  | { state: "none" | "replay" | "unavailable" | "lease_lost"; recent: boolean }
+  | { state: "pending"; pending: number; recent: boolean }
+  | { state: "ready"; items: SessionItem[]; recent: boolean };
+
 export type QuoteCloseResult = { status: "closed" | "replayed"; outcome: string } | { status: "pending" | "not_open" };
 
 // ───────────────────────────── comandos ─────────────────────────────

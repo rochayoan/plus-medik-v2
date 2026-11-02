@@ -22,7 +22,7 @@ describe("G6.0: dónde puede aparecer la atención selectiva", () => {
   });
 
   it("solo el propio módulo, el manejador de texto, los turnos, la configuración de turnos, el productor de texto de las sesiones y el cableado de Vercel la nombran", () => {
-    const allowed = new Set(["src/attention-filter.ts", "src/text-handler.ts", "src/turns.ts", "src/guarded-turn.ts", "src/quote-session-turns.ts", "api/kapso/webhook.ts"]);
+    const allowed = new Set(["src/attention-filter.ts", "src/text-handler.ts", "src/turns.ts", "src/guarded-turn.ts", "src/quote-session-turns.ts", "src/batch-engine.ts", "api/kapso/webhook.ts"]);
     for (const path of files) {
       if (allowed.has(rel(path))) continue;
       expect(source(path), rel(path)).not.toMatch(MENTION);
@@ -143,7 +143,7 @@ describe("G6.0: el contexto que recibe el modelo", () => {
     expect(turns).toMatch(/audit\.quoteRead\?\.\(runId, lease\)/);
     expect(turns).toMatch(/audit\.quoteLastStudies\?\.\(runId, lease,/);
     expect(turns).toMatch(/deps\.turns\?\.attention && deps\.turns\.quoteSessions/);
-    expect(readdirSync(join(root, "supabase/migrations")).filter((name) => name.endsWith(".sql"))).toHaveLength(19);
+    expect(readdirSync(join(root, "supabase/migrations")).filter((name) => name.endsWith(".sql"))).toHaveLength(20);
     expect(code(join(root, "src/attention-filter.ts"))).not.toMatch(/plusmedik_|rpc\(/);
   });
 

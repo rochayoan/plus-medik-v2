@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@kapso/whatsapp-cloud-api", () => ({ WhatsAppClient: class { messages = { sendText: vi.fn() }; media = { download: vi.fn() }; rawFetch = vi.fn(); fetch = vi.fn(); } }));
 vi.mock("@vercel/functions", () => ({ waitUntil: () => undefined }));
 
-const NAMES = ["PLUSMEDIK_TURNS", "PLUSMEDIK_TEXT_HANDLER", "PLUSMEDIK_QUOTE_SESSIONS", "PLUSMEDIK_INSTANT_PHOTO_QUOTES", "PLUSMEDIK_DAILY_REPLY_CAP", "PLUSMEDIK_DAILY_REPLY_CAP_MAX", "PLUSMEDIK_DAILY_REPLY_CAP_HOURS", "PLUSMEDIK_TEXT_PILOT_GUARD", "PLUSMEDIK_TEXT_PILOT_EXTRA_PHONES", "PLUSMEDIK_AGENT_CONTROL_PHONES", "ALLOWED_PHONES", "PLUSMEDIK_HUMAN_CONTROL", "PLUSMEDIK_REPLY_GUARD", "PLUSMEDIK_KNOWLEDGE_ANSWERS", "PLUSMEDIK_LLM_CONVERSATION", "PLUSMEDIK_CONVERSATION_MEMORY", "PLUSMEDIK_SMART_QUOTES"];
+const NAMES = ["PLUSMEDIK_TURNS", "PLUSMEDIK_TEXT_HANDLER", "PLUSMEDIK_QUOTE_SESSIONS", "PLUSMEDIK_INSTANT_PHOTO_QUOTES", "PLUSMEDIK_DAILY_REPLY_CAP", "PLUSMEDIK_DAILY_REPLY_CAP_MAX", "PLUSMEDIK_DAILY_REPLY_CAP_HOURS", "PLUSMEDIK_TEXT_PILOT_GUARD", "PLUSMEDIK_TEXT_PILOT_EXTRA_PHONES", "PLUSMEDIK_AGENT_CONTROL_PHONES", "ALLOWED_PHONES", "PLUSMEDIK_HUMAN_CONTROL", "PLUSMEDIK_REPLY_GUARD", "PLUSMEDIK_KNOWLEDGE_ANSWERS", "PLUSMEDIK_LLM_CONVERSATION", "PLUSMEDIK_CONVERSATION_MEMORY", "PLUSMEDIK_SMART_QUOTES", "PLUSMEDIK_BATCH_ENGINE"];
 const saved: Record<string, string | undefined> = {};
 const BASE = { PLUSMEDIK_TURNS: "on", PLUSMEDIK_TEXT_HANDLER: "on", PLUSMEDIK_QUOTE_SESSIONS: "on", PLUSMEDIK_INSTANT_PHOTO_QUOTES: "on", PLUSMEDIK_DAILY_REPLY_CAP: "on" };
 
@@ -49,6 +49,41 @@ describe("alcance del agente según el entorno", () => {
   it("las fotos instantáneas son opt-in: sin su bandera, abierto a todos no se activan", async () => {
     const { scope: s } = await scope({ ...BASE, PLUSMEDIK_INSTANT_PHOTO_QUOTES: "" });
     expect(s).toMatchObject({ allContactsOnTurns: true, instantPhotoQuotes: false });
+  });
+
+  describe("motor global de lotes (PLUSMEDIK_BATCH_ENGINE)", () => {
+    it("APAGADO por defecto: sin la variable no hay motor, no se registra ningún aviso y el alcance lo dice", async () => {
+      const { scope: s, events } = await scope(BASE);
+      expect(s).toMatchObject({ batchEngine: "off" });
+      expect(events).not.toContain("batch_engine_config_invalid");
+      expect(events).not.toContain("batch_engine_inactive");
+    });
+
+    it("«off», en blanco o cualquier valor desconocido lo dejan apagado; solo un valor desconocido avisa con un código", async () => {
+      for (const value of ["", "off", "OFF"]) {
+        const { scope: s, events } = await scope({ ...BASE, PLUSMEDIK_BATCH_ENGINE: value });
+        expect(s, value).toMatchObject({ batchEngine: "off" });
+        expect(events, value).not.toContain("batch_engine_config_invalid");
+      }
+      for (const value of ["true", "1", "yes", "sombra", "onn"]) {
+        const { scope: s, lines } = await scope({ ...BASE, PLUSMEDIK_BATCH_ENGINE: value });
+        expect(s, value).toMatchObject({ batchEngine: "off" });
+        expect(lines.find((line) => line.event === "batch_engine_config_invalid"), value).toMatchObject({ error: "INVALID_VALUE" });
+      }
+    });
+
+    it("«shadow» y «on» (con sesiones de cotización) lo encienden", async () => {
+      expect((await scope({ ...BASE, PLUSMEDIK_BATCH_ENGINE: "shadow" })).scope).toMatchObject({ batchEngine: "shadow" });
+      expect((await scope({ ...BASE, PLUSMEDIK_BATCH_ENGINE: " ON " })).scope).toMatchObject({ batchEngine: "on" });
+    });
+
+    it("sin sesiones de cotización no se activa (y se registra el motivo): las sesiones son lo que el motor lee y cierra", async () => {
+      for (const mode of ["shadow", "on"]) {
+        const { scope: s, lines } = await scope({ ...BASE, PLUSMEDIK_QUOTE_SESSIONS: "", PLUSMEDIK_BATCH_ENGINE: mode });
+        expect(s, mode).toMatchObject({ batchEngine: "off" });
+        expect(lines.find((line) => line.event === "batch_engine_inactive"), mode).toMatchObject({ reason: "QUOTE_SESSIONS_REQUIRED" });
+      }
+    });
   });
 
   it("sin turnos no hay tope ni alcance de turnos, y se registra el motivo", async () => {
