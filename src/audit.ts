@@ -76,6 +76,9 @@ export interface AuditRepository {
   // Modo turnos: desiste de esperar un envío en vuelo (BUSY_TIMEOUT). Vence el lease del turno y lo marca para atención, de modo que un reenvío del mensaje pueda
   // reclamarlo de nuevo; NUNCA envía, reserva ni cierra nada. Opcional: un repositorio que no lo implemente deja el comportamiento anterior (el lease vence solo).
   releaseTurn?(runId: string, reason: "BUSY_TIMEOUT", lease: AuditLease): Promise<void>;
+  // Buffering de Kapso (migración 19): da por atendido un turno de un lote cuyo contenido viajó dentro de la respuesta de otro (COMPLETED, sin envío, sin contar para el tope). Es la única forma de
+  // terminar una corrida con evidencia sin enviar. Opcional: sin él se cierra como «sin respuesta» (solo posible para corridas sin análisis registrado).
+  foldTurn?(runId: string, lease: AuditLease): Promise<void>;
   // Modo turnos: registra, ANTES de reservar el envío, qué versiones aprobadas de conocimiento respaldan la respuesta. 'closed' = ya no se puede (el envío se reservó o el turno se
   // cerró). Opcional: sin él, una respuesta basada en conocimiento no se puede enviar (no hay rastro).
   recordKnowledgeRefs?(runId: string, refs: readonly KnowledgeRefRecord[], lease: AuditLease): Promise<"recorded" | "closed">;
@@ -609,6 +612,9 @@ export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}
     },
     async releaseTurn(runId, reason, lease) {
       await rpc("plusmedik_turn_release", { ...leaseArgs(runId, lease), p_reason: reason });
+    },
+    async foldTurn(runId, lease) {
+      await rpc("plusmedik_turn_fold", leaseArgs(runId, lease));
     },
     async recoverStale(recovery = {}) {
       const result = await rpc("plusmedik_audit_recover_stale", {

@@ -143,7 +143,7 @@ describe("G6.0: el contexto que recibe el modelo", () => {
     expect(turns).toMatch(/audit\.quoteRead\?\.\(runId, lease\)/);
     expect(turns).toMatch(/audit\.quoteLastStudies\?\.\(runId, lease,/);
     expect(turns).toMatch(/deps\.turns\?\.attention && deps\.turns\.quoteSessions/);
-    expect(readdirSync(join(root, "supabase/migrations")).filter((name) => name.endsWith(".sql"))).toHaveLength(18);
+    expect(readdirSync(join(root, "supabase/migrations")).filter((name) => name.endsWith(".sql"))).toHaveLength(19);
     expect(code(join(root, "src/attention-filter.ts"))).not.toMatch(/plusmedik_|rpc\(/);
   });
 

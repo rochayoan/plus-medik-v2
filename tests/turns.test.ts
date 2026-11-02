@@ -282,7 +282,8 @@ describe("lotes de turnos: el orden de numeración es el del mensaje", () => {
       handlers: { text: async (turn) => { events.push(`work:${turn.messageId}`); await gate; return { body: turn.messageId }; } }
     });
     // processTurns conserva el orden recibido (extractIncomingTurns ya lo entrega ordenado por el instante del mensaje)
-    const batch = [turn({ messageId: "t1" }), turn({ messageId: "t2" }), turn({ messageId: "t3" })];
+    // contactos distintos: los mensajes de UN mismo contacto en un lote se atienden como una sola solicitud (ver tests/kapso-batch.test.ts)
+    const batch = [turn({ messageId: "t1", from: "59171000001" }), turn({ messageId: "t2", from: "59171000002" }), turn({ messageId: "t3", from: "59171000003" })];
     const done = processTurns(batch, t.deps);
     await vi.waitFor(() => expect(events.filter((e) => e.startsWith("work:"))).toHaveLength(3), { timeout: 60_000, interval: 20 });
     expect(events.slice(0, 3)).toEqual(["claim:t1", "claim:t2", "claim:t3"]);
@@ -304,7 +305,7 @@ describe("lotes de turnos: el orden de numeración es el del mensaje", () => {
 
   it("un fallo en un turno del lote no impide los demás", async () => {
     const t = setup({ handlers: { text: async (turn) => { if (turn.messageId === "bad") throw new Error("boom"); return { body: turn.messageId }; } } });
-    const outcomes = await processTurns([turn({ messageId: "bad" }), turn({ messageId: "good" })], t.deps);
+    const outcomes = await processTurns([turn({ messageId: "bad", from: "59171000001" }), turn({ messageId: "good", from: "59171000002" })], t.deps);
     expect(outcomes.map((o) => o.result)).toEqual(["technical_issue", "conversation"]);
   });
 });

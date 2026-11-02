@@ -197,7 +197,8 @@ describe("texto en modo sesión", () => {
   it("un texto sin estudios (saludo, información) lo atiende el manejador de siempre sin tocar la sesión", async () => {
     const w = setup();
     await processTurns([text("hola", "t1"), text("¿a qué hora abren?", "t2")], w.deps);
-    expect(w.sends).toEqual([DRAFT_TEXTS.greeting, DRAFT_TEXTS.handoff_unavailable]);
+    // mismo lote: cada mensaje conserva su camino y las respuestas salen juntas, en un solo mensaje
+    expect(w.sends).toEqual([`${DRAFT_TEXTS.greeting}\n\n${DRAFT_TEXTS.handoff_unavailable}`]);
     expect(w.audit.quoteBegin).not.toHaveBeenCalled();
   });
 
@@ -434,14 +435,16 @@ describe("G5.9 · texto en modo sesión: cotizar sin «listo», acumular y pregu
     const w = start(fakeAudit());
     await processTurns([text("¿qué es el hemograma?", "t1"), text("¿para qué sirve la glucosa?", "t2")], w.deps);
     expect(w.audit.quoteBegin).not.toHaveBeenCalled();
-    expect(w.sends).toEqual([DRAFT_TEXTS.fallback, DRAFT_TEXTS.fallback]);
+    // las dos preguntas reciben el mismo texto de siempre: en el lote sale una sola vez
+    expect(w.sends).toEqual([DRAFT_TEXTS.fallback]);
   });
 
   it("los precios, requisitos clínicos y derivaciones conservan su camino: preparación y plazos no entran a la sesión", async () => {
     const w = start(fakeAudit());
     await processTurns([text("¿necesito ayuno para el hemograma?", "t1"), text("¿cuánto demora el resultado de la glucosa?", "t2"), text("quiero hablar con una persona", "t3")], w.deps);
     expect(w.audit.quoteBegin).not.toHaveBeenCalled();
-    expect(w.sends).toHaveLength(3);
+    // las tres reciben el mismo texto de siempre (ninguna entra a la sesión): en el lote sale una sola vez
+    expect(w.sends).toEqual([DRAFT_TEXTS.handoff_unavailable]);
   });
 
   it("una solicitud que ya está llena avisa en vez de cotizar a medias", async () => {
