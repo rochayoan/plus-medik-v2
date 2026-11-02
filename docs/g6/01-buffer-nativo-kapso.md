@@ -30,6 +30,20 @@ Un contacto con un solo mensaje sigue exactamente el flujo anterior.
 
 Sin la migración aplicada, la llamada falla (se registra `audit_unavailable`) y las corridas de fotos de un lote quedan en `ANALYZED`: las sesiones de cotización las verían como «mensajes anteriores en proceso». Se aplica a mano, como las anteriores (ver `docs/g5/20-g51-aplicacion-de-migraciones.md`).
 
+## Nombres de estudios partidos entre mensajes
+
+Con sesiones de cotización cada texto se interpreta por separado, pero un fragmento que por sí solo no dice nada («completo») quedaba huérfano: con el intérprete encendido salía «sin resolver» y la solicitud quedaba con un estudio reconocido y otro no. Antes de interpretar, el lote reconstruye los nombres partidos (`src/text-fragments.ts`): «quiero cotizar» + «hemograma» + «completo» -> «quiero cotizar» y «hemograma completo»; «glucosa» + «en ayunas»; «creatinina» + «en orina» (la unión además aclara la ambigüedad).
+
+Se une el fragmento siguiente al anterior **solo si se cumplen todas**:
+
+1. ambos son textos sueltos y contiguos (una foto o un mensaje de otro tipo entre medio lo impide);
+2. ninguno es un comando o respuesta de la solicitud («listo», «cancelar», «sí», «no», «2») ni habla de salud, pide a una persona, pregunta por información o saluda;
+3. el fragmento siguiente es corto (hasta 4 palabras) y por sí solo no reconoce ningún estudio, ni uno ni varios posibles;
+4. al unirlos, el catálogo reconoce un estudio cuyo nombre o alias contiene todas las palabras del fragmento;
+5. unir no pierde ningún estudio que el mensaje anterior ya identificaba ni agrega nada sin resolver.
+
+Si algo falla, o el catálogo no se puede leer, no se une nada. El texto unido lleva un espacio (un salto de línea se leería como dos estudios). El mensaje líder es el último fragmento; los anteriores se reclaman (deduplicación) y se cierran sin respuesta, igual que los textos unidos sin sesiones. No cambia las sesiones activas, los comandos, las fotos, la deduplicación ni el límite diario. No reconstruye nombres partidos entre entregas distintas (lotes diferentes).
+
 ## Entrega simultánea del mismo lote
 
 Todas las ejecuciones reclaman los mensajes de un contacto en el MISMO orden (el del lote), así que la base (un reclamo atómico por mensaje) concede el primero a una sola. La que lo encuentra ya EN CURSO en otra ejecución (reclamo «BUSY» o «IN_DOUBT») cede el resto de los mensajes de ese contacto y lo registra (`turn_batch_yield`, solo cantidades): la ganadora los atiende todos y responde una sola vez. Un mensaje ya TERMINADO («FINISHED», de una entrega anterior) no cede el grupo: los nuevos del mismo lote se siguen atendiendo. Antes cada ejecución se llevaba una parte de los mensajes y el paciente recibía dos respuestas.

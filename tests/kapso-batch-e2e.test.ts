@@ -37,7 +37,9 @@ const baseCatalog = (): CatalogStudy[] => [
   study(1, "HEMOGRAMA COMPLETO", ["hemograma"], 45),
   study(2, "GLUCOSA EN AYUNAS", ["glucosa"], 30.5),
   study(3, "COLESTEROL TOTAL", ["colesterol"], 25),
-  study(4, "TSH", ["tsh"], 80)
+  study(4, "TSH", ["tsh"], 80),
+  study(7, "CREATININA SERICA", ["creatinina"], 20),
+  study(8, "CREATININA EN ORINA", ["creatinina"], 22)
 ];
 
 const conversation = (phone: string) => ({ id: "conv_1", phone_number: phone, phone_number_id: LAB });
@@ -94,7 +96,7 @@ describe.skipIf(!bin)("buffering nativo de Kapso (lotes batch:true + data[]) con
     return { phone, key: contactKeyFor(phone)! };
   };
 
-  interface Options { sessions?: boolean; handlers?: TurnHandlers; verdicts?: Record<string, Verdict>; dailyCap?: { max: number; windowSeconds: number }; gates?: Record<string, Promise<void>>; failTags?: string[] }
+  interface Options { sessions?: boolean; handlers?: TurnHandlers; verdicts?: Record<string, Verdict>; dailyCap?: { max: number; windowSeconds: number }; gates?: Record<string, Promise<void>>; failTags?: string[]; interpreter?: NonNullable<Parameters<typeof resolveQuoteSessionsConfig>[0]>["interpreter"] }
   function setup(options: Options = {}) {
     const sends: Array<{ to: string; body: string }> = [];
     const logs: Array<[string, Record<string, unknown>]> = [];
@@ -119,7 +121,7 @@ describe.skipIf(!bin)("buffering nativo de Kapso (lotes batch:true + data[]) con
         contactKeyFor, busyDelayMs: 20, busyRetries: 400,
         handlers: options.handlers ?? { text: createTextHandler({ log }) },
         ...(options.dailyCap ? { dailyCap: options.dailyCap } : {}),
-        ...(sessions ? { quoteSessions: resolveQuoteSessionsConfig({ waitDelayMs: 25, waitRetries: 400, ttlSeconds: 1800, ownTexts: [...Object.values(DRAFT_TEXTS), ...Object.values(ANSWER_TEXTS), ...Object.values(QUOTE_TEXTS)] }) } : {})
+        ...(sessions ? { quoteSessions: resolveQuoteSessionsConfig({ ...(options.interpreter ? { interpreter: options.interpreter } : {}), waitDelayMs: 25, waitRetries: 400, ttlSeconds: 1800, ownTexts: [...Object.values(DRAFT_TEXTS), ...Object.values(ANSWER_TEXTS), ...Object.values(QUOTE_TEXTS)] }) } : {})
       }
     };
     const deps: KapsoWebhookDeps = { secret: SECRET, allowedPhones: undefined, quote, schedule: (task) => { scheduled.push(task); }, humanControl: { labPhoneNumberId: LAB, contactKeyFor, attention: createAttentionRepository(rpcOptions()) }, log };
@@ -406,6 +408,165 @@ describe.skipIf(!bin)("buffering nativo de Kapso (lotes batch:true + data[]) con
       const w = setup({ sessions: true });
       await deliverOne(w, textEvent(id("txt"), p.phone, "Quiero cotizar"));
       expect(w.sends).toEqual([{ to: p.phone, body: DRAFT_TEXTS.send_recipe }]);
+    });
+  });
+
+  // ───────────────────────────── nombres de estudios partidos entre mensajes ─────────────────────────────
+
+  describe("textos fragmentados: «quiero cotizar» + «hemograma» + «completo»", () => {
+    // Como en producción con el intérprete encendido: un fragmento suelto como «completo» sale «sin resolver». Registra a qué textos se les preguntó.
+    const unclearInterpreter = () => {
+      const asked: string[] = [];
+      const interpreter: NonNullable<Parameters<typeof resolveQuoteSessionsConfig>[0]>["interpreter"] = async (text) => {
+        asked.push(text);
+        return /^completo$/i.test(text.trim()) ? { isQuoteRequest: true, wantsQuote: false, matched: [], ambiguous: [], unclear: [text], notFound: [] } : undefined;
+      };
+      return { asked, interpreter };
+    };
+    const itemStatuses = async (key: string): Promise<string[]> => JSON.parse(await db.ok(`select coalesce(json_agg(status order by seq), '[]') from public.plusmedik_quote_items where contact_key = '${key}'`));
+
+    it("EL CASO REAL: un solo estudio reconocido, ninguno «sin resolver», una sola burbuja y a «completo» nunca se le pregunta por separado", async () => {
+      const p = patient();
+      const { asked, interpreter } = unclearInterpreter();
+      const w = setup({ sessions: true, interpreter });
+      const [m1, m2, m3] = [id("txt"), id("txt"), id("txt")];
+      await deliver(w, textEvent(m1, p.phone, "quiero cotizar"), textEvent(m2, p.phone, "hemograma"), textEvent(m3, p.phone, "completo"));
+      expect(w.sends).toHaveLength(1);
+      const body = w.sends[0]!.body;
+      expect(body).toContain("Estudios anotados: HEMOGRAMA COMPLETO.");
+      expect(body).toContain("¿Eso es todo?");
+      expect(body).not.toContain(DRAFT_TEXTS.send_recipe);
+      // nada «sin resolver»: la sesión tiene UN estudio, resuelto, y el intérprete nunca vio «completo» suelto
+      expect(await itemStatuses(p.key)).toEqual(["RESOLVED"]);
+      expect(asked).not.toContain("completo");
+      expect(asked).not.toContain("Completo");
+      // los fragmentos son un solo turno: el líder es el último mensaje y el anterior queda cerrado sin respuesta propia
+      const runs = await runsOf(p.key);
+      expect(byMessage(runs, m3)).toMatchObject({ send_state: "ACCEPTED" });
+      expect(byMessage(runs, m2)).toMatchObject({ processing_status: "IGNORED", error_code: "NO_REPLY", send_state: "NOT_APPLICABLE" });
+      expect(logsOf(w.logs, "turn_batch")).toEqual([{ phone: expect.any(String), messages: 3, claimed: 3, requests: 2, textsMerged: 0, fragmentsJoined: 1 }]);
+    });
+
+    it.each([
+      ["glucosa", "en ayunas", "GLUCOSA EN AYUNAS"],
+      ["creatinina", "en orina", "CREATININA EN ORINA"]
+    ])("variante: «%s» + «%s» es UN estudio (y la unión aclara la ambigüedad de «creatinina», sin preguntar opciones)", async (first, second, expected) => {
+      const p = patient();
+      const w = setup({ sessions: true });
+      await deliver(w, textEvent(id("txt"), p.phone, first), textEvent(id("txt"), p.phone, second));
+      expect(w.sends).toHaveLength(1);
+      expect(w.sends[0]!.body).toContain(`Estudios anotados: ${expected}.`);
+      expect(w.sends[0]!.body).not.toContain("opciones");
+      expect(await itemStatuses(p.key)).toEqual(["RESOLVED"]);
+    });
+
+    it("con «listo» en el mismo lote: UNA cotización del estudio reconstruido, una sola vez y con su precio vigente", async () => {
+      const p = patient();
+      const w = setup({ sessions: true, interpreter: unclearInterpreter().interpreter });
+      await deliver(w, textEvent(id("txt"), p.phone, "hemograma"), textEvent(id("txt"), p.phone, "completo"), textEvent(id("txt"), p.phone, "listo"));
+      expect(w.sends).toHaveLength(1);
+      const body = w.sends[0]!.body;
+      expect(body.match(/HEMOGRAMA COMPLETO —/g)).toHaveLength(1);
+      expect(body).toContain("HEMOGRAMA COMPLETO — Bs 45");
+      expect(body).toContain("Total de los estudios cotizados: Bs 45");
+      expect((await sessionsOf(p.key))[0]).toMatchObject({ status: "QUOTED" });
+    });
+
+    it("«SÍ» sigue siendo un comando aparte: «hemograma» + «completo» + «sí» cotiza el estudio reconstruido", async () => {
+      const p = patient();
+      const w = setup({ sessions: true });
+      await deliver(w, textEvent(id("txt"), p.phone, "hemograma"), textEvent(id("txt"), p.phone, "completo"), textEvent(id("txt"), p.phone, "sí"));
+      expect(w.sends).toHaveLength(1);
+      expect(w.sends[0]!.body).toContain("HEMOGRAMA COMPLETO — Bs 45");
+      expect(w.sends[0]!.body).not.toContain("Estudios anotados");
+    });
+
+    it("SESIÓN ACTIVA: lo anotado antes se conserva y se suma al estudio reconstruido en la cotización final", async () => {
+      const p = patient();
+      const w = setup({ sessions: true, interpreter: unclearInterpreter().interpreter });
+      await deliverOne(w, textEvent(id("txt"), p.phone, "glucosa"));
+      expect(w.sends).toHaveLength(1);
+      await deliver(w, textEvent(id("txt"), p.phone, "hemograma"), textEvent(id("txt"), p.phone, "completo"), textEvent(id("txt"), p.phone, "listo"));
+      expect(w.sends).toHaveLength(2);
+      const body = w.sends[1]!.body;
+      expect(body).toContain("GLUCOSA EN AYUNAS — Bs 30,50");
+      expect(body).toContain("HEMOGRAMA COMPLETO — Bs 45");
+      expect(body).toContain("Total de los estudios cotizados: Bs 75,50");
+      expect(await itemStatuses(p.key)).toEqual(["RESOLVED", "RESOLVED"]);
+    });
+
+    it("FOTOGRAFÍAS: la foto conserva su análisis y su lugar; los fragmentos contiguos se reconstruyen y la cotización junta todo", async () => {
+      const p = patient();
+      const w = setup({ sessions: true, verdicts: { A: { kind: "COMPLETE", ids: [3] } }, interpreter: unclearInterpreter().interpreter });
+      await deliver(w, textEvent(id("txt"), p.phone, "hemograma"), textEvent(id("txt"), p.phone, "completo"), imageEvent(id("img"), p.phone, "A"), textEvent(id("txt"), p.phone, "listo"));
+      expect(w.analyzed).toEqual(["A"]);
+      expect(w.sends).toHaveLength(1);
+      expect(w.sends[0]!.body).toContain("HEMOGRAMA COMPLETO — Bs 45");
+      expect(w.sends[0]!.body).toContain("COLESTEROL TOTAL — Bs 25");
+      expect(w.sends[0]!.body).toContain("Total de los estudios cotizados: Bs 70");
+    });
+
+    it("NO se unen intenciones distintas: una foto entre «hemograma» y «completo» los separa, y a «completo» se le trata como antes", async () => {
+      const p = patient();
+      const { asked, interpreter } = unclearInterpreter();
+      const w = setup({ sessions: true, interpreter });
+      await deliver(w, textEvent(id("txt"), p.phone, "hemograma"), imageEvent(id("img"), p.phone, "A"), textEvent(id("txt"), p.phone, "completo"));
+      expect(asked).toContain("completo");
+      expect(logsOf(w.logs, "turn_batch")[0]).not.toHaveProperty("fragmentsJoined");
+    });
+
+    it("NO se unen intenciones distintas: «quiero cotizar» + «completo», «glucosa» + «gracias» y un texto médico en medio", async () => {
+      const cases: Array<[string[], string]> = [
+        [["quiero cotizar", "completo"], "completo"],
+        [["glucosa", "gracias"], "gracias"],
+        [["hemograma", "me duele mucho el pecho", "completo"], "completo"]
+      ];
+      for (const [texts, asksAbout] of cases) {
+        const p = patient();
+        const { asked, interpreter } = unclearInterpreter();
+        const w = setup({ sessions: true, interpreter });
+        await deliver(w, ...texts.map((body) => textEvent(id("txt"), p.phone, body)));
+        expect(logsOf(w.logs, "turn_batch")[0], texts.join(" + ")).not.toHaveProperty("fragmentsJoined");
+        if (asksAbout === "completo") expect(asked, texts.join(" + ")).toContain("completo");
+      }
+      // y lo médico sigue atendiéndose
+      const p = patient();
+      const w = setup({ sessions: true });
+      await deliver(w, textEvent(id("txt"), p.phone, "hemograma"), textEvent(id("txt"), p.phone, "me duele mucho el pecho"), textEvent(id("txt"), p.phone, "completo"));
+      expect(w.sends[0]!.body).toContain(DRAFT_TEXTS.medical_unavailable);
+    });
+
+    it("DEDUPLICACIÓN: el mismo lote reentregado no responde, no anota ni reinterpreta nada", async () => {
+      const p = patient();
+      const { asked, interpreter } = unclearInterpreter();
+      const w = setup({ sessions: true, interpreter });
+      const events = [textEvent(id("txt"), p.phone, "quiero cotizar"), textEvent(id("txt"), p.phone, "hemograma"), textEvent(id("txt"), p.phone, "completo")];
+      await deliver(w, ...events);
+      const state = { sends: w.sends.length, asked: asked.length, runs: (await runsOf(p.key)).length, items: await itemCount(p.key) };
+      expect(state).toMatchObject({ sends: 1, runs: 3, items: 1 });
+      await deliver(w, ...events);
+      await deliver(w, ...events);
+      expect({ sends: w.sends.length, asked: asked.length, runs: (await runsOf(p.key)).length, items: await itemCount(p.key) }).toEqual(state);
+    });
+
+    it("LÍMITE DIARIO: un lote fragmentado cuenta UNA respuesta; a la sexta ya no se responde", async () => {
+      const p = patient();
+      const w = setup({ sessions: true, dailyCap: { max: 5, windowSeconds: 86_400 } });
+      for (let i = 0; i < 5; i++) await deliver(w, textEvent(id("txt"), p.phone, "hemograma"), textEvent(id("txt"), p.phone, "completo"));
+      expect(w.sends).toHaveLength(5);
+      const blocked = [id("txt"), id("txt")];
+      await deliver(w, textEvent(blocked[0]!, p.phone, "hemograma"), textEvent(blocked[1]!, p.phone, "completo"));
+      expect(w.sends).toHaveLength(5);
+      expect(byMessage(await runsOf(p.key), blocked[1]!)).toMatchObject({ send_state: "CANCELLED", send_block_reason: "DAILY_CAP" });
+    });
+
+    it("un mensaje suelto «completo» (sin lote) se trata como siempre: no se reconstruye nada entre entregas distintas", async () => {
+      const p = patient();
+      const { asked, interpreter } = unclearInterpreter();
+      const w = setup({ sessions: true, interpreter });
+      await deliverOne(w, textEvent(id("txt"), p.phone, "hemograma"));
+      await deliverOne(w, textEvent(id("txt"), p.phone, "completo"));
+      expect(asked).toContain("completo");
     });
   });
 

@@ -5,6 +5,7 @@ import type { CaseOutcome } from "./crm-outbox/types.js";
 import { parseSessionCommand, parseSessionReply, summarizeSession } from "./quote-session.js";
 import { sessionImageProducer, sessionTextProducer } from "./quote-session-turns.js";
 import { classifyText, DRAFT_TEXTS } from "./text-handler.js";
+import { joinStudyFragments } from "./text-fragments.js";
 import { deferClosing, mergeContactTurns, mergeProduced, type BatchUnit } from "./turn-batch.js";
 import { imageProducer, maskPhone, TECHNICAL_ISSUE_MESSAGE, type IncomingImage, type QuoteDeps } from "./whatsapp-quote.js";
 
@@ -369,8 +370,15 @@ async function processContactBatch(
   // Con sesiones de cotización cada texto conserva su clasificación (un texto médico o de información no debe tragarse los estudios que se escribieron al lado) y todos alimentan la MISMA
   // sesión; sin sesiones, los textos seguidos se leen como uno solo.
   const sessions = Boolean(deps.turns?.quoteSessions && deps.turns.handlers?.text);
-  const units = mergeContactTurns(contactTurns, () => sessions);
-  deps.log("turn_batch", { phone: maskPhone(turns[indices[0]!]!.from), messages: indices.length, claimed: mine.length, requests: units.length, textsMerged: contactTurns.length - units.length });
+  let units = mergeContactTurns(contactTurns, () => sessions);
+  // Nombres de estudios partidos entre mensajes contiguos («hemograma» + «completo»): se reconstruyen ANTES de interpretar, con la regla estricta de text-fragments.ts (nunca se unen intenciones distintas).
+  // Se usa el mismo catálogo con el que se interpretan los textos; si no se puede leer, no se une nada.
+  const textUnits = units.length;
+  if (sessions && units.length > 1) {
+    const quoteSessions = deps.turns!.quoteSessions!;
+    units = await joinStudyFragments(units, () => (quoteSessions.catalogForText ?? deps.loadCatalog)());
+  }
+  deps.log("turn_batch", { phone: maskPhone(turns[indices[0]!]!.from), messages: indices.length, claimed: mine.length, requests: units.length, textsMerged: contactTurns.length - textUnits, ...(textUnits !== units.length ? { fragmentsJoined: textUnits - units.length } : {}) });
 
   const runnable: Array<{ unit: BatchUnit; index: number; claimed: ClaimedTurn; produce: TurnProducer }> = [];
   const quiet: Promise<void>[] = [];
