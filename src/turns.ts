@@ -1,10 +1,11 @@
 import { repeatCandidate } from "./attention-filter.js";
 import { AuditWriteError, processingFailureCode, type KnowledgeRefRecord } from "./audit.js";
-import { beginTurn, type ClaimedTurn, type StalePolicy, type TurnKind, type TurnOutcome, type TurnProducer, type TurnRef } from "./guarded-turn.js";
+import { beginTurn, type ClaimedTurn, type Produced, type StalePolicy, type TurnKind, type TurnOutcome, type TurnProducer, type TurnRef } from "./guarded-turn.js";
 import type { CaseOutcome } from "./crm-outbox/types.js";
 import { parseSessionCommand, parseSessionReply, summarizeSession } from "./quote-session.js";
 import { sessionImageProducer, sessionTextProducer } from "./quote-session-turns.js";
 import { classifyText } from "./text-handler.js";
+import { deferClosing, mergeContactTurns, mergeProduced, type BatchUnit } from "./turn-batch.js";
 import { imageProducer, maskPhone, TECHNICAL_ISSUE_MESSAGE, type IncomingImage, type QuoteDeps } from "./whatsapp-quote.js";
 
 // Turnos conversacionales (G2.0): cualquier mensaje ENTRANTE de un contacto (imagen, texto u otro) se procesa con la misma máquina de seguridad que ya protegía a las
@@ -268,42 +269,158 @@ export const hasProcessableTurns = (turns: IncomingTurn[], deps: QuoteDeps): boo
 //   1. los claims se hacen UNO por UNO, en ese orden, así la numeración del contacto respeta el orden en que el paciente escribió;
 //   2. el trabajo de los turnos reclamados corre después en paralelo; la reserva de envío de la base impide que dos respuestas al mismo contacto se crucen y
 //      descarta las que quedaron obsoletas.
+// Lote de Kapso (buffering de 15 s, ver turn-batch.ts): si un contacto trae VARIOS mensajes en el mismo envío, todos se reclaman igual (deduplicación por mensaje), pero se atienden como UNA
+// solicitud con UNA respuesta: los textos seguidos se leen como uno, cada foto conserva su análisis y todo sale en un solo mensaje, con una sola reserva de envío (cuenta una vez para el
+// tope de respuestas, y la pausa humana se comprueba una vez). Un contacto con un solo mensaje sigue exactamente la ruta de siempre.
 // Un fallo en un turno no impide los demás. Nunca se registra el contenido de un mensaje.
 export async function processTurns(turns: IncomingTurn[], deps: QuoteDeps): Promise<TurnReport[]> {
   const reports: TurnReport[] = turns.map((turn) => ({ messageId: turn.messageId, result: "skipped" }));
-  const claimed: Array<{ index: number; turn: ClaimedTurn; produce: TurnProducer }> = [];
+  const live: number[] = [];
   for (const [index, turn] of turns.entries()) {
-    const produce = producerFor(turn, deps);
-    if (!produce) continue;
+    if (!producerFor(turn, deps)) continue;
     if (isRepeatedMessage(turn, deps)) {
       // Ni se reclama ni se responde: es el mismo mensaje que ya se está atendiendo. Solo un código en el registro.
       deps.log("attention_filter", { action: "IGNORE", reason: "REPEAT" });
       continue;
     }
+    live.push(index);
+  }
+  const perContact = new Map<string, number[]>();
+  for (const index of live) {
+    const from = turns[index]!.from;
+    perContact.set(from, [...(perContact.get(from) ?? []), index]);
+  }
+  const batched = new Set([...perContact.entries()].filter(([, indices]) => indices.length > 1).map(([from]) => from));
+
+  const claims = new Map<number, ClaimedTurn>();
+  // Exclusión del MISMO lote entregado a la vez (reintento de Kapso, doble entrega): las ejecuciones reclaman en el mismo orden, así que solo UNA gana el primer mensaje de un contacto. La que
+  // encuentra un mensaje ya EN CURSO en otra ejecución (no uno terminado) cede el resto de ese contacto: la otra lo atiende todo y responde una sola vez. Sin esto, cada una se llevaría una parte de
+  // los mensajes y el paciente recibiría dos respuestas. Un mensaje ya terminado (duplicado de una entrega anterior) NO cede el grupo: los nuevos del mismo lote se siguen atendiendo.
+  const yielded = new Map<string, number>();
+  for (const index of live) {
+    const turn = turns[index]!;
+    if (yielded.has(turn.from)) {
+      yielded.set(turn.from, yielded.get(turn.from)! + 1);
+      reports[index] = { messageId: turn.messageId, result: "ignored" };
+      continue;
+    }
     try {
       const begun = await beginTurn(refOf(turn), deps);
-      if ("ended" in begun) reports[index] = { messageId: turn.messageId, result: begun.ended };
-      else claimed.push({ index, turn: begun.claimed, produce });
+      if ("ended" in begun) {
+        reports[index] = { messageId: turn.messageId, result: begun.ended };
+        if (begun.inFlight) yielded.set(turn.from, 0);
+      } else claims.set(index, begun.claimed);
     } catch {
       deps.log("turn_failed", { stage: "claim", kind: turn.kind });
       reports[index] = { messageId: turn.messageId, result: "ignored" };
     }
   }
-  await Promise.all(
-    claimed.map(async ({ index, turn, produce }) => {
+
+  for (const [from, skipped] of yielded) if (skipped > 0) deps.log("turn_batch_yield", { phone: maskPhone(from), skipped });
+
+  const forget = (source: IncomingTurn) => {
+    if (deps.turns?.attention && source.kind === "TEXT" && source.text) deps.turns.attention.repeats.forget(source.from, source.text);
+  };
+  const work: Promise<void>[] = [];
+  for (const index of live) {
+    const turn = turns[index]!;
+    const claimed = claims.get(index);
+    if (!claimed || batched.has(turn.from)) continue;
+    work.push((async () => {
       try {
-        const result = await turn.run(produce);
-        reports[index] = { messageId: turns[index]!.messageId, result };
+        const result = await claimed.run(producerFor(turn, deps)!);
+        reports[index] = { messageId: turn.messageId, result };
         // Un mensaje que no llegó a buen término (falla técnica, respuesta retenida) se puede repetir y debe procesarse.
-        const source = turns[index]!;
-        if ((result === "ignored" || result === "technical_issue") && deps.turns?.attention && source.kind === "TEXT" && source.text) deps.turns.attention.repeats.forget(source.from, source.text);
+        if (result === "ignored" || result === "technical_issue") forget(turn);
       } catch {
-        const failed = turns[index]!;
-        if (deps.turns?.attention && failed.kind === "TEXT" && failed.text) deps.turns.attention.repeats.forget(failed.from, failed.text);
-        deps.log("turn_failed", { stage: "run", kind: turns[index]!.kind });
-        reports[index] = { messageId: turns[index]!.messageId, result: "ignored" };
+        forget(turn);
+        deps.log("turn_failed", { stage: "run", kind: turn.kind });
+        reports[index] = { messageId: turn.messageId, result: "ignored" };
       }
-    })
-  );
+    })());
+  }
+  for (const from of batched) work.push(processContactBatch(perContact.get(from)!, turns, claims, reports, deps, forget));
+  await Promise.all(work);
   return reports;
+}
+
+// Etapas de `persist` que dejan el rastro de las versiones aprobadas usadas en una respuesta (conocimiento, preparación y datos por estudio de la cotización): en un lote se escriben en la
+// corrida que envía el mensaje combinado.
+const BATCH_TRACE_STAGES: ReadonlySet<string> = new Set(["knowledge", "quote_preparation", "quote_study_details"]);
+
+// Atiende los mensajes de UN contacto que llegaron juntos (ya reclamados) como una sola solicitud con una sola respuesta.
+async function processContactBatch(
+  indices: number[],
+  turns: IncomingTurn[],
+  claims: Map<number, ClaimedTurn>,
+  reports: TurnReport[],
+  deps: QuoteDeps,
+  forget: (source: IncomingTurn) => void
+): Promise<void> {
+  // Solo participan los mensajes que ESTA ejecución reclamó: un duplicado (ya atendido) o un claim fallido no se vuelve a leer ni se une a nada. Así un texto no se pierde ni se repite
+  // aunque el último mensaje del lote no se haya podido reclamar.
+  const mine = indices.filter((index) => claims.has(index));
+  const contactTurns = mine.map((index) => turns[index]!);
+  const indexOf = new Map(contactTurns.map((turn, position) => [turn, mine[position]!] as const));
+  // Con sesiones de cotización cada texto conserva su clasificación (un texto médico o de información no debe tragarse los estudios que se escribieron al lado) y todos alimentan la MISMA
+  // sesión; sin sesiones, los textos seguidos se leen como uno solo.
+  const sessions = Boolean(deps.turns?.quoteSessions && deps.turns.handlers?.text);
+  const units = mergeContactTurns(contactTurns, () => sessions);
+  deps.log("turn_batch", { phone: maskPhone(turns[indices[0]!]!.from), messages: indices.length, claimed: mine.length, requests: units.length, textsMerged: contactTurns.length - units.length });
+
+  const runnable: Array<{ unit: BatchUnit; index: number; claimed: ClaimedTurn; produce: TurnProducer }> = [];
+  const quiet: Promise<void>[] = [];
+  for (const unit of units) {
+    const lead = unit.members[unit.members.length - 1]!;
+    for (const member of unit.members) {
+      if (member === lead) continue;
+      // Su contenido ya viaja dentro del texto unido: solo se deja constancia (deduplicación) y se cierra sin respuesta.
+      const index = indexOf.get(member)!;
+      reports[index] = { messageId: member.messageId, result: "ignored" };
+      quiet.push(claims.get(index)!.skip().catch(() => undefined));
+    }
+    const index = indexOf.get(lead)!;
+    const produce = producerFor(unit.turn, deps);
+    if (produce) runnable.push({ unit, index, claimed: claims.get(index)!, produce });
+  }
+
+  if (runnable.length > 0) {
+    const responder = runnable[runnable.length - 1]!;
+    const drafts = runnable.slice(0, -1);
+    let included: boolean[] = [];
+    // El último turno es el que responde: hace su trabajo y, además, integra lo que produjeron los anteriores (que no reservan ni envían nada por su cuenta).
+    const produce: TurnProducer = drafts.length === 0
+      ? responder.produce
+      : async (ctx) => {
+          const own = deferClosing(ctx);
+          // Primero los demás mensajes del lote (en paralelo entre sí) y DESPUÉS el que responde: con sesiones de cotización, «listo» debe encontrar la solicitud ya abierta y sin turnos anteriores en proceso.
+          // Si empezara a la vez, podría leer la sesión antes de que la primera foto la abra y contestar «todavía no tengo estudios anotados».
+          const absorbed = await Promise.all(drafts.map((draft) => draft.claimed.absorb(draft.produce, ctx, BATCH_TRACE_STAGES)));
+          // Red de seguridad: si el trabajo del último turno se rompe, lo de los demás no se pierde.
+          const last = await responder.produce(own.ctx).catch((): Produced => {
+            deps.log("turn_failed", { stage: "batch_responder", kind: responder.unit.turn.kind });
+            return { kind: "none" };
+          });
+          const settled = [...absorbed, last];
+          const merged = mergeProduced(settled);
+          included = merged.included;
+          // Nada que enviar: la corrida del último turno se cierra como habría hecho por su cuenta. Si hay algo que enviar, ese cierre se omite (la corrida termina con el envío).
+          if (merged.produced.kind === "none") await own.flush();
+          return merged.produced;
+        };
+    let outcome: TurnReport["result"];
+    try {
+      outcome = await responder.claimed.run(produce);
+    } catch {
+      deps.log("turn_failed", { stage: "run", kind: responder.unit.turn.kind });
+      outcome = "ignored";
+    }
+    for (const [position, item] of runnable.entries()) {
+      // el turno que responde es quien envía el mensaje del lote, aunque su propia respuesta estuviera vacía
+      const delivered = drafts.length === 0 || position === runnable.length - 1 || included[position] === true;
+      reports[item.index] = { messageId: item.unit.turn.messageId, result: delivered ? outcome : "ignored" };
+    }
+    if (outcome === "ignored" || outcome === "technical_issue") for (const item of runnable) for (const member of item.unit.members) forget(member);
+  }
+  await Promise.all(quiet);
 }

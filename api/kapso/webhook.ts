@@ -204,6 +204,7 @@ const realDeps: QuoteDeps = {
     recordReply: (...args) => audit().recordReply(...args),
     // Operaciones opcionales del repositorio: sin ellas aquí, el modo turnos / conocimiento / sesiones no podría registrar su rastro y fallaría cerrado (una prueba verifica que no falte ninguna).
     releaseTurn: (...args) => audit().releaseTurn?.(...args) ?? Promise.resolve(),
+    foldTurn: (...args) => audit().foldTurn!(...args),
     recordKnowledgeRefs: (...args) => audit().recordKnowledgeRefs!(...args),
     recordFactRefs: (...args) => audit().recordFactRefs!(...args),
     quoteLastStudies: (...args) => audit().quoteLastStudies!(...args),

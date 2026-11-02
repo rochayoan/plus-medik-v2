@@ -265,7 +265,8 @@ describe("cableado con la máquina de turnos", () => {
   it("cada turno de un lote se evalúa por separado: el que pasa se envía y el limitado no", async () => {
     let call = 0;
     const w = setup({ replyGuard: guardConfig, handlers: handlers("GREETING"), audit: fakeAudit(async () => (++call === 1 ? "reserved" : "limited")) });
-    const reports = await processTurns([turn("m1"), turn("m2")], w.deps);
+    // dos entregas separadas del mismo contacto (un lote de Kapso sería UNA solicitud con UNA reserva)
+    const reports = [...(await processTurns([turn("m1")], w.deps)), ...(await processTurns([turn("m2")], w.deps))];
     expect(reports.map((r) => r.result)).toEqual(["conversation", "ignored"]);
     expect(w.sends).toHaveLength(1);
   });

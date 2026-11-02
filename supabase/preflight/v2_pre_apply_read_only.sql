@@ -1,4 +1,4 @@
--- PlusMedik V2 — verificación ANTES de aplicar las 18 migraciones (solo lectura)
+-- PlusMedik V2 — verificación ANTES de aplicar las 19 migraciones (solo lectura)
 -- GENERADO por scripts/migration-manifest.ts a partir de supabase/migrations/*.sql. NO editar a mano (una prueba falla si no coincide).
 -- SOLO LECTURA: una sola sentencia SELECT. No contiene DDL, DML, RPC ni datos clínicos; devuelve metadatos y conteos.
 -- Ejecutar exclusivamente en el proyecto Supabase cvokrtrdzxfchntwwslz (verificar el identificador en la URL del panel ANTES de ejecutar),
@@ -26,6 +26,7 @@
 --   16  20261104000000_plusmedik_reply_guard_atomic_rate.sql  33b409b481cbc845ed6b07f2a3b74af86251ba936ac6b5c465127d838097568b
 --   17  20261105000000_plusmedik_conversation_memory.sql  dc498daf5ef825b9be84ae81fa643fadcc9a71346146b24efd1340ef63bb716f
 --   18  20261106000000_plusmedik_daily_reply_cap.sql  c16ed9d3088c055169e62f7a75cce78f25855d44ddba57a9a77128387b9cc606
+--   19  20261107000000_plusmedik_batch_fold.sql  c64848610b18f85e0b0a388adb0263379478af5aba86b66c2ea62ef87814e25a
 --
 -- Resultado: una tabla (orden, seccion, comprobacion, estado, detalle). Estados: OK · INFO · WARN (revisar) · BLOCK (detenerse).
 -- La primera fila es el VEREDICTO. Guardar el resultado completo: las filas INSTANTANEA deben ser IDÉNTICAS antes y después.
@@ -295,7 +296,8 @@ manifest(mig, kind, name, parent) as (
     (17, 'index', 'plusmedik_conversation_messages_expiry_idx', 'plusmedik_conversation_messages'),
     (17, 'index', 'plusmedik_conversation_messages_recent_idx', 'plusmedik_conversation_messages'),
     (17, 'table', 'plusmedik_conversation_messages', ''),
-    (18, 'function', 'plusmedik_turn_reserve_send_capped', '')
+    (18, 'function', 'plusmedik_turn_reserve_send_capped', ''),
+    (19, 'function', 'plusmedik_turn_fold', '')
 ),
 migration_files(mig, file) as (
   values
@@ -316,7 +318,8 @@ migration_files(mig, file) as (
     (15, '20261103000000_plusmedik_crm_attention_control.sql'),
     (16, '20261104000000_plusmedik_reply_guard_atomic_rate.sql'),
     (17, '20261105000000_plusmedik_conversation_memory.sql'),
-    (18, '20261106000000_plusmedik_daily_reply_cap.sql')
+    (18, '20261106000000_plusmedik_daily_reply_cap.sql'),
+    (19, '20261107000000_plusmedik_batch_fold.sql')
 ),
 service_functions(name) as (
   values
@@ -377,6 +380,7 @@ service_functions(name) as (
     ('plusmedik_study_facts_list'),
     ('plusmedik_study_facts_snapshot'),
     ('plusmedik_turn_claim'),
+    ('plusmedik_turn_fold'),
     ('plusmedik_turn_record_facts'),
     ('plusmedik_turn_record_knowledge'),
     ('plusmedik_turn_release'),

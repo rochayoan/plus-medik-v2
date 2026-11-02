@@ -82,6 +82,13 @@ export type TurnOutcome = SendableResult | "ignored";
 
 export interface ClaimedTurn {
   run(produce: TurnProducer): Promise<TurnOutcome>;
+  // Lote de Kapso (buffering de 15 s): varios mensajes del MISMO contacto se atienden como una sola solicitud con UNA sola respuesta, enviada por el turno que responde (`run`).
+  // `absorb` hace el trabajo de este turno (sesión de cotización, análisis de la foto, etc., con su propio lease) pero NO reserva ni envía nada: devuelve lo que habría respondido para que
+  // el turno que responde lo integre, y cierra esta corrida como «sin respuesta propia». Las escrituras de las etapas `redirectStages` (rastro de las versiones aprobadas
+  // usadas en la respuesta) se hacen en la corrida que SÍ envía (`into`), para que ese rastro sea el de la corrida que envió el mensaje.
+  absorb(produce: TurnProducer, into: TurnContext, redirectStages: ReadonlySet<string>): Promise<Produced>;
+  // Mensaje del lote cuyo contenido ya viaja dentro de otro turno (varios textos seguidos se leen como uno): se reclama (deduplicación) y se cierra sin respuesta ni trabajo.
+  skip(): Promise<void>;
 }
 
 const writeErrorKind = (error: unknown) => (error instanceof AuditWriteError ? { kind: error.kind } : {});
@@ -89,7 +96,8 @@ const realSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(reso
 
 // Fase 1: el claim. En un lote se llama UNO por UNO, en el orden de los mensajes, para que la numeración del contacto respete ese orden; el trabajo (fase 2) puede
 // luego correr en paralelo. Si el turno no debe procesarse (duplicado, pausa humana, sin clave de contacto, base caída con la guarda obligatoria) devuelve ended.
-export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claimed: ClaimedTurn } | { ended: "ignored" }> {
+// inFlight: el mensaje ya lo está atendiendo OTRA ejecución (lease vigente o envío en curso). Lo usa processTurns para no repartirse con ella los demás mensajes del mismo lote.
+export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claimed: ClaimedTurn } | { ended: "ignored"; inFlight?: true }> {
   // Atención humana / turnos: sin una clave estable del contacto, o sin la auditoría que concede los leases y las reservas, no hay forma de comprobar la pausa -> no se responde.
   // Control acotado: solo los contactos de la lista explícita se tratan como con control humano; los demás siguen el flujo de siempre (ni clave de contacto ni guarda obligatoria).
   const scoped = !deps.humanControl && !deps.turns && deps.scopedControl?.covers(ref.from) ? deps.scopedControl : undefined;
@@ -112,7 +120,7 @@ export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claime
       const claim = deps.turns ? await deps.audit.claim(claimRef, { contactKey: contactKey!, turnKind: ref.kind }) : contactKey ? await deps.audit.claim(claimRef, { contactKey }) : await deps.audit.claim(claimRef);
       if (claim.kind === "duplicate") {
         deps.log("duplicate_ignored", { processingStatus: claim.processingStatus, ...(claim.reason ? { reason: claim.reason } : {}) });
-        return { ended: "ignored" };
+        return { ended: "ignored", ...(claim.reason === "BUSY" || claim.reason === "IN_DOUBT" ? { inFlight: true as const } : {}) };
       }
       auditRunId = claim.runId;
       lease = claim.lease;
@@ -242,6 +250,44 @@ export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claime
         try {
           const produced = await produce(context);
           return produced.kind === "none" ? "ignored" : await deliver(produced);
+        } finally {
+          if (heartbeat) clearInterval(heartbeat);
+        }
+      },
+      async absorb(produce, into, redirectStages) {
+        // Si el trabajo dejó un fallo registrado (etapa "failure"), esa marca se conserva tal cual: es la verdad de la auditoría y no bloquea nada (no es un estado pendiente).
+        let failed = false;
+        const redirected: TurnContext = {
+          ...context,
+          persist(stage, action) {
+            if (stage === "failure") failed = true;
+            return redirectStages.has(stage) ? into.persist(stage, action) : context.persist(stage, action);
+          }
+        };
+        let produced: Produced;
+        let crashed = false;
+        try {
+          produced = await produce(redirected);
+        } catch {
+          // Los productores atrapan sus propios errores; esto es solo una red de seguridad. Nunca se registra el texto del error.
+          deps.log("turn_failed", { stage: "batch_absorb", kind: ref.kind });
+          produced = { kind: "none" };
+          crashed = true;
+        }
+        try {
+          // Todo productor que devuelve «none» ya cerró su corrida (sin respuesta, foto descartada...). Solo si devolvió una respuesta —que se enviará dentro del mensaje del lote, desde OTRA corrida— o
+          // si falló a medias, esta corrida se cierra aquí como «sin respuesta propia»: así no queda «en proceso» (las sesiones de cotización esperan a los turnos anteriores en proceso) ni se
+          // puede reclamar de nuevo y repetir la foto o el mensaje.
+          // Con evidencia del análisis registrada (ANALYZED) la base solo permite terminar la corrida sin enviar con foldTurn; sin él (repositorio sin la migración) se intenta el cierre «sin respuesta».
+          if ((produced.kind === "reply" && !failed) || crashed) await context.persist("fold", (audit, runId, held) => (audit.foldTurn ? audit.foldTurn(runId, held) : audit.recordIgnored(runId, "NO_REPLY", held)));
+        } finally {
+          if (heartbeat) clearInterval(heartbeat);
+        }
+        return produced;
+      },
+      async skip() {
+        try {
+          await context.persist("close", (audit, runId, held) => audit.recordIgnored(runId, "NO_REPLY", held));
         } finally {
           if (heartbeat) clearInterval(heartbeat);
         }
