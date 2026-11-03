@@ -142,15 +142,16 @@ describe("G6.0: el contexto que recibe el modelo", () => {
     const turns = code(join(root, "src/turns.ts"));
     expect(turns).toMatch(/audit\.quoteRead\?\.\(runId, lease\)/);
     expect(turns).toMatch(/audit\.quoteLastStudies\?\.\(runId, lease,/);
-    expect(turns).toMatch(/deps\.turns\?\.attention && deps\.turns\.quoteSessions/);
+    // el estado de la conversación existe con las sesiones de cotización (lo pide la atención selectiva o el silencio ante lo ajeno, cada uno por su bandera)
+    expect(turns).toMatch(/\.\.\.\(deps\.turns\?\.quoteSessions\s*\? \{[^}]*async memory\(options\?: \{ wait\?: boolean \}\)/);
     expect(readdirSync(join(root, "supabase/migrations")).filter((name) => name.endsWith(".sql"))).toHaveLength(20);
     expect(code(join(root, "src/attention-filter.ts"))).not.toMatch(/plusmedik_|rpc\(/);
   });
 
-  it("el modelo solo recibe el estado si la atención selectiva está encendida, y el estado se calcula al pedirlo (no en cada mensaje)", () => {
+  it("el modelo solo recibe el estado si la atención selectiva (o el silencio ante lo ajeno, que es opt-in) está encendida, y el estado se calcula al pedirlo (no en cada mensaje)", () => {
     const handler = code(join(root, "src/text-handler.ts"));
-    expect(handler).toMatch(/const context = options\.attention \? await turnContext\?\.memory\?\.\(\)\.catch\(\(\) => undefined\) : undefined;/);
-    expect(code(join(root, "src/turns.ts"))).toMatch(/async memory\(\): Promise<ConversationMemory \| undefined> \{/);
+    expect(handler).toMatch(/const context = options\.attention \|\| silences \? await turnContext\?\.memory\?\.\(\{ wait: silences \}\)\.catch\(\(\) => undefined\) : undefined;/);
+    expect(code(join(root, "src/turns.ts"))).toMatch(/async memory\(options\?: \{ wait\?: boolean \}\): Promise<ConversationMemory \| undefined> \{/);
   });
 });
 

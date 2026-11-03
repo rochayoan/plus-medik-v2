@@ -161,8 +161,10 @@ export function createTextHandler(options: TextHandlerOptions): (turn: IncomingT
     if (!conversation) return undefined;
     try {
       // G6.0: el único contexto que recibe el modelo es el ESTADO de la conversación (cuántos estudios lleva la solicitud abierta, si hay una duda, si hubo una cotización reciente), calculado por el sistema.
-      // Nunca el texto de mensajes anteriores. Si no se puede calcular, el modelo recibe solo el mensaje.
-      const context = options.attention ? await turnContext?.memory?.().catch(() => undefined) : undefined;
+      // Nunca el texto de mensajes anteriores. Si no se puede calcular, el modelo recibe solo el mensaje. Con el silencio ante lo ajeno el estado también se necesita (y se espera a que terminen los
+      // mensajes anteriores del lote): sin él no se puede saber que no hay nada pendiente, y entonces se responde.
+      const silences = conversation.silencesOffTopic === true && category === "OTHER";
+      const context = options.attention || silences ? await turnContext?.memory?.({ wait: silences }).catch(() => undefined) : undefined;
       const history = options.history ? await options.history(turn).catch(() => undefined) : undefined;
       return await conversation.reply({ text: turn.text ?? "", category, ...(context ? { context } : {}), ...(history && history.length > 0 ? { history } : {}) });
     } catch {
@@ -176,7 +178,7 @@ export function createTextHandler(options: TextHandlerOptions): (turn: IncomingT
     outcome.intent === "BUSINESS_INFO" ? sign({ body: outcome.body, stale: "NONE" }, category, ["BUSINESS"]) : sign({ body: outcome.body, stale: "NEWER_TURN" }, category);
 
   // El camino de G2.1 (sin conocimiento): derivación bloqueada o textos fijos. Es también lo que se responde cuando no hay conocimiento disponible.
-  async function baseReply(turn: IncomingTurn, category: TextCategory, extra: Record<string, unknown> = {}, context?: TurnHandlerContext, allowModel = true): Promise<TurnReply> {
+  async function baseReply(turn: IncomingTurn, category: TextCategory, extra: Record<string, unknown> = {}, context?: TurnHandlerContext, allowModel = true): Promise<TurnReply | undefined> {
     const reason = HANDOFF_REASON[category];
     const log = (state: "none" | "blocked" | "recorded" | "failed") => options.log("text_turn", { category, handoff: state, ...extra });
 
@@ -204,6 +206,11 @@ export function createTextHandler(options: TextHandlerOptions): (turn: IncomingT
     if (allowModel && options.conversation && (category === "GREETING" || category === "OTHER" || category === "RECIPE_OR_QUOTE") && isPlainTalk(turn.text ?? "")) {
       const outcome = await askModel(turn, category, context);
       if (outcome?.status === "REROUTE") return route(turn, outcome.category, context, false);
+      // Mensaje claramente ajeno al laboratorio y sin nada pendiente (el modelo propone y el sistema lo confirmó): sin respuesta. El turno queda cerrado y auditado como sin respuesta. Solo códigos.
+      if (outcome?.status === "SILENT") {
+        options.log("text_turn", { category, handoff: "none", model: "silent", ...extra });
+        return undefined;
+      }
       if (outcome?.status === "REPLY") {
         log("none");
         return fromModel(outcome, category);
@@ -217,7 +224,7 @@ export function createTextHandler(options: TextHandlerOptions): (turn: IncomingT
 
   // Camino de un mensaje ya clasificado: conocimiento aprobado (si lo hay) y, si no, la respuesta base. `allowModel` es falso al retomar un camino por indicación del modelo (así el modelo
   // se consulta una sola vez por mensaje).
-  async function route(turn: IncomingTurn, category: TextCategory, context: TurnHandlerContext | undefined, allowModel: boolean): Promise<TurnReply> {
+  async function route(turn: IncomingTurn, category: TextCategory, context: TurnHandlerContext | undefined, allowModel: boolean): Promise<TurnReply | undefined> {
     const text = turn.text ?? "";
     // G5.6: preguntas COMERCIALES (sucursales, direcciones, horarios, teléfonos, servicios, métodos de pago, políticas) con los datos confirmados del archivo principal, solo si esa bandera está
     // encendida. Precios, estudios, preparación, muestra y tiempos de entrega NUNCA pasan por aquí: siguen por el catálogo / conocimiento aprobado / derivación al CRM. Si el modelo no puede
