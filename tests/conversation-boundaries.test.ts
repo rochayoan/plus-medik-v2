@@ -69,7 +69,7 @@ describe("G5.3: privacidad y registro", () => {
     expect(model).not.toMatch(/turn\.from|contactPhone|\.phone/);
     // G6.0: además del mensaje, solo el ESTADO de la conversación (cantidades), y únicamente con la atención selectiva
     expect(code(join(root, "src/text-handler.ts"))).toMatch(/conversation\.reply\(\{ text: turn\.text \?\? "", category, \.\.\.\(context \? \{ context \} : \{\}\), \.\.\.\(history && history\.length > 0 \? \{ history \} : \{\}\) \}\)/);
-    expect(code(join(root, "src/text-handler.ts"))).toMatch(/const context = options\.attention \? await turnContext\?\.memory\?\.\(\)\.catch\(\(\) => undefined\) : undefined;/);
+    expect(code(join(root, "src/text-handler.ts"))).toMatch(/const context = options\.attention \|\| silences \? await turnContext\?\.memory\?\.\(\{ wait: silences \}\)\.catch\(\(\) => undefined\) : undefined;/);
   });
 });
 

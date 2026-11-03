@@ -267,7 +267,8 @@ describe("resolveConversationModel: apagada por defecto y sin configuración inc
     const { client, calls } = fakeClient(answer("GREETING", "¡Hola!"));
     const { model } = resolve({ ...complete, OPENAI_API_KEY: undefined }, true, client);
     expect(await model!.reply({ text: "hola", category: "GREETING" })).toMatchObject({ status: "REPLY" });
-    expect(calls[0]!.instructions).toBe(CONVERSATION_PROMPT.split("{{DATOS}}").join(NO_DATA_BLOCK));
+    // con el silencio apagado (por defecto) el prompt es el de siempre: la descripción de OFF_TOPIC solo se incluye si el silencio está encendido
+    expect(calls[0]!.instructions).toBe(CONVERSATION_PROMPT.replace(/^- OFF_TOPIC:.*\r?\n/m, "").split("{{DATOS}}").join(NO_DATA_BLOCK));
   });
 });
 
@@ -278,8 +279,8 @@ describe("prompt de conversación: SYSTEM_PROMPT de src/system-prompt.ts", () =>
     expect(CONVERSATION_PROMPT).toBe(SYSTEM_PROMPT);
   });
 
-  it("nombra las diez intenciones del esquema y las reglas de oro, trae UN marcador de datos y ningún dato del laboratorio", () => {
-    expect(MODEL_INTENTS).toHaveLength(10);
+  it("nombra las once intenciones del esquema y las reglas de oro, trae UN marcador de datos y ningún dato del laboratorio", () => {
+    expect(MODEL_INTENTS).toHaveLength(11);
     for (const intent of MODEL_INTENTS) expect(CONVERSATION_PROMPT, intent).toContain(intent);
     expect(CONVERSATION_PROMPT.split("{{DATOS}}")).toHaveLength(2);
     expect(CONVERSATION_PROMPT).toMatch(/Orientación médica: NUNCA/);

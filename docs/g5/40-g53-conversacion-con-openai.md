@@ -55,6 +55,7 @@ mensaje de texto ─► ¿automático o eco de un texto nuestro? ──sí──
 | `OPENAI_CONVERSATION_MODEL` | sí | **Sin valor por defecto**: elegirlo es una decisión del dueño (costo, calidad, retención) |
 | `OPENAI_CONVERSATION_REASONING` | no | `low`·`medium`·`high`·`xhigh`·`max`, solo si el modelo lo admite |
 | `PLUSMEDIK_LLM_CATEGORIES` | no | `GREETING,OTHER` (defecto); `RECIPE_OR_QUOTE` solo si se quiere frasear con el modelo el pedido de la foto |
+| `PLUSMEDIK_LLM_SILENCE_OFF_TOPIC` | no | Solo `on` la enciende (apagada por defecto). Un mensaje **claramente ajeno** al laboratorio no recibe respuesta. Quien interpreta si el mensaje tiene relación con el laboratorio es el modelo (`OFF_TOPIC`, con el mensaje y el estado de la conversación; ambiguo ⇒ no se silencia); el sistema solo conserva tres protecciones deterministas: categoría `OTHER` (lo médico y lo humano nunca llegan al modelo), ninguna solicitud abierta / duda / cotización reciente con el contacto (esperando a los mensajes anteriores del lote; si no se puede saber, se responde) y que el texto no parezca de salud. No hay listas de temas del laboratorio. Sin la categoría `OTHER` se ignora y se registra `SILENCE_NEEDS_OTHER`. Vale igual para audios transcritos y lotes |
 | `PLUSMEDIK_LLM_TIMEOUT_MS` | no | 1000–30000 (8000) |
 | `PLUSMEDIK_LLM_MAX_OUTPUT_TOKENS` | no | 50–2000 (300) |
 | `PLUSMEDIK_LLM_MAX_INPUT_CHARS` | no | 50–2000 (500) |

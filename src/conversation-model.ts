@@ -13,6 +13,10 @@ import { fold } from "./text-normalize.js";
 //   · Derivar a una persona o dar orientación médica: si el modelo clasifica el mensaje como INFO_REQUEST, MEDICAL o HUMAN_REQUEST, su texto se IGNORA y el mensaje sigue por el camino determinista
 //     de siempre (conocimiento aprobado / derivación al CRM / aviso médico). Los mensajes que ya clasifican así por reglas como médico o petición de una persona NUNCA llegan al modelo.
 //   · Cualquier falla (apagado, tiempo agotado, error, salida inválida, filtro, circuito abierto) devuelve FALLBACK: el manejador responde con el texto fijo que habría enviado sin modelo.
+//   · Silencio ante lo ajeno (PLUSMEDIK_LLM_SILENCE_OFF_TOPIC, aparte y apagado por defecto): si el modelo clasifica un mensaje como OFF_TOPIC (claramente ajeno al laboratorio) el resultado es SILENT y el manejador
+//     no responde nada. El modelo solo PROPONE: el silencio exige además, de forma determinista, que (1) el mensaje no tenga ningún camino propio (categoría OTHER), (2) el sistema sepa CON CERTEZA que no hay una
+//     solicitud abierta, una duda ni una cotización reciente con ese contacto (sin ese dato, o con cualquier pendiente, se responde como siempre) y (3) el texto no parezca de salud (el detector médico de siempre). Si el mensaje tiene que ver con el laboratorio o no, lo interpreta el modelo con el mensaje y el estado de la conversación; el sistema no mantiene listas de temas del laboratorio. Ante cualquier duda,
+//     o si el modelo falla, se responde.
 // No se guarda ni se registra el texto del paciente ni el de la respuesta: solo códigos cerrados y contadores.
 
 export type ConversationCategory = "GREETING" | "OTHER" | "RECIPE_OR_QUOTE";
@@ -20,7 +24,7 @@ export const CONVERSATION_CATEGORIES: readonly ConversationCategory[] = ["GREETI
 // INFO_REQUEST solo llega al modelo con la bandera de datos comerciales (y el manejador solo lo consulta para preguntas que no son de precios ni clínicas).
 export type ModelCategory = ConversationCategory | "INFO_REQUEST";
 
-export const MODEL_INTENTS = ["GREETING", "THANKS", "SMALL_TALK", "HOW_IT_WORKS", "QUOTE_REQUEST", "UNCLEAR", "BUSINESS_INFO", "INFO_REQUEST", "MEDICAL", "HUMAN_REQUEST"] as const;
+export const MODEL_INTENTS = ["GREETING", "THANKS", "SMALL_TALK", "HOW_IT_WORKS", "QUOTE_REQUEST", "UNCLEAR", "BUSINESS_INFO", "INFO_REQUEST", "MEDICAL", "HUMAN_REQUEST", "OFF_TOPIC"] as const;
 export type ModelIntent = (typeof MODEL_INTENTS)[number];
 export type RerouteCategory = "INFO_REQUEST" | "MEDICAL" | "HUMAN_REQUEST";
 const REROUTE: Partial<Record<ModelIntent, RerouteCategory>> = { INFO_REQUEST: "INFO_REQUEST", MEDICAL: "MEDICAL", HUMAN_REQUEST: "HUMAN_REQUEST" };
@@ -163,6 +167,8 @@ export type FallbackReason = "DISABLED_CATEGORY" | "CIRCUIT_OPEN" | "EMPTY_INPUT
 export type ConversationOutcome =
   | { status: "REPLY"; body: string; intent: ModelIntent }
   | { status: "REROUTE"; category: RerouteCategory }
+  // Mensaje claramente ajeno al laboratorio y sin nada pendiente con el contacto: no se responde nada (solo con la bandera de silencio).
+  | { status: "SILENT" }
   | { status: "FALLBACK"; reason: FallbackReason };
 
 // Estado reciente de la conversación (G6.0), calculado por el SISTEMA a partir de la sesión de cotización del contacto: solo cantidades y banderas. Nunca nombres de estudios, precios ni el texto de
@@ -176,6 +182,11 @@ export interface ConversationContext {
   recentQuoteStudies: number;
 }
 
+// ¿El sistema sabe CON CERTEZA que no hay nada pendiente con este contacto (ni solicitud abierta, ni duda, ni cotización reciente)? Sin contexto —no se pudo calcular, o hay mensajes anteriores aún en
+// proceso— NO se sabe, y ante la duda se responde.
+export const nothingPending = (context: ConversationContext | undefined): boolean =>
+  context !== undefined && !context.openRequest && !context.openDoubt && count(context.openStudies) === 0 && count(context.recentQuoteStudies) === 0;
+
 // Un mensaje anterior de la conversación (historial reciente, solo para contactos autorizados explícitamente). Ya viene saneado y filtrado por src/conversation-history.ts; aquí solo se presenta.
 export interface HistoryEntry {
   from: "PATIENT" | "ASSISTANT" | "STAFF";
@@ -186,6 +197,8 @@ export interface ConversationModel {
   readonly categories: ReadonlySet<ModelCategory>;
   // true: el modelo recibe los datos comerciales confirmados y vigentes y puede informarlos (PLUSMEDIK_LLM_BUSINESS_INFO).
   readonly businessInfo: boolean;
+  // true: un mensaje claramente ajeno al laboratorio, sin nada pendiente con el contacto, no se responde (PLUSMEDIK_LLM_SILENCE_OFF_TOPIC). El manejador pide entonces el estado de la conversación.
+  readonly silencesOffTopic?: boolean;
   reply(input: { text: string; category: ModelCategory; context?: ConversationContext; history?: readonly HistoryEntry[] }): Promise<ConversationOutcome>;
 }
 
@@ -225,6 +238,8 @@ export interface ConversationModelOptions {
   // Datos comerciales del archivo principal. Solo se envían con businessInfo; las secciones sin confirmar o vencidas nunca.
   sections?: readonly DataSection[];
   businessInfo?: boolean;
+  // Silencio ante mensajes claramente ajenos al laboratorio (apagado por defecto; exige la categoría OTHER). Ver la cabecera de este archivo.
+  silenceOffTopic?: boolean;
   categories?: readonly ConversationCategory[];
   maxInputChars?: number;
   maxOutputTokens?: number;
@@ -257,6 +272,7 @@ function instructionsFor(template: string, block: string): string {
 export function createConversationModel(options: ConversationModelOptions): ConversationModel {
   const businessInfo = options.businessInfo === true;
   const categories = new Set<ModelCategory>(options.categories ?? DEFAULT_CATEGORIES);
+  const silenceOffTopic = options.silenceOffTopic === true && categories.has("OTHER");
   if (businessInfo) categories.add("INFO_REQUEST");
   const sections = options.sections ?? [];
   const maxInputChars = options.maxInputChars ?? LIMITS.maxInputChars;
@@ -274,6 +290,7 @@ export function createConversationModel(options: ConversationModelOptions): Conv
   return {
     categories,
     businessInfo,
+    silencesOffTopic: silenceOffTopic,
     async reply({ text, category, context, history }) {
       if (!categories.has(category)) return { status: "FALLBACK", reason: "DISABLED_CATEGORY" };
       // Los datos se evalúan AL USARLOS (vigencia): lo vencido o sin confirmar no se envía.
@@ -327,6 +344,11 @@ export function createConversationModel(options: ConversationModelOptions): Conv
       if (reroute) {
         record({ outcome: "REROUTE", intent: parsed.intent, category, ms: now() - started, ...factsMeta, ...usage });
         return { status: "REROUTE", category: reroute };
+      }
+      // Claramente ajeno al laboratorio: el modelo propone callar y el sistema lo confirma solo si no hay nada pendiente ni parece de salud (ver la cabecera). Si no se cumple, el mensaje sigue como cualquier conversación.
+      if (parsed.intent === "OFF_TOPIC" && silenceOffTopic && category === "OTHER" && nothingPending(context) && !looksMedical(text)) {
+        record({ outcome: "SILENT", intent: parsed.intent, category, ms: now() - started, ...factsMeta, ...usage });
+        return { status: "SILENT" };
       }
       const guarded = guardModelReply(parsed.reply, facts);
       if (!guarded.ok) {

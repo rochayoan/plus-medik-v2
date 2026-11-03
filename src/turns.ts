@@ -62,7 +62,8 @@ export interface ConversationMemory {
 
 export interface TurnHandlerContext {
   // G6.0 (solo con la atención selectiva y las sesiones de cotización): el estado reciente de la conversación de este contacto. Se calcula SOLO si se pide (p. ej. antes de consultar al modelo) y es undefined si no se pudo.
-  memory?(): Promise<ConversationMemory | undefined>;
+  // wait: antes de leer, espera (acotado) a que terminen los mensajes anteriores del mismo contacto que aún se procesan (p. ej. los otros textos del lote); si siguen en proceso, devuelve undefined (no se sabe).
+  memory?(options?: { wait?: boolean }): Promise<ConversationMemory | undefined>;
   // G5.0 (solo con la derivación al CRM configurada): guarda en la cola el caso de ESTE mensaje y hace el primer intento. El estado es REGISTERED solo si el CRM ya lo registró.
   registerCase?(reason: "HUMAN_REQUEST" | "MEDICAL_QUERY" | "NO_APPROVED_ANSWER"): Promise<CaseOutcome["state"]>;
   // ids de lab_tests de la ÚLTIMA cotización entregada a este contacto (vacío si no hay una reciente o no se pudo consultar; nunca precios).
@@ -180,22 +181,36 @@ export function conversationProducer(turn: IncomingTurn, handler: (turn: Incomin
               }
             }
           : {}),
-        ...(deps.turns?.attention && deps.turns.quoteSessions
+        ...(deps.turns?.quoteSessions
           ? {
-              async memory(): Promise<ConversationMemory | undefined> {
-                let memory: ConversationMemory | undefined;
-                const ok = await ctx.persist("conversation_memory", async (audit, runId, lease) => {
-                  const read = await audit.quoteRead?.(runId, lease);
-                  const summary = read?.state === "ready" ? summarizeSession(read.items) : undefined;
-                  const recent = (await audit.quoteLastStudies?.(runId, lease, deps.turns?.studyInfoContextSeconds ?? DEFAULT_CONTEXT_SECONDS)) ?? [];
-                  memory = {
-                    openRequest: Boolean(summary) && read?.state === "ready" && read.items.length > 0,
-                    openStudies: summary?.studyIds.length ?? 0,
-                    openDoubt: Boolean(summary) && (summary!.pendingGroups.length > 0 || summary!.unresolved > 0 || summary!.uncertain),
-                    recentQuoteStudies: recent.length
-                  };
-                });
-                return ok ? memory : undefined;
+              // Sin `wait` (la atención selectiva, G6.0): una sola lectura, como siempre. Con `wait` (el silencio ante lo ajeno): si hay mensajes anteriores del contacto aún en proceso —p. ej. los otros textos del
+              // mismo lote— se espera, acotado, a que terminen, y si siguen en proceso NO se sabe qué hay pendiente (undefined): la lectura no los incluye todavía y creer que no hay nada sería callar a ciegas.
+              async memory(options?: { wait?: boolean }): Promise<ConversationMemory | undefined> {
+                const sessions = deps.turns!.quoteSessions!;
+                const retries = options?.wait ? sessions.waitRetries : 0;
+                for (let attempt = 0; attempt <= retries; attempt++) {
+                  let memory: ConversationMemory | undefined;
+                  let unsettled = false;
+                  const ok = await ctx.persist("conversation_memory", async (audit, runId, lease) => {
+                    const read = await audit.quoteRead?.(runId, lease);
+                    if (options?.wait && (read?.state === "pending" || read?.state === "replay")) {
+                      unsettled = true;
+                      return;
+                    }
+                    const summary = read?.state === "ready" ? summarizeSession(read.items) : undefined;
+                    const recent = (await audit.quoteLastStudies?.(runId, lease, deps.turns?.studyInfoContextSeconds ?? DEFAULT_CONTEXT_SECONDS)) ?? [];
+                    memory = {
+                      openRequest: Boolean(summary) && read?.state === "ready" && read.items.length > 0,
+                      openStudies: summary?.studyIds.length ?? 0,
+                      openDoubt: Boolean(summary) && (summary!.pendingGroups.length > 0 || summary!.unresolved > 0 || summary!.uncertain),
+                      recentQuoteStudies: recent.length
+                    };
+                  });
+                  if (!ok) return undefined;
+                  if (!unsettled) return memory;
+                  if (attempt < retries) await (sessions.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))))(sessions.waitDelayMs);
+                }
+                return undefined;
               }
             }
           : {}),
