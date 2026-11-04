@@ -62,8 +62,8 @@ export async function handleKapsoWebhook(request: Request, deps: KapsoWebhookDep
   for (const event of classified) counts[event.kind] = (counts[event.kind] ?? 0) + 1;
   deps.log("webhook_events", { counts });
 
-  // Historial de auditoría: entrantes, mensajes humanos y estados de entrega, en segundo plano y antes de cualquier otra decisión (es idempotente, así que un reintento de Kapso no duplica nada).
-  if (deps.history) deps.schedule(deps.history.observe({ raws, classified, inScope: (phone) => isAllowedPhone(phone, deps.allowedPhones) }));
+  // Historial de auditoría: entrantes, mensajes humanos y estados de entrega de TODOS los contactos (el filtro de ALLOWED_PHONES y del piloto decide a quién ATIENDE el agente, no a quién se guarda), en segundo plano y antes de cualquier otra decisión; es idempotente, así que un reintento de Kapso no duplica nada.
+  if (deps.history) deps.schedule(deps.history.observe({ raws, classified, inScope: () => true }));
 
   // Control de atención humana: se registra ANTES de responder (ver política de ACK).
   const control = deps.humanControl;

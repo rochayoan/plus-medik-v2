@@ -338,14 +338,20 @@ describe.skipIf(!bin)("historial de mensajes de extremo a extremo contra Postgre
       expect((await rowsOf(b.key)).filter((r) => r.direction === "OUT")).toMatchObject([{ state: "ACCEPTED", id: `reply:${second}` }]);
     });
 
-    it("alcance: un contacto fuera de ALLOWED_PHONES no se guarda ni se atiende", async () => {
+    it("TODOS los contactos: el historial guarda lo de cualquier número, también de los que el agente NO atiende (fuera de ALLOWED_PHONES): su mensaje queda, sin respuesta", async () => {
       const inside = patient();
       const outside = patient();
       const w = setup({ allowedPhones: inside.phone });
       await say(w, outside.phone, "quiero cotizar mis estudios");
       await say(w, inside.phone, "quiero cotizar mis estudios");
-      expect(await rowsOf(outside.key)).toEqual([]);
+      // el agente solo atiende al de la lista…
+      expect(w.sends.map((send) => send.to)).toEqual([inside.phone]);
+      // …pero el historial guarda a los dos
+      expect((await rowsOf(outside.key)).map((r) => r.direction)).toEqual(["IN"]);
       expect((await rowsOf(inside.key)).map((r) => r.direction)).toEqual(["IN", "OUT"]);
+      // y los mensajes humanos y los estados de entrega de cualquier contacto también
+      await send(w, humanEvent(id("human"), outside.phone, "Le escribe recepción"), SENT);
+      expect((await rowsOf(outside.key)).map((r) => r.actor)).toEqual(["PATIENT", "HUMAN"]);
     });
 
     it("lo reimportado del historial de WhatsApp (history_sync) y los mensajes de otra línea no se guardan", async () => {

@@ -20,7 +20,8 @@ Guarda en el Supabase del laboratorio **todos los mensajes**, los que entran y l
 - **Texto en claro y sin vencimiento por defecto.** Se lee directamente desde Supabase (columna `body`), con la clave de servicio, desde cualquier proyecto. Es la misma forma en que funcionaba `agent_messages`.
 - **Aceptado no es entregado.** `ACCEPTED` significa que Kapso aceptó la solicitud de envío; `DELIVERED`/`READ` solo llegan si Kapso envía esos eventos. El estado **solo avanza**.
 - **No se guarda** lo que nunca se envió (respuestas canceladas por `HUMAN_PAUSED`, `DAILY_CAP`, obsolescencia o pérdida del lease); el mensaje del paciente sí queda y la corrida de auditoría explica por qué no hubo respuesta.
-- **No se guarda** lo reimportado del historial de WhatsApp (`history_sync`), los mensajes de otra línea ni los de contactos fuera de `ALLOWED_PHONES`.
+- **Se guarda para TODOS los contactos**, sin lista de números: `ALLOWED_PHONES` y el piloto deciden a quién **atiende** el agente, no a quién se guarda (un contacto que el agente no atiende queda con su mensaje y sin respuesta).
+- **No se guarda** lo reimportado del historial de WhatsApp (`history_sync`) ni los mensajes de otra línea de WhatsApp.
 - **Actores:** `PATIENT`, `AGENT`, `HUMAN`, `OTHER_APP`, `META_AGENT`, `UNKNOWN`. La recepción humana nunca se confunde con el agente.
 - **Límite conocido:** un mensaje enviado por Kapso con origen `cloud_api` que no es de este agente (otra automatización) no se registra: no se puede distinguir del agente.
 
