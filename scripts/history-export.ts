@@ -73,7 +73,8 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (keys.length === 0 || keys.some((key) => key.length < MIN_HISTORY_KEY_LENGTH)) fail("Falta PLUSMEDIK_HISTORY_KEY (>= 32 caracteres).");
+  // La clave solo hace falta para leer filas guardadas CIFRADAS; el texto en claro (lo normal) se exporta sin ella.
+  if (keys.some((key) => key.length < MIN_HISTORY_KEY_LENGTH)) fail("PLUSMEDIK_HISTORY_KEY debe tener >= 32 caracteres.");
   const out = text(flags.get("out"));
   if (!out) fail("Indica el archivo de salida con --out (el contenido no se imprime en la terminal).");
   const format = text(flags.get("format")) ?? "jsonl";

@@ -90,6 +90,8 @@ describe.skipIf(!bin)("historial de mensajes de extremo a extremo contra Postgre
 
   interface Options {
     history?: boolean;
+    // true: sin PLUSMEDIK_HISTORY_KEY, el texto se guarda EN CLARO (lo normal en producción)
+    plaintext?: boolean;
     sessions?: boolean;
     attention?: boolean;
     audio?: boolean;
@@ -107,7 +109,7 @@ describe.skipIf(!bin)("historial de mensajes de extremo a extremo contra Postgre
     const scheduled: Promise<unknown>[] = [];
     const log = (event: string, data: Record<string, unknown>) => { logs.push([event, data]); };
     const store = createSupabaseHistoryStore({ rpc: createSupabaseRpc(rpcOptions()), ...(options.retentionDays ? { retentionDays: options.retentionDays } : {}) });
-    const history = options.history === false ? undefined : createMessageHistory({ store, secret: HISTORY_KEY, accountId: LAB, contactKeyFor, log });
+    const history = options.history === false ? undefined : createMessageHistory({ store, ...(options.plaintext ? {} : { secret: HISTORY_KEY }), accountId: LAB, contactKeyFor, log });
     const attention: AttentionConfig | undefined = options.attention === false ? undefined : { repeats: createRepeatTracker({ windowMs: 90_000 }), gate: createReplyGate(), settleMs: 0 };
     const fetcher: MediaFetcher = {
       rawFetch: async (url) => new Response(oggBytes(/\/([^/]+)\.ogg/.exec(url)?.[1] ?? "?"), { status: 200 }),
@@ -180,7 +182,7 @@ describe.skipIf(!bin)("historial de mensajes de extremo a extremo contra Postgre
       expect(JSON.stringify(w.logs.filter(([event]) => event.startsWith("message_history")))).not.toMatch(/wamid|5917/);
       expect(lines(await readAll(w, p.key))).toEqual([`IN/PATIENT: me duele el pecho ${SENTINEL}`, `OUT/AGENT: ${DRAFT_TEXTS.medical_unavailable}`]);
       const columns = (await db.ok(`select column_name from information_schema.columns where table_schema = 'public' and table_name = 'plusmedik_message_history' order by ordinal_position`)).split(/\r?\n/);
-      expect(columns).toEqual(["id", "seq", "provider", "account_id", "contact_key", "provider_message_id", "direction", "actor", "origin", "content_kind", "message_type", "body_cipher", "key_id", "media_ref", "delivery_state", "audit_run_id", "reply_to_message_id", "occurred_at", "delivery_at", "created_at", "expires_at"]);
+      expect(columns).toEqual(["id", "seq", "provider", "account_id", "contact_key", "provider_message_id", "direction", "actor", "origin", "content_kind", "message_type", "body_cipher", "key_id", "media_ref", "delivery_state", "audit_run_id", "reply_to_message_id", "occurred_at", "delivery_at", "created_at", "expires_at", "body"]);
     });
 
     it("por defecto TODO se conserva para siempre: ni los mensajes del paciente ni las respuestas del agente tienen fecha de vencimiento", async () => {
@@ -366,7 +368,7 @@ describe.skipIf(!bin)("historial de mensajes de extremo a extremo contra Postgre
     it("si Supabase falla al escribir el historial: el agente responde IGUAL, queda un código en el registro, y la conciliación (gaps) lista exactamente lo que faltó", async () => {
       const p = patient();
       const w = setup();
-      w.network.downFor.add("plusmedik_history_record");
+      w.network.downFor.add("plusmedik_history_save");
       const message = await say(w, p.phone, `me duele el pecho ${SENTINEL}`);
       expect(w.sends).toEqual([{ to: p.phone, body: DRAFT_TEXTS.medical_unavailable }]);
       expect(await runOf(message)).toMatchObject({ processing_status: "COMPLETED", send_state: "ACCEPTED" });
@@ -485,6 +487,53 @@ describe.skipIf(!bin)("historial de mensajes de extremo a extremo contra Postgre
     });
   });
 
+  // ───────────────────────────── texto en claro (lo normal) ─────────────────────────────
+
+  describe("texto en claro (sin ninguna clave)", () => {
+    const bodies = async (key: string): Promise<string[]> => JSON.parse(await db.ok(`select coalesce(json_agg(x.direction || ':' || coalesce(x.body, '(sin texto)') order by x.seq), '[]') from public.plusmedik_message_history x where x.contact_key = '${key}'`));
+
+    it("lo que entra y lo que sale queda en claro en Supabase, legible directamente (sin claves) y sin pasar por el script", async () => {
+      const p = patient();
+      const w = setup({ plaintext: true });
+      await say(w, p.phone, `me duele el pecho ${SENTINEL}`);
+      expect(await bodies(p.key)).toEqual([`IN:me duele el pecho ${SENTINEL}`, `OUT:${DRAFT_TEXTS.medical_unavailable}`]);
+      expect(await db.ok(`select count(*) from public.plusmedik_message_history where contact_key = '${p.key}' and body_cipher is null and key_id is null`)).toBe("2");
+      expect(await db.ok(`select count(*) from public.plusmedik_message_history where contact_key = '${p.key}' and expires_at is null`)).toBe("2");
+      const run = await runOf((await rowsOf(p.key))[0]!.id);
+      expect((await rowsOf(p.key))[1]).toMatchObject({ actor: "AGENT", state: "ACCEPTED", run: run.id });
+    });
+
+    it("el export lee el texto sin ninguna clave; el teléfono sigue sin guardarse y el registro de Vercel no lleva texto", async () => {
+      const p = patient();
+      const w = setup({ plaintext: true });
+      await say(w, p.phone, `me duele el pecho ${SENTINEL}`);
+      expect(lines(await readAll(w, p.key, []))).toEqual([`IN/PATIENT: me duele el pecho ${SENTINEL}`, `OUT/AGENT: ${DRAFT_TEXTS.medical_unavailable}`]);
+      expect(await db.ok(`select string_agg(to_json(h)::text, ' ') from public.plusmedik_message_history h where contact_key = '${p.key}'`)).not.toContain(p.phone);
+      expect(JSON.stringify(w.logs)).not.toContain(SENTINEL);
+    });
+
+    it("la transcripción de un audio queda en claro, y los humanos, imágenes y estados funcionan igual", async () => {
+      const p = patient();
+      const w = setup({ plaintext: true, audio: true, transcript: `quiero un hemograma ${SENTINEL}` });
+      await send(w, batchOf(audioEvent(id("aud"), p.phone, "P")), BATCH);
+      await send(w, humanEvent(id("human"), p.phone, "Le atendemos en recepción"), SENT);
+      const texts = await bodies(p.key);
+      expect(texts[0]).toBe(`IN:quiero un hemograma ${SENTINEL}`);
+      expect(texts).toContain("OUT:Le atendemos en recepción");
+      expect((await rowsOf(p.key))[0]).toMatchObject({ kind: "AUDIO", media: "media-P" });
+    });
+
+    it("sin la tabla actualizada (migración 22 sin aplicar) el agente responde igual: la escritura falla con un código y nada más", async () => {
+      const p = patient();
+      const w = setup({ plaintext: true });
+      w.network.downFor.add("plusmedik_history_save");
+      await say(w, p.phone, `me duele el pecho ${SENTINEL}`);
+      expect(w.sends).toEqual([{ to: p.phone, body: DRAFT_TEXTS.medical_unavailable }]);
+      expect(w.logs.filter(([event]) => event === "message_history_write_failed").length).toBeGreaterThanOrEqual(1);
+      expect(JSON.stringify(w.logs)).not.toContain(SENTINEL);
+    });
+  });
+
   // ───────────────────────────── funciones de la base ─────────────────────────────
 
   describe("migración 21 (funciones de la base)", () => {
@@ -509,7 +558,8 @@ describe.skipIf(!bin)("historial de mensajes de extremo a extremo contra Postgre
       const signatures = [
         "plusmedik_history_record(text, text, text, text, text, text, text, text, text, text, text, text, uuid, text, timestamptz, integer)", "plusmedik_history_attach_text(text, text, text, text, text)",
         "plusmedik_history_delivery(text, text, text, timestamptz)", "plusmedik_history_export(text, text, timestamptz, timestamptz, bigint, integer)", "plusmedik_history_erase(text, text)",
-        "plusmedik_history_purge(integer)", "plusmedik_history_gaps(timestamptz, integer)"
+        "plusmedik_history_purge(integer)", "plusmedik_history_gaps(timestamptz, integer)",
+        "plusmedik_history_save(text, text, text, text, text, text, text, text, text, text, text, text, text, uuid, text, timestamptz, integer)", "plusmedik_history_attach(text, text, text, text, text, text)"
       ];
       for (const signature of signatures) {
         expect(await db.ok(`select prosecdef from pg_proc where oid = 'public.${signature}'::regprocedure`), signature).toBe("t");
@@ -573,6 +623,49 @@ describe.skipIf(!bin)("historial de mensajes de extremo a extremo contra Postgre
       // De otro contacto no se puede escribir.
       expect((await call(`select public.plusmedik_history_attach_text('${LAB}', '${key()}', 'wamid.t-audio', 'v1.x.y.z', 'abcd1234')::text`)).outcome).toBe("missing");
       expect(await db.ok(`select body_cipher from public.plusmedik_message_history where provider_message_id = 'wamid.t-audio'`)).toBe("v1.uno.dos.tres");
+    });
+
+    const save = (o: { contact: string; messageId: string; body?: string | null; cipher?: string | null; keyId?: string | null; kind?: string; direction?: string }) => {
+      const direction = o.direction ?? "IN";
+      const q = (v: string | null | undefined) => (v === undefined || v === null ? "null" : `'${v}'`);
+      return `select public.plusmedik_history_save('${LAB}', '${o.contact}', '${o.messageId}', '${direction}', '${direction === "IN" ? "PATIENT" : "AGENT"}', null, '${o.kind ?? "TEXT"}', 'text', ${q(o.body)}, ${q(o.cipher)}, ${q(o.keyId)}, null, '${direction === "IN" ? "RECEIVED" : "ACCEPTED"}', null, null, now(), null)::text`;
+    };
+
+    it("guardar en claro: una de las dos formas (texto en claro O cifrado, nunca ambas), idempotente, y sin vencimiento", async () => {
+      const c = key();
+      expect((await call(save({ contact: c, messageId: "wamid.s1", body: "hola en claro" }))).outcome).toBe("recorded");
+      expect((await call(save({ contact: c, messageId: "wamid.s1", body: "otro texto" }))).outcome).toBe("duplicate");
+      expect(await db.ok(`select body || '|' || (body_cipher is null) || '|' || (expires_at is null) from public.plusmedik_message_history where provider_message_id = 'wamid.s1'`)).toBe("hola en claro|true|true");
+      expect((await call(save({ contact: c, messageId: "wamid.s2", cipher: "v1.aaaa.bbbb.cccc", keyId: "abcd1234" }))).outcome).toBe("recorded");
+      expect((await call(save({ contact: c, messageId: "wamid.s3", direction: "OUT", kind: "TEXT" }))).outcome).toBe("recorded");
+      expect(await db.fails(asService(save({ contact: c, messageId: "wamid.s4", body: "a", cipher: "v1.aaaa.bbbb.cccc", keyId: "abcd1234" })))).toMatch(/PT422/);
+      expect(await db.fails(asService(save({ contact: c, messageId: "wamid.s5", cipher: "v1.aaaa.bbbb.cccc" })))).toMatch(/PT422/);
+      expect(await db.fails(asService(save({ contact: "abc", messageId: "wamid.s6", body: "x" })))).toMatch(/PT422/);
+      expect(await db.fails(asService(save({ contact: c, messageId: "wamid.s7", body: "x".repeat(20001) })))).toMatch(/PT422/);
+    });
+
+    it("la transcripción en claro solo se agrega a un AUDIO entrante sin texto (en claro o cifrado), y exige exactamente una de las dos formas", async () => {
+      const c = key();
+      await call(save({ contact: c, messageId: "wamid.a-audio", kind: "AUDIO" }));
+      await call(save({ contact: c, messageId: "wamid.a-text", body: "ya tiene texto" }));
+      const attach = (messageId: string, body: string | null, cipher: string | null = null, keyId: string | null = null) =>
+        call(`select public.plusmedik_history_attach('${LAB}', '${c}', '${messageId}', ${body === null ? "null" : `'${body}'`}, ${cipher === null ? "null" : `'${cipher}'`}, ${keyId === null ? "null" : `'${keyId}'`})::text`);
+      expect((await attach("wamid.a-audio", "quiero un hemograma")).outcome).toBe("updated");
+      expect((await attach("wamid.a-audio", "otra cosa")).outcome).toBe("noop");
+      expect((await attach("wamid.a-text", "reemplazo")).outcome).toBe("noop");
+      expect((await attach("wamid.nada", "x")).outcome).toBe("missing");
+      expect(await db.ok(`select body from public.plusmedik_message_history where provider_message_id = 'wamid.a-audio'`)).toBe("quiero un hemograma");
+      expect(await db.ok(`select body from public.plusmedik_message_history where provider_message_id = 'wamid.a-text'`)).toBe("ya tiene texto");
+      expect(await db.fails(asService(`select public.plusmedik_history_attach('${LAB}', '${c}', 'wamid.a-audio', null, null, null)`))).toMatch(/PT422/);
+      expect(await db.fails(asService(`select public.plusmedik_history_attach('${LAB}', '${c}', 'wamid.a-audio', 'a', 'v1.aaaa.bbbb.cccc', 'abcd1234')`))).toMatch(/PT422/);
+    });
+
+    it("la exportación devuelve el texto en claro (body) y, en filas cifradas, el cifrado", async () => {
+      const c = key();
+      await call(save({ contact: c, messageId: "wamid.x1", body: "en claro" }));
+      await call(save({ contact: c, messageId: "wamid.x2", cipher: "v1.aaaa.bbbb.cccc", keyId: "abcd1234" }));
+      const page = await call(`select public.plusmedik_history_export('revisión del texto en claro', '${c}', null, null, null, 100)::text`);
+      expect(page.rows.map((row: { body: string | null; body_cipher: string | null }) => [row.body, row.body_cipher])).toEqual([["en claro", null], [null, "v1.aaaa.bbbb.cccc"]]);
     });
 
     it("retención: lo vencido no se exporta, se purga al escribir (acotado) y con la purga explícita", async () => {

@@ -3,18 +3,20 @@ import { z } from "zod";
 import { createSupabaseRpc } from "./audit.js";
 import type { ClassifiedKapsoEvent } from "./human-control.js";
 
-// Historial de mensajes para AUDITORÍA autorizada (APAGADO por defecto: PLUSMEDIK_HISTORY=on). Guarda, cifrado, lo que los pacientes escriben, lo que el agente responde y lo que la recepción humana
-// escribe, para poder revisar conversaciones reales. NO es la memoria conversacional (src/conversation-memory.ts, contexto corto para el modelo con filtros y vencimiento de 7 días) ni la auditoría de
-// ejecución (src/audit.ts, solo códigos): es un módulo aparte, con tabla, clave y retención propias, y NUNCA influye en lo que el agente decide o responde.
+// Historial de TODOS los mensajes (ENCENDIDO por defecto, sin variables nuevas; PLUSMEDIK_HISTORY=off lo apaga). Guarda lo que los pacientes escriben, lo que el agente responde y lo que la recepción humana
+// escribe, para conservar las conversaciones completas en Supabase y poder usarlas desde otros proyectos o auditarlas. El texto se guarda EN CLARO (columna body); si se define PLUSMEDIK_HISTORY_KEY se guarda
+// CIFRADO (AES-256-GCM). NO es la memoria conversacional (src/conversation-memory.ts, contexto corto para el modelo con filtros y vencimiento de 7 días) ni la auditoría de ejecución (src/audit.ts, solo
+// códigos): es un módulo aparte, con tabla y retención propias, y NUNCA influye en lo que el agente decide o responde.
 //
-// Qué registra (migración 21, supabase/migrations/20261109000000_plusmedik_message_history.sql):
+// Qué registra (migraciones 21 y 22, supabase/migrations/20261109000000_plusmedik_message_history.sql y 20261110000000_plusmedik_message_history_plaintext.sql):
 //   · entrantes del paciente (texto, y de audios e imágenes solo el tipo y el identificador del medio; la transcripción de un audio se agrega al transcribirse),
 //   · respuestas del agente que Kapso ACEPTÓ para envío (estado ACCEPTED; UNCERTAIN si el envío falló sin saber si salió) con el id del mensaje al que responde y la corrida de auditoría,
 //   · mensajes de la recepción humana (y de otras apps / agente de Meta) cuando Kapso los informa, sin confundirlos con los automáticos,
 //   · el estado de entrega (SENT, DELIVERED, READ, FAILED) que Kapso informa después; solo avanza. Aceptado por Kapso NO significa entregado.
 // Qué NO registra: respuestas canceladas (pausa humana, tope diario, obsoletas: nunca se enviaron), enlaces ni credenciales de medios, teléfonos (solo la clave HMAC del contacto), ni claves.
-// Protección: AES-256-GCM con PLUSMEDIK_HISTORY_KEY (fuera de la base, distinta de las demás claves); contacto, línea, dirección y mensaje van como dato autenticado; sin vencimiento por defecto (tope opcional en días);
-// acceso solo por funciones; exportación con motivo y rastro. Ninguna falla del historial interrumpe un mensaje: se registra un código y la conciliación (plusmedik_history_gaps) la detecta.
+// Protección: RLS sin privilegios directos sobre las tablas y acceso solo por funciones de service_role; sin vencimiento por defecto (tope opcional en días); exportación con motivo y rastro. Con PLUSMEDIK_HISTORY_KEY
+// (fuera de la base, distinta de las demás claves) el texto se cifra y el contacto, línea, dirección y mensaje van como dato autenticado. Ninguna falla del historial interrumpe un mensaje: se registra un código y
+// la conciliación (plusmedik_history_gaps) la detecta.
 
 // Retención: por defecto NO hay vencimiento (el historial completo se conserva en Supabase); un tope opcional, en días, la limita.
 export const HISTORY_DEFAULTS = { maxRetentionDays: 3650, textChars: 4096, timeoutMs: 3000, concurrency: 4, exportPageSize: 500 } as const;
@@ -82,6 +84,8 @@ export interface HistoryRow {
   origin?: string;
   kind: HistoryKind;
   messageType?: string;
+  // El texto, en claro (body) o cifrado (bodyCipher + keyId); nunca los dos.
+  body?: string;
   bodyCipher?: string;
   keyId?: string;
   mediaRef?: string;
@@ -100,6 +104,7 @@ export interface ExportedRow {
   origin: string | null;
   kind: HistoryKind;
   messageType: string | null;
+  body: string | null;
   bodyCipher: string | null;
   keyId: string | null;
   mediaRef: string | null;
@@ -112,7 +117,8 @@ export interface ExportedRow {
 
 export interface HistoryStore {
   record(row: HistoryRow): Promise<"RECORDED" | "DUPLICATE">;
-  attachText(input: { accountId: string; contactKey: string; messageId: string; bodyCipher: string; keyId: string }): Promise<"UPDATED" | "NOOP" | "MISSING">;
+  // La transcripción de un audio: en claro (body) o cifrada (bodyCipher + keyId).
+  attachText(input: { accountId: string; contactKey: string; messageId: string; body?: string; bodyCipher?: string; keyId?: string }): Promise<"UPDATED" | "NOOP" | "MISSING">;
   delivery(input: { accountId: string; messageId: string; state: DeliveryUpdate; at?: Date }): Promise<"UPDATED" | "NOOP" | "MISSING">;
   exportPage(input: { reason: string; contactKey?: string; from?: Date; to?: Date; afterSeq?: number; limit?: number }): Promise<{ rows: ExportedRow[]; next?: number }>;
   erase(input: { contactKey: string; reason: string }): Promise<number>;
@@ -126,7 +132,7 @@ const exportShape = z.object({
     z.object({
       seq: z.number(), contact_key: z.string(), message_id: z.string(), direction: z.enum(["IN", "OUT"]),
       actor: z.enum(["PATIENT", "AGENT", "HUMAN", "OTHER_APP", "META_AGENT", "UNKNOWN"]), origin: z.string().nullable(),
-      content_kind: z.enum(["TEXT", "AUDIO", "IMAGE", "OTHER"]), message_type: z.string().nullable(), body_cipher: z.string().nullable(), key_id: z.string().nullable(),
+      content_kind: z.enum(["TEXT", "AUDIO", "IMAGE", "OTHER"]), message_type: z.string().nullable(), body: z.string().nullish(), body_cipher: z.string().nullable(), key_id: z.string().nullable(),
       media_ref: z.string().nullable(), delivery_state: z.enum(["RECEIVED", "ACCEPTED", "UNCERTAIN", "SENT", "DELIVERED", "READ", "FAILED"]),
       audit_run_id: z.string().nullable(), reply_to: z.string().nullable(), occurred_at: z.string(), delivery_at: z.string().nullable()
     })
@@ -151,16 +157,16 @@ export function createSupabaseHistoryStore(options: SupabaseHistoryStoreOptions 
   };
   return {
     async record(row) {
-      const result = await call("plusmedik_history_record", {
+      const result = await call("plusmedik_history_save", {
         p_account_id: row.accountId, p_contact_key: row.contactKey, p_message_id: row.messageId, p_direction: row.direction, p_actor: row.actor, p_origin: row.origin ?? null,
-        p_content_kind: row.kind, p_message_type: row.messageType ?? null, p_body_cipher: row.bodyCipher ?? null, p_key_id: row.keyId ?? null, p_media_ref: row.mediaRef ?? null,
+        p_content_kind: row.kind, p_message_type: row.messageType ?? null, p_body: row.body ?? null, p_body_cipher: row.bodyCipher ?? null, p_key_id: row.keyId ?? null, p_media_ref: row.mediaRef ?? null,
         p_delivery_state: row.state, p_audit_run_id: row.auditRunId ?? null, p_reply_to: row.replyTo ?? null, p_occurred_at: (row.occurredAt ?? new Date()).toISOString(),
         p_retention_days: options.retentionDays ?? null
       });
       return outcomeOf.parse(result).outcome === "recorded" ? "RECORDED" : "DUPLICATE";
     },
     async attachText(input) {
-      return stateOf(await call("plusmedik_history_attach_text", { p_account_id: input.accountId, p_contact_key: input.contactKey, p_message_id: input.messageId, p_body_cipher: input.bodyCipher, p_key_id: input.keyId }));
+      return stateOf(await call("plusmedik_history_attach", { p_account_id: input.accountId, p_contact_key: input.contactKey, p_message_id: input.messageId, p_body: input.body ?? null, p_body_cipher: input.bodyCipher ?? null, p_key_id: input.keyId ?? null }));
     },
     async delivery(input) {
       return stateOf(await call("plusmedik_history_delivery", { p_account_id: input.accountId, p_message_id: input.messageId, p_state: input.state, p_at: (input.at ?? new Date()).toISOString() }));
@@ -175,7 +181,7 @@ export function createSupabaseHistoryStore(options: SupabaseHistoryStoreOptions 
       return {
         rows: parsed.rows.map((row) => ({
           seq: row.seq, contactKey: row.contact_key, messageId: row.message_id, direction: row.direction, actor: row.actor, origin: row.origin, kind: row.content_kind, messageType: row.message_type,
-          bodyCipher: row.body_cipher, keyId: row.key_id, mediaRef: row.media_ref, state: row.delivery_state, auditRunId: row.audit_run_id, replyTo: row.reply_to, occurredAt: row.occurred_at, deliveryAt: row.delivery_at
+          body: row.body ?? null, bodyCipher: row.body_cipher, keyId: row.key_id, mediaRef: row.media_ref, state: row.delivery_state, auditRunId: row.audit_run_id, replyTo: row.reply_to, occurredAt: row.occurred_at, deliveryAt: row.delivery_at
         })),
         ...(parsed.next_after_seq !== null ? { next: parsed.next_after_seq } : {})
       };
@@ -303,8 +309,8 @@ function bounded<T>(work: Promise<T>, ms: number): Promise<T> {
 
 export interface MessageHistoryOptions {
   store: HistoryStore;
-  // Clave de cifrado dedicada (>= 32 caracteres) y línea de WhatsApp del laboratorio.
-  secret: string;
+  // Clave de cifrado dedicada (>= 32 caracteres), opcional: sin ella el texto se guarda en claro. Y la línea de WhatsApp del laboratorio.
+  secret?: string;
   accountId: string;
   contactKeyFor(phone: string): string | undefined;
   log(event: string, data: Record<string, unknown>): void;
@@ -314,11 +320,14 @@ export interface MessageHistoryOptions {
 export function createMessageHistory(options: MessageHistoryOptions): MessageHistory {
   const { store, secret, accountId, log } = options;
   const timeoutMs = options.timeoutMs ?? HISTORY_DEFAULTS.timeoutMs;
-  const keyId = keyIdOf(secret);
+  const keyId = secret ? keyIdOf(secret) : undefined;
   const run = <T>(work: Promise<T>) => bounded(work, timeoutMs);
-  const rowOf = (base: Omit<HistoryRow, "accountId" | "bodyCipher" | "keyId">, contactKey: string, text: string | undefined): HistoryRow => ({
+  // El texto de un mensaje: en claro por defecto; cifrado si hay clave.
+  const textOf = (text: string, contactKey: string, direction: HistoryDirection, messageId: string): Pick<HistoryRow, "body" | "bodyCipher" | "keyId"> =>
+    secret ? { bodyCipher: sealMessage(text, secret, { accountId, contactKey, direction, messageId }), keyId: keyId! } : { body: text };
+  const rowOf = (base: Omit<HistoryRow, "accountId" | "body" | "bodyCipher" | "keyId">, contactKey: string, text: string | undefined): HistoryRow => ({
     accountId, ...base,
-    ...(text ? { bodyCipher: sealMessage(text, secret, { accountId, contactKey, direction: base.direction, messageId: base.messageId }), keyId } : {})
+    ...(text ? textOf(text, contactKey, base.direction, base.messageId) : {})
   });
 
   return {
@@ -406,8 +415,7 @@ export function createMessageHistory(options: MessageHistoryOptions): MessageHis
           return;
         }
         const clipped = clip(text);
-        const bodyCipher = sealMessage(clipped, secret, { accountId, contactKey, direction: "IN", messageId });
-        let outcome = await run(store.attachText({ accountId, contactKey, messageId, bodyCipher, keyId }));
+        let outcome = await run(store.attachText({ accountId, contactKey, messageId, ...textOf(clipped, contactKey, "IN", messageId) }));
         // El registro del audio (que se hace aparte, al llegar el webhook) aún no existe: se escribe completo, con la transcripción.
         if (outcome === "MISSING") {
           const row = rowOf({ messageId, direction: "IN", actor: "PATIENT", kind: "AUDIO", messageType: "audio", state: "RECEIVED", contactKey, ...(at ? { occurredAt: at } : {}) }, contactKey, clipped);
@@ -424,7 +432,7 @@ export function createMessageHistory(options: MessageHistoryOptions): MessageHis
 
 // ───────────────────────────── configuración ─────────────────────────────
 
-export type HistoryConfigError = "PRIVACY_REVIEW_REQUIRED" | "MISSING_KEY" | "KEY_NOT_DEDICATED" | "CONTACT_KEY_REQUIRED" | "INVALID_RETENTION";
+export type HistoryConfigError = "INVALID_KEY" | "KEY_NOT_DEDICATED" | "CONTACT_KEY_REQUIRED" | "INVALID_RETENTION";
 
 // La clave del historial no puede ser igual a NINGUNA otra clave, secreto o token del entorno (HMAC de contactos, memoria, cola, webhook, service role, APIs…): una sola filtración no debe abrir dos cosas.
 const OWN_NAMES = new Set(["PLUSMEDIK_HISTORY_KEY", "PLUSMEDIK_HISTORY_KEY_PREVIOUS"]);
@@ -438,28 +446,29 @@ function retentionOf(value: string | undefined): number | undefined | "INVALID" 
   return parsed >= 1 && parsed <= HISTORY_DEFAULTS.maxRetentionDays ? parsed : "INVALID";
 }
 
-// Devuelve el historial SOLO si la bandera está en «on» y TODA la configuración es válida; si no, undefined (y un código en el registro si estaba habilitada). Exige además confirmar que se revisaron las
-// condiciones de privacidad (PLUSMEDIK_HISTORY_PRIVACY_REVIEWED=yes): guardar conversaciones de salud requiere la autorización del laboratorio.
+// Devuelve el historial ENCENDIDO por defecto, sin ninguna variable nueva: solo necesita lo que el agente ya tiene (la clave HMAC de contactos, con la que se calcula `contactKeyFor`, y KAPSO_PHONE_NUMBER_ID).
+// PLUSMEDIK_HISTORY=off lo apaga. Opcionales: PLUSMEDIK_HISTORY_KEY (>= 32 caracteres y distinta de cualquier otra clave) para guardar el texto CIFRADO en vez de en claro, y
+// PLUSMEDIK_HISTORY_RETENTION_DAYS (1-3650) para poner un tope; sin ellos el texto va en claro y no vence. Una configuración inválida lo deja apagado y deja un código en el registro.
 export function resolveMessageHistory(
   env: Record<string, string | undefined>,
   log: (event: string, data: Record<string, unknown>) => void,
   options: { contactKeyFor(phone: string): string | undefined; store?: HistoryStore }
 ): MessageHistory | undefined {
-  if (env.PLUSMEDIK_HISTORY?.trim().toLowerCase() !== "on") return undefined;
+  if (env.PLUSMEDIK_HISTORY?.trim().toLowerCase() === "off") return undefined;
   const fail = (error: HistoryConfigError): undefined => {
     log("message_history_config_invalid", { error });
     return undefined;
   };
-  if (env.PLUSMEDIK_HISTORY_PRIVACY_REVIEWED?.trim().toLowerCase() !== "yes") return fail("PRIVACY_REVIEW_REQUIRED");
-  const secret = env.PLUSMEDIK_HISTORY_KEY?.trim();
-  if (!secret || secret.length < MIN_HISTORY_KEY_LENGTH) return fail("MISSING_KEY");
-  if (reusesAnotherSecret(env, secret)) return fail("KEY_NOT_DEDICATED");
   const accountId = env.KAPSO_PHONE_NUMBER_ID?.trim();
-  if (!accountId || !/^[A-Za-z0-9_-]{1,64}$/.test(accountId)) return fail("CONTACT_KEY_REQUIRED");
+  if (!accountId || !/^[A-Za-z0-9_-]{1,64}$/.test(accountId) || (env.PLUSMEDIK_CONTACT_HMAC_KEY?.trim().length ?? 0) < MIN_HISTORY_KEY_LENGTH) return fail("CONTACT_KEY_REQUIRED");
+  const rawSecret = env.PLUSMEDIK_HISTORY_KEY?.trim();
+  const secret = rawSecret === "" ? undefined : rawSecret;
+  if (secret !== undefined && secret.length < MIN_HISTORY_KEY_LENGTH) return fail("INVALID_KEY");
+  if (secret !== undefined && reusesAnotherSecret(env, secret)) return fail("KEY_NOT_DEDICATED");
   const retentionDays = retentionOf(env.PLUSMEDIK_HISTORY_RETENTION_DAYS);
   if (retentionDays === "INVALID") return fail("INVALID_RETENTION");
   const store = options.store ?? createSupabaseHistoryStore({ ...(retentionDays !== undefined ? { retentionDays } : {}) });
-  return createMessageHistory({ store, secret, accountId, contactKeyFor: options.contactKeyFor, log });
+  return createMessageHistory({ store, ...(secret !== undefined ? { secret } : {}), accountId, contactKeyFor: options.contactKeyFor, log });
 }
 
 // ───────────────────────────── exportación autorizada ─────────────────────────────
@@ -484,7 +493,7 @@ export interface ExportedMessage {
   text?: string;
 }
 
-// Lee el historial por páginas (la base devuelve el texto CIFRADO y deja un rastro con el motivo) y lo descifra aquí, con las claves que se le pasen (la actual y, si se rotó, las anteriores).
+// Lee el historial por páginas (deja un rastro con el motivo). El texto en claro se entrega tal cual; el cifrado se descifra aquí, con las claves que se le pasen (la actual y, si se rotó, las anteriores; pueden ser ninguna).
 export async function* exportHistory(options: { store: HistoryStore; accountId: string; keys: readonly string[]; reason: string; contactKey?: string; from?: Date; to?: Date; pageSize?: number }): AsyncGenerator<ExportedMessage> {
   const byId = new Map(options.keys.map((key) => [keyIdOf(key), key] as const));
   let afterSeq: number | undefined;
@@ -493,7 +502,10 @@ export async function* exportHistory(options: { store: HistoryStore; accountId: 
     for (const row of page.rows) {
       let textStatus: ExportedMessage["textStatus"] = "NONE";
       let text: string | undefined;
-      if (row.bodyCipher) {
+      if (row.body) {
+        text = row.body;
+        textStatus = "OK";
+      } else if (row.bodyCipher) {
         const key = row.keyId ? byId.get(row.keyId) : undefined;
         try {
           if (!key) throw new HistoryCipherError();

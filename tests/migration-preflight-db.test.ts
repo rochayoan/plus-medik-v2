@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { buildManifest, expectedFiles, MIGRATIONS_DIR, POST_FILE, PRE_FILE, PREFLIGHT_DIR, readMigrations } from "../scripts/migration-manifest.js";
 import { findPostgresBin, startEphemeralPostgres, SUPABASE_BOOTSTRAP_SQL, type EphemeralPostgres, type PgDatabase } from "./support/ephemeral-postgres.js";
 
-// Las verificaciones de SOLO LECTURA (antes y después de aplicar a mano las 21 migraciones) contra un PostgreSQL REAL y efímero: detectan lo pendiente, lo ya aplicado, lo parcial, los huecos de
+// Las verificaciones de SOLO LECTURA (antes y después de aplicar a mano las 22 migraciones) contra un PostgreSQL REAL y efímero: detectan lo pendiente, lo ya aplicado, lo parcial, los huecos de
 // orden, las colisiones con el catálogo y con el esquema crm, y cualquier permiso de más. NO se conectan a ningún Supabase remoto.
 
 const bin = findPostgresBin();
@@ -27,8 +27,8 @@ const migrationRows = (rows: Row[]) => rows.filter((row) => row.section === "MIG
 const snapshot = (rows: Row[]) => rows.filter((row) => row.section === "INSTANTANEA").map((row) => `${row.item}=${row.detail}`).sort();
 
 describe("verificaciones de las migraciones: contenido estático", () => {
-  it("el manifiesto cubre las 21 migraciones en orden y cada una crea algo propio", () => {
-    expect(manifest.migrations).toHaveLength(21);
+  it("el manifiesto cubre las 22 migraciones en orden y cada una crea algo propio", () => {
+    expect(manifest.migrations).toHaveLength(22);
     expect(manifest.migrations.map((m) => m.version)).toEqual(files.map((f) => f.file.split("_")[0]));
     expect([...manifest.migrations.map((m) => m.version)]).toEqual([...manifest.migrations.map((m) => m.version)].sort());
     for (const m of manifest.migrations) expect(manifest.entries.some((e) => e.mig === m.index), m.file).toBe(true);
@@ -36,7 +36,7 @@ describe("verificaciones de las migraciones: contenido estático", () => {
     expect(manifest.serviceFunctions.length).toBeGreaterThan(50);
     // las funciones que el orden redefine son exactamente las que el diseño conoce
     expect(manifest.redefined.filter((r) => r.kind === "function").map((r) => `${r.name}:${r.migrations.join(">")}`)).toEqual([
-      "plusmedik_audit_claim_run:4>5", "plusmedik_audit_record_reply:3>6", "plusmedik_audit_reserve_send:4>5>6", "plusmedik_audit_runs_guard:3>4>5", "plusmedik_quote_session_close:11>14", "plusmedik_quote_session_read:11>14", "plusmedik_turn_reserve_send_guarded:10>16"
+      "plusmedik_audit_claim_run:4>5", "plusmedik_audit_record_reply:3>6", "plusmedik_audit_reserve_send:4>5>6", "plusmedik_audit_runs_guard:3>4>5", "plusmedik_history_export:21>22", "plusmedik_quote_session_close:11>14", "plusmedik_quote_session_read:11>14", "plusmedik_turn_reserve_send_guarded:10>16"
     ]);
   });
 
@@ -108,13 +108,13 @@ describe.skipIf(!bin)("verificaciones contra PostgreSQL real", () => {
   beforeAll(async () => { server = await startEphemeralPostgres(bin!); });
   afterAll(async () => { await server?.stop(); });
 
-  it("base sin migraciones: veredicto OK, las 21 pendientes, sin bloqueos; y se puede ejecutar en una transacción de solo lectura", async () => {
+  it("base sin migraciones: veredicto OK, las 22 pendientes, sin bloqueos; y se puede ejecutar en una transacción de solo lectura", async () => {
     const db = await newDb();
     const rows = await runReadOnly(db, pre);
     expect(blocks(rows)).toEqual([]);
     expect(verdict(rows)).toMatchObject({ section: "VEREDICTO", status: "OK" });
     const states = migrationRows(rows);
-    expect(states).toHaveLength(21);
+    expect(states).toHaveLength(22);
     for (const row of states) expect(row, row.item).toMatchObject({ status: "OK", detail: expect.stringContaining("pendiente") });
     expect(rows.find((row) => row.item === "lab_tests.id (uuid)")).toMatchObject({ status: "OK" });
     expect(rows.find((row) => row.item === "version_20261025000000_duplicada")).toMatchObject({ status: "INFO" });
@@ -127,10 +127,10 @@ describe.skipIf(!bin)("verificaciones contra PostgreSQL real", () => {
     for (const row of migrationRows(rows)) expect(row.status).toBe("INFO");
   });
 
-  it("aplicar las 21 migraciones en orden: la previa lo reconoce como YA APLICADO, la posterior da OK, y el catálogo y el esquema crm no cambian", async () => {
+  it("aplicar las 22 migraciones en orden: la previa lo reconoce como YA APLICADO, la posterior da OK, y el catálogo y el esquema crm no cambian", async () => {
     const db = await newDb();
     const before = await runReadOnly(db, post);
-    await apply(db, 21);
+    await apply(db, 22);
     const afterPre = await runReadOnly(db, pre);
     for (const row of migrationRows(afterPre)) expect(row, row.item).toMatchObject({ status: "INFO", detail: expect.stringContaining("YA APLICADA") });
     expect(blocks(afterPre)).toEqual([]);
@@ -149,7 +149,7 @@ describe.skipIf(!bin)("verificaciones contra PostgreSQL real", () => {
 
   it("aplicar de a una: tras cada migración, lo aplicado está completo y lo siguiente figura como pendiente en orden", async () => {
     const db = await newDb();
-    for (let n = 1; n <= 21; n++) {
+    for (let n = 1; n <= 22; n++) {
       await db.applyFile(join(MIGRATIONS_DIR, files[n - 1]!.file));
       const rows = await run(db, post);
       expect(blocks(rows), `tras la ${n}`).toEqual([]);
@@ -160,11 +160,11 @@ describe.skipIf(!bin)("verificaciones contra PostgreSQL real", () => {
     }
   });
 
-  it("volver a ejecutar las 21 migraciones (reintento tras un corte) no falla ni cambia el estado", async () => {
+  it("volver a ejecutar las 22 migraciones (reintento tras un corte) no falla ni cambia el estado", async () => {
     const db = await newDb();
-    await apply(db, 21);
+    await apply(db, 22);
     const first = await run(db, post);
-    await apply(db, 21);
+    await apply(db, 22);
     const second = await run(db, post);
     expect(blocks(second)).toEqual([]);
     expect(second.map((row) => `${row.item}|${row.status}`)).toEqual(first.map((row) => `${row.item}|${row.status}`));
@@ -238,7 +238,7 @@ describe.skipIf(!bin)("verificaciones contra PostgreSQL real", () => {
   it("la verificación posterior detecta cada permiso o ajuste de más", async () => {
     const mutate = async (sql: string, item: string, status = "BLOCK") => {
       const db = await newDb();
-      await apply(db, 21);
+      await apply(db, 22);
       await db.ok(sql);
       const rows = await run(db, post);
       expect(rows.find((row) => row.item === item), sql).toMatchObject({ status });

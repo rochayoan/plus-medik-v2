@@ -136,9 +136,13 @@ function fakeStore(over: Partial<HistoryStore> = {}): Fake {
     attachText: vi.fn(async (input) => {
       const row = rows.find((r) => r.messageId === input.messageId);
       if (!row) return "MISSING" as const;
-      if (row.kind !== "AUDIO" || row.bodyCipher) return "NOOP" as const;
-      row.bodyCipher = input.bodyCipher;
-      attached.push({ messageId: input.messageId, bodyCipher: input.bodyCipher });
+      if (row.kind !== "AUDIO" || row.bodyCipher || row.body) return "NOOP" as const;
+      if (input.body !== undefined) row.body = input.body;
+      else {
+        row.bodyCipher = input.bodyCipher;
+        row.keyId = input.keyId;
+      }
+      attached.push({ messageId: input.messageId, bodyCipher: input.bodyCipher ?? input.body! });
       return "UPDATED" as const;
     }),
     delivery: vi.fn(async (input) => {
@@ -288,50 +292,61 @@ describe("servicio: respuestas del agente y transcripciones", () => {
 // ───────────────────────────── configuración ─────────────────────────────
 
 describe("resolveMessageHistory", () => {
-  const valid = { PLUSMEDIK_HISTORY: "on", PLUSMEDIK_HISTORY_PRIVACY_REVIEWED: "yes", PLUSMEDIK_HISTORY_KEY: KEY, KAPSO_PHONE_NUMBER_ID: ACCOUNT };
-  const resolve = (env: Record<string, string | undefined>) => {
+  const HMAC = "clave-hmac-simulada-solo-para-pruebas-0123456789";
+  // Lo único que necesita es lo que el agente YA tiene en Vercel (la clave HMAC de contactos y la línea de WhatsApp): ninguna variable nueva.
+  const base = { PLUSMEDIK_CONTACT_HMAC_KEY: HMAC, KAPSO_PHONE_NUMBER_ID: ACCOUNT };
+  const resolve = (env: Record<string, string | undefined>, store: HistoryStore = fakeStore()) => {
     const logs: Array<[string, Record<string, unknown>]> = [];
-    const history = resolveMessageHistory(env, (event, data) => { logs.push([event, data]); }, { contactKeyFor, store: fakeStore() });
+    const history = resolveMessageHistory(env, (event, data) => { logs.push([event, data]); }, { contactKeyFor, store });
     return { history, logs };
   };
 
-  it("APAGADO por defecto: sin la bandera (o con cualquier otro valor) no hay historial y no se escribe nada en el registro", () => {
-    for (const flag of [undefined, "", "off", "true", "1", "ON?"]) {
-      const { history, logs } = resolve({ ...valid, PLUSMEDIK_HISTORY: flag });
-      expect(history, String(flag)).toBeUndefined();
-      expect(logs).toEqual([]);
-    }
-    expect(resolve({}).history).toBeUndefined();
+  it("ENCENDIDO por defecto, sin ninguna variable nueva: con lo que el agente ya tiene alcanza, y no escribe nada en el registro", () => {
+    const { history, logs } = resolve(base);
+    expect(history).toBeDefined();
+    expect(logs).toEqual([]);
   });
 
-  it("con toda la configuración válida se enciende (la bandera no distingue mayúsculas)", () => {
-    expect(resolve(valid).history).toBeDefined();
-    expect(resolve({ ...valid, PLUSMEDIK_HISTORY: " ON " }).history).toBeDefined();
-    expect(resolve({ ...valid, PLUSMEDIK_HISTORY_RETENTION_DAYS: "90" }).history).toBeDefined();
-    expect(resolve({ ...valid, PLUSMEDIK_HISTORY_RETENTION_DAYS: "3650" }).history).toBeDefined();
-    // sin retención configurada: no hay vencimiento (se conserva todo)
-    expect(resolve({ ...valid, PLUSMEDIK_HISTORY_RETENTION_DAYS: "" }).history).toBeDefined();
+  it("PLUSMEDIK_HISTORY=off lo apaga (sin importar mayúsculas ni espacios); cualquier otro valor lo deja encendido", () => {
+    for (const flag of ["off", "OFF", " Off "]) expect(resolve({ ...base, PLUSMEDIK_HISTORY: flag }).history, flag).toBeUndefined();
+    for (const flag of [undefined, "", "on", "true", "1"]) expect(resolve({ ...base, PLUSMEDIK_HISTORY: flag }).history, String(flag)).toBeDefined();
+  });
+
+  it("sin clave el texto se guarda EN CLARO (legible desde Supabase); con una clave dedicada válida, CIFRADO", async () => {
+    const plain = fakeStore();
+    await resolve(base, plain).history!.recordAgentReply({ to: PHONE, messageId: "wamid.O1", replyTo: "wamid.I1", text: "hola paciente", state: "ACCEPTED" });
+    expect(plain.rows[0]).toMatchObject({ body: "hola paciente" });
+    expect(plain.rows[0]!.bodyCipher).toBeUndefined();
+    expect(plain.rows[0]!.keyId).toBeUndefined();
+    const sealed = fakeStore();
+    await resolve({ ...base, PLUSMEDIK_HISTORY_KEY: KEY }, sealed).history!.recordAgentReply({ to: PHONE, messageId: "wamid.O1", replyTo: "wamid.I1", text: "hola paciente", state: "ACCEPTED" });
+    expect(sealed.rows[0]!.body).toBeUndefined();
+    expect(sealed.rows[0]!.bodyCipher).toMatch(/^v1\./);
+    expect(JSON.stringify(sealed.rows[0])).not.toContain("hola paciente");
+  });
+
+  it("sin vencimiento por defecto; un tope opcional entre 1 y 3650 días", () => {
+    for (const days of [undefined, "", "1", "90", "3650"]) expect(resolve({ ...base, PLUSMEDIK_HISTORY_RETENTION_DAYS: days }).history, String(days)).toBeDefined();
   });
 
   it.each([
-    ["PRIVACY_REVIEW_REQUIRED", { PLUSMEDIK_HISTORY_PRIVACY_REVIEWED: undefined }],
-    ["PRIVACY_REVIEW_REQUIRED", { PLUSMEDIK_HISTORY_PRIVACY_REVIEWED: "no" }],
-    ["MISSING_KEY", { PLUSMEDIK_HISTORY_KEY: undefined }],
-    ["MISSING_KEY", { PLUSMEDIK_HISTORY_KEY: "demasiado-corta" }],
-    ["KEY_NOT_DEDICATED", { PLUSMEDIK_MEMORY_KEY: KEY }],
-    ["KEY_NOT_DEDICATED", { PLUSMEDIK_CONTACT_HMAC_KEY: KEY }],
-    ["KEY_NOT_DEDICATED", { SUPABASE_SERVICE_ROLE_KEY: KEY }],
-    ["KEY_NOT_DEDICATED", { PLUSMEDIK_OUTBOX_KEY: KEY }],
-    ["KEY_NOT_DEDICATED", { WEBHOOK_SECRET: KEY }],
-    ["KEY_NOT_DEDICATED", { PLUSMEDIK_WEB_API_TOKEN: KEY }],
-    ["KEY_NOT_DEDICATED", { OPENAI_API_KEY: ` ${KEY} ` }],
+    ["INVALID_KEY", { PLUSMEDIK_HISTORY_KEY: "demasiado-corta" }],
+    ["KEY_NOT_DEDICATED", { PLUSMEDIK_HISTORY_KEY: KEY, PLUSMEDIK_MEMORY_KEY: KEY }],
+    ["KEY_NOT_DEDICATED", { PLUSMEDIK_HISTORY_KEY: HMAC }],
+    ["KEY_NOT_DEDICATED", { PLUSMEDIK_HISTORY_KEY: KEY, SUPABASE_SERVICE_ROLE_KEY: KEY }],
+    ["KEY_NOT_DEDICATED", { PLUSMEDIK_HISTORY_KEY: KEY, PLUSMEDIK_OUTBOX_KEY: KEY }],
+    ["KEY_NOT_DEDICATED", { PLUSMEDIK_HISTORY_KEY: KEY, WEBHOOK_SECRET: KEY }],
+    ["KEY_NOT_DEDICATED", { PLUSMEDIK_HISTORY_KEY: KEY, PLUSMEDIK_WEB_API_TOKEN: KEY }],
+    ["KEY_NOT_DEDICATED", { PLUSMEDIK_HISTORY_KEY: KEY, OPENAI_API_KEY: ` ${KEY} ` }],
     ["CONTACT_KEY_REQUIRED", { KAPSO_PHONE_NUMBER_ID: undefined }],
     ["CONTACT_KEY_REQUIRED", { KAPSO_PHONE_NUMBER_ID: "con espacios y <>" }],
+    ["CONTACT_KEY_REQUIRED", { PLUSMEDIK_CONTACT_HMAC_KEY: undefined }],
+    ["CONTACT_KEY_REQUIRED", { PLUSMEDIK_CONTACT_HMAC_KEY: "corta" }],
     ["INVALID_RETENTION", { PLUSMEDIK_HISTORY_RETENTION_DAYS: "0" }],
     ["INVALID_RETENTION", { PLUSMEDIK_HISTORY_RETENTION_DAYS: "3651" }],
     ["INVALID_RETENTION", { PLUSMEDIK_HISTORY_RETENTION_DAYS: "treinta" }]
   ])("configuración incompleta o insegura (%s): queda APAGADO y solo se registra un código", (code, override) => {
-    const { history, logs } = resolve({ ...valid, ...override });
+    const { history, logs } = resolve({ ...base, ...override });
     expect(history).toBeUndefined();
     expect(logs).toEqual([["message_history_config_invalid", { error: code }]]);
     expect(JSON.stringify(logs)).not.toContain(KEY);
@@ -345,7 +360,7 @@ function exportRow(seq: number, over: Partial<ExportedRow> & { text?: string; ke
   const direction = over.direction ?? "IN";
   const bodyCipher = over.text === undefined ? null : sealMessage(over.text, over.key ?? KEY, { accountId: ACCOUNT, contactKey: CONTACT, direction, messageId });
   return {
-    seq, contactKey: CONTACT, messageId, direction, actor: direction === "IN" ? "PATIENT" : "AGENT", origin: "cloud_api", kind: "TEXT", messageType: "text", bodyCipher, keyId: bodyCipher ? keyIdOf(over.key ?? KEY) : null,
+    seq, contactKey: CONTACT, messageId, direction, actor: direction === "IN" ? "PATIENT" : "AGENT", origin: "cloud_api", kind: "TEXT", messageType: "text", body: null, bodyCipher, keyId: bodyCipher ? keyIdOf(over.key ?? KEY) : null,
     mediaRef: null, state: direction === "IN" ? "RECEIVED" : "ACCEPTED", auditRunId: null, replyTo: null, occurredAt: "2026-01-01T00:00:00Z", deliveryAt: null, ...over
   } as ExportedRow;
 }
@@ -382,6 +397,18 @@ describe("exportHistory", () => {
   });
 });
 
+describe("exportHistory: texto en claro", () => {
+  it("el texto en claro se entrega tal cual, SIN ninguna clave; mezclado con filas cifradas, cada una por su camino", async () => {
+    const store = fakeStore({ exportPage: vi.fn(async () => ({ rows: [exportRow(1, { body: "en claro" }), exportRow(2, { text: "cifrado" }), exportRow(3, { text: "cifrado y sin clave", key: OTHER_KEY })] })) });
+    const out: Array<[string, string | undefined]> = [];
+    for await (const m of exportHistory({ store, accountId: ACCOUNT, keys: [KEY], reason: "auditoría de calidad" })) out.push([m.textStatus, m.text]);
+    expect(out).toEqual([["OK", "en claro"], ["OK", "cifrado"], ["UNREADABLE", undefined]]);
+    const none: string[] = [];
+    for await (const m of exportHistory({ store: fakeStore({ exportPage: vi.fn(async () => ({ rows: [exportRow(1, { body: "solo en claro" })] })) }), accountId: ACCOUNT, keys: [], reason: "auditoría de calidad" })) none.push(m.text ?? "");
+    expect(none).toEqual(["solo en claro"]);
+  });
+});
+
 describe("csvLine: seguro para abrir en una hoja de cálculo", () => {
   const message = (text: string) => ({ seq: 1, at: "2026-01-01T00:00:00Z", contactKey: CONTACT, messageId: "wamid.E1", direction: "IN", actor: "PATIENT", origin: null, kind: "TEXT", messageType: "text", mediaRef: null, state: "RECEIVED", deliveryAt: null, auditRunId: null, replyTo: null, textStatus: "OK", text }) as Parameters<typeof csvLine>[0];
 
@@ -410,7 +437,7 @@ describe("independencia y límites", () => {
 
   it("solo toca la base por funciones plusmedik_history_*", () => {
     const names = [...src("message-history.ts").matchAll(/call\("([a-z_]+)"/g)].map((match) => match[1]);
-    expect(new Set(names)).toEqual(new Set(["plusmedik_history_record", "plusmedik_history_attach_text", "plusmedik_history_delivery", "plusmedik_history_export", "plusmedik_history_erase", "plusmedik_history_purge", "plusmedik_history_gaps"]));
+    expect(new Set(names)).toEqual(new Set(["plusmedik_history_save", "plusmedik_history_attach", "plusmedik_history_delivery", "plusmedik_history_export", "plusmedik_history_erase", "plusmedik_history_purge", "plusmedik_history_gaps"]));
   });
 
   it("los demás módulos del agente solo reciben el historial inyectado: no lo crean, no leen su configuración y NO leen nada de él", () => {
