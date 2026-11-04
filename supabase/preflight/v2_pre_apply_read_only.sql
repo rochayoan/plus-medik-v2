@@ -1,4 +1,4 @@
--- PlusMedik V2 — verificación ANTES de aplicar las 22 migraciones (solo lectura)
+-- PlusMedik V2 — verificación ANTES de aplicar las 23 migraciones (solo lectura)
 -- GENERADO por scripts/migration-manifest.ts a partir de supabase/migrations/*.sql. NO editar a mano (una prueba falla si no coincide).
 -- SOLO LECTURA: una sola sentencia SELECT. No contiene DDL, DML, RPC ni datos clínicos; devuelve metadatos y conteos.
 -- Ejecutar exclusivamente en el proyecto Supabase cvokrtrdzxfchntwwslz (verificar el identificador en la URL del panel ANTES de ejecutar),
@@ -30,6 +30,7 @@
 --   20  20261108000000_plusmedik_quote_shadow_peek.sql  82d45e295d56a8580b882b5bfd94a2741b1961a315af4b7bf1e23b2beeecfe9f
 --   21  20261109000000_plusmedik_message_history.sql  00c79db4d432b9c1b799b6d726e48ab3e8fcec8f4007af22be97c707d3731547
 --   22  20261110000000_plusmedik_message_history_plaintext.sql  6bec8f72e94d362fa13ff31a914b0693eec67601b6b2c68b8d5a7f50c445a1fb
+--   23  20261111000000_plusmedik_message_history_phone.sql  67a862e32125d72007b0cfc4a2c7d3a6f9320f5067835f0eac9d6f730057105d
 --
 -- Resultado: una tabla (orden, seccion, comprobacion, estado, detalle). Estados: OK · INFO · WARN (revisar) · BLOCK (detenerse).
 -- La primera fila es el VEREDICTO. Guardar el resultado completo: las filas INSTANTANEA deben ser IDÉNTICAS antes y después.
@@ -318,7 +319,10 @@ manifest(mig, kind, name, parent) as (
     (21, 'table', 'plusmedik_message_history_access', ''),
     (22, 'column', 'body', 'plusmedik_message_history'),
     (22, 'function', 'plusmedik_history_attach', ''),
-    (22, 'function', 'plusmedik_history_save', '')
+    (22, 'function', 'plusmedik_history_save', ''),
+    (23, 'column', 'contact_phone', 'plusmedik_message_history'),
+    (23, 'function', 'plusmedik_history_put', ''),
+    (23, 'index', 'plusmedik_message_history_phone_idx', 'plusmedik_message_history')
 ),
 migration_files(mig, file) as (
   values
@@ -343,7 +347,8 @@ migration_files(mig, file) as (
     (19, '20261107000000_plusmedik_batch_fold.sql'),
     (20, '20261108000000_plusmedik_quote_shadow_peek.sql'),
     (21, '20261109000000_plusmedik_message_history.sql'),
-    (22, '20261110000000_plusmedik_message_history_plaintext.sql')
+    (22, '20261110000000_plusmedik_message_history_plaintext.sql'),
+    (23, '20261111000000_plusmedik_message_history_phone.sql')
 ),
 service_functions(name) as (
   values
@@ -379,6 +384,7 @@ service_functions(name) as (
     ('plusmedik_history_export'),
     ('plusmedik_history_gaps'),
     ('plusmedik_history_purge'),
+    ('plusmedik_history_put'),
     ('plusmedik_history_record'),
     ('plusmedik_history_save'),
     ('plusmedik_kb_approve'),

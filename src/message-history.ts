@@ -78,6 +78,8 @@ export function openMessage(sealed: string, secret: string, context: CipherConte
 export interface HistoryRow {
   accountId: string;
   contactKey: string;
+  // Teléfono del contacto, solo dígitos (migración 23). contactKey sigue siendo lo que separa una conversación de otra; el teléfono solo dice de quién es.
+  contactPhone?: string;
   messageId: string;
   direction: HistoryDirection;
   actor: HistoryActor;
@@ -98,6 +100,7 @@ export interface HistoryRow {
 export interface ExportedRow {
   seq: number;
   contactKey: string;
+  contactPhone: string | null;
   messageId: string;
   direction: HistoryDirection;
   actor: HistoryActor;
@@ -130,7 +133,7 @@ const outcomeOf = z.object({ outcome: z.string() });
 const exportShape = z.object({
   rows: z.array(
     z.object({
-      seq: z.number(), contact_key: z.string(), message_id: z.string(), direction: z.enum(["IN", "OUT"]),
+      seq: z.number(), contact_key: z.string(), contact_phone: z.string().nullish(), message_id: z.string(), direction: z.enum(["IN", "OUT"]),
       actor: z.enum(["PATIENT", "AGENT", "HUMAN", "OTHER_APP", "META_AGENT", "UNKNOWN"]), origin: z.string().nullable(),
       content_kind: z.enum(["TEXT", "AUDIO", "IMAGE", "OTHER"]), message_type: z.string().nullable(), body: z.string().nullish(), body_cipher: z.string().nullable(), key_id: z.string().nullable(),
       media_ref: z.string().nullable(), delivery_state: z.enum(["RECEIVED", "ACCEPTED", "UNCERTAIN", "SENT", "DELIVERED", "READ", "FAILED"]),
@@ -157,11 +160,13 @@ export function createSupabaseHistoryStore(options: SupabaseHistoryStoreOptions 
   };
   return {
     async record(row) {
-      const result = await call("plusmedik_history_save", {
+      // Con teléfono (migración 23) se usa plusmedik_history_put; sin él (no debería pasar: el contacto se identifica por su teléfono), plusmedik_history_save.
+      const result = await call(row.contactPhone ? "plusmedik_history_put" : "plusmedik_history_save", {
         p_account_id: row.accountId, p_contact_key: row.contactKey, p_message_id: row.messageId, p_direction: row.direction, p_actor: row.actor, p_origin: row.origin ?? null,
         p_content_kind: row.kind, p_message_type: row.messageType ?? null, p_body: row.body ?? null, p_body_cipher: row.bodyCipher ?? null, p_key_id: row.keyId ?? null, p_media_ref: row.mediaRef ?? null,
         p_delivery_state: row.state, p_audit_run_id: row.auditRunId ?? null, p_reply_to: row.replyTo ?? null, p_occurred_at: (row.occurredAt ?? new Date()).toISOString(),
-        p_retention_days: options.retentionDays ?? null
+        p_retention_days: options.retentionDays ?? null,
+        ...(row.contactPhone ? { p_contact_phone: row.contactPhone } : {})
       });
       return outcomeOf.parse(result).outcome === "recorded" ? "RECORDED" : "DUPLICATE";
     },
@@ -180,7 +185,7 @@ export function createSupabaseHistoryStore(options: SupabaseHistoryStoreOptions 
       );
       return {
         rows: parsed.rows.map((row) => ({
-          seq: row.seq, contactKey: row.contact_key, messageId: row.message_id, direction: row.direction, actor: row.actor, origin: row.origin, kind: row.content_kind, messageType: row.message_type,
+          seq: row.seq, contactKey: row.contact_key, contactPhone: row.contact_phone ?? null, messageId: row.message_id, direction: row.direction, actor: row.actor, origin: row.origin, kind: row.content_kind, messageType: row.message_type,
           body: row.body ?? null, bodyCipher: row.body_cipher, keyId: row.key_id, mediaRef: row.media_ref, state: row.delivery_state, auditRunId: row.audit_run_id, replyTo: row.reply_to, occurredAt: row.occurred_at, deliveryAt: row.delivery_at
         })),
         ...(parsed.next_after_seq !== null ? { next: parsed.next_after_seq } : {})
@@ -325,8 +330,13 @@ export function createMessageHistory(options: MessageHistoryOptions): MessageHis
   // El texto de un mensaje: en claro por defecto; cifrado si hay clave.
   const textOf = (text: string, contactKey: string, direction: HistoryDirection, messageId: string): Pick<HistoryRow, "body" | "bodyCipher" | "keyId"> =>
     secret ? { bodyCipher: sealMessage(text, secret, { accountId, contactKey, direction, messageId }), keyId: keyId! } : { body: text };
-  const rowOf = (base: Omit<HistoryRow, "accountId" | "body" | "bodyCipher" | "keyId">, contactKey: string, text: string | undefined): HistoryRow => ({
-    accountId, ...base,
+  // El teléfono se guarda solo con dígitos (los mismos con que se calcula contactKey); si no tiene un largo razonable, la fila se guarda igual, sin teléfono.
+  const phoneOf = (phone: string): Pick<HistoryRow, "contactPhone"> => {
+    const digits = phone.replace(/\D/g, "");
+    return /^\d{6,20}$/.test(digits) ? { contactPhone: digits } : {};
+  };
+  const rowOf = (base: Omit<HistoryRow, "accountId" | "body" | "bodyCipher" | "keyId" | "contactPhone">, contactKey: string, text: string | undefined, phone: string): HistoryRow => ({
+    accountId, ...base, ...phoneOf(phone),
     ...(text ? textOf(text, contactKey, base.direction, base.messageId) : {})
   });
 
@@ -361,7 +371,8 @@ export function createMessageHistory(options: MessageHistoryOptions): MessageHis
               const row = rowOf(
                 { messageId: entry.messageId, direction: entry.direction, actor: entry.actor, ...(entry.origin ? { origin: entry.origin } : {}), kind: entry.kind, ...(entry.messageType ? { messageType: entry.messageType } : {}), ...(entry.mediaRef ? { mediaRef: entry.mediaRef } : {}), state: entry.state, contactKey, ...(entry.occurredAt ? { occurredAt: entry.occurredAt } : {}) },
                 contactKey,
-                entry.text
+                entry.text,
+                entry.contactPhone
               );
               (await run(store.record(row))) === "RECORDED" ? counts.recorded++ : counts.duplicate++;
             } catch {
@@ -398,7 +409,8 @@ export function createMessageHistory(options: MessageHistoryOptions): MessageHis
         const row = rowOf(
           { messageId, direction: "OUT", actor: "AGENT", origin: "cloud_api", kind: "TEXT", messageType: "text", state, contactKey, ...(auditRunId ? { auditRunId } : {}), ...(ID.test(replyTo) ? { replyTo } : {}), occurredAt: at ?? new Date() },
           contactKey,
-          clip(text)
+          clip(text),
+          to
         );
         log("message_history", { op: "OUT", outcome: await run(store.record(row)), state });
       } catch {
@@ -418,7 +430,7 @@ export function createMessageHistory(options: MessageHistoryOptions): MessageHis
         let outcome = await run(store.attachText({ accountId, contactKey, messageId, ...textOf(clipped, contactKey, "IN", messageId) }));
         // El registro del audio (que se hace aparte, al llegar el webhook) aún no existe: se escribe completo, con la transcripción.
         if (outcome === "MISSING") {
-          const row = rowOf({ messageId, direction: "IN", actor: "PATIENT", kind: "AUDIO", messageType: "audio", state: "RECEIVED", contactKey, ...(at ? { occurredAt: at } : {}) }, contactKey, clipped);
+          const row = rowOf({ messageId, direction: "IN", actor: "PATIENT", kind: "AUDIO", messageType: "audio", state: "RECEIVED", contactKey, ...(at ? { occurredAt: at } : {}) }, contactKey, clipped, from);
           await run(store.record(row));
           outcome = "UPDATED";
         }
@@ -477,6 +489,7 @@ export interface ExportedMessage {
   seq: number;
   at: string;
   contactKey: string;
+  contactPhone: string | null;
   messageId: string;
   direction: HistoryDirection;
   actor: HistoryActor;
@@ -516,7 +529,7 @@ export async function* exportHistory(options: { store: HistoryStore; accountId: 
         }
       }
       yield {
-        seq: row.seq, at: row.occurredAt, contactKey: row.contactKey, messageId: row.messageId, direction: row.direction, actor: row.actor, origin: row.origin, kind: row.kind, messageType: row.messageType,
+        seq: row.seq, at: row.occurredAt, contactKey: row.contactKey, contactPhone: row.contactPhone, messageId: row.messageId, direction: row.direction, actor: row.actor, origin: row.origin, kind: row.kind, messageType: row.messageType,
         mediaRef: row.mediaRef, state: row.state, deliveryAt: row.deliveryAt, auditRunId: row.auditRunId, replyTo: row.replyTo, textStatus, ...(text !== undefined ? { text } : {})
       };
     }
@@ -526,7 +539,7 @@ export async function* exportHistory(options: { store: HistoryStore; accountId: 
 }
 
 // CSV para abrir en una hoja de cálculo: las celdas que empiezan con = + - @ se neutralizan (un mensaje de un paciente no debe poder ejecutar una fórmula).
-export const CSV_COLUMNS = ["seq", "at", "direction", "actor", "origin", "kind", "messageType", "state", "deliveryAt", "contactKey", "messageId", "replyTo", "auditRunId", "mediaRef", "textStatus", "text"] as const;
+export const CSV_COLUMNS = ["seq", "at", "direction", "actor", "origin", "kind", "messageType", "state", "deliveryAt", "contactPhone", "contactKey", "messageId", "replyTo", "auditRunId", "mediaRef", "textStatus", "text"] as const;
 export function csvLine(message: ExportedMessage): string {
   const cell = (value: unknown): string => {
     let text = value === undefined || value === null ? "" : String(value);

@@ -1,6 +1,6 @@
 # G6.5 · Historial de mensajes
 
-Estado: implementado y probado. **Encendido por defecto y sin variables nuevas.** Requiere las **migraciones 21 y 22** (aditivas). No usa cola, cron ni rutas HTTP nuevas.
+Estado: implementado y probado. **Encendido por defecto y sin variables nuevas.** Requiere las **migraciones 21, 22 y 23** (aditivas). No usa cola, cron ni rutas HTTP nuevas.
 
 ## Qué hace
 
@@ -37,7 +37,7 @@ No usa la memoria conversacional ni el modelo y **no influye en ninguna decisió
 
 ## Datos y acceso
 
-- **Sin teléfono en la tabla:** solo `contact_key`, el HMAC del contacto que ya usan los turnos (incluye la línea). Para saber de qué paciente es, se calcula esa clave con el teléfono (`scripts/history-export.ts --phone`). **Sin enlaces** de medios ni credenciales.
+- **Cómo se identifica a cada contacto:** `contact_key`, el HMAC del contacto que ya usan los turnos (incluye la línea de WhatsApp), separa una conversación de otra y es lo que debe usar cualquier memoria conversacional. Desde la migración 23 cada fila guarda además el **teléfono** (`contact_phone`, solo dígitos), para consultar una conversación por número desde otros proyectos; no reemplaza a `contact_key`. Las filas anteriores a la 23 tienen `contact_phone` nulo hasta que ese contacto vuelve a escribir. **Sin enlaces** de medios ni credenciales.
 - **Acceso:** RLS activo y **ningún privilegio directo** sobre las tablas, ni siquiera `service_role`; solo funciones `SECURITY DEFINER` con `search_path` vacío, concedidas únicamente a `service_role`. Los demás proyectos leen con la clave de servicio, llamando a `plusmedik_history_export` (con motivo y rastro) o, si prefieren una vista propia, creándola ellos.
 - **Registros de Vercel:** solo contadores y códigos; nunca texto, teléfonos, ids de mensaje ni claves.
 - **Datos de salud en claro:** los mensajes pueden incluir temas de salud y quedan en claro dentro de la base. Quien tenga la clave de servicio de Supabase puede leerlos: protégela como siempre.
@@ -84,7 +84,7 @@ Límite honesto: el webhook responde 200 de inmediato (política de ACK de siemp
 
 ## Puesta en marcha
 
-1. Aplicar las migraciones **21** y **22** en el SQL Editor (en ese orden; `supabase/preflight/v2_post_apply_read_only.sql` verifica).
+1. Aplicar las migraciones **21**, **22** y **23** en el SQL Editor (en ese orden; la 23 va ANTES de desplegar el código que guarda el teléfono; `supabase/preflight/v2_post_apply_read_only.sql` verifica).
 2. Hacer el merge del PR y que Vercel despliegue. En los registros debe salir `history_scope {"enabled":true}`.
 3. Probar con un número propio y comprobar `select direction, body from public.plusmedik_message_history order by seq desc limit 10;` (solo desde el SQL Editor, que corre como `postgres`).
 4. Para volver atrás: `PLUSMEDIK_HISTORY=off` y redesplegar.
