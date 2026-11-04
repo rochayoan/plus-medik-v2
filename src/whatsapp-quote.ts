@@ -3,6 +3,7 @@ import type { AnalysisResult } from "./analyze.js";
 import { catalogFingerprint, processingFailureCode, type AuditRepository, type ProcessingPhase } from "./audit.js";
 import { withAiCallObserver, type AiCallEvent } from "./cache.js";
 import { buildVisionDiagnostic, visionDiagnosticKeyFor } from "./vision-diagnostics.js";
+import type { MessageHistory } from "./message-history.js";
 import { runGuardedTurn, type Produced, type TurnContext, type TurnProducer, type TurnsConfig } from "./guarded-turn.js";
 import type { PublicQuote } from "./partial-auto.js";
 import type { CatalogStudy } from "./types.js";
@@ -135,6 +136,8 @@ export interface QuoteDeps {
   sendText(to: string, body: string): Promise<void | { providerMessageId?: string }>;
   log(event: string, data: Record<string, unknown>): void;
   audit?: AuditRepository;
+  // Historial de mensajes para auditoría (apagado si falta; ver src/message-history.ts): registra la respuesta que Kapso aceptó. Nunca altera ni retrasa el envío.
+  history?: MessageHistory;
   // Cada cuántos ms se renueva el lease mientras se procesa (por defecto 40 s con un lease de 120 s). Solo disponibilidad: la seguridad no depende de esto.
   leaseRenewIntervalMs?: number;
   // true: si el claim falla (la base no responde) NO se responde, porque no se puede demostrar que nadie más responderá. Por defecto false (política heredada).

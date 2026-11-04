@@ -1,11 +1,11 @@
--- PlusMedik V2 — verificación DESPUÉS de aplicar las 20 migraciones (solo lectura)
+-- PlusMedik V2 — verificación DESPUÉS de aplicar las 22 migraciones (solo lectura)
 -- GENERADO por scripts/migration-manifest.ts a partir de supabase/migrations/*.sql. NO editar a mano (una prueba falla si no coincide).
 -- SOLO LECTURA: una sola sentencia SELECT. No contiene DDL, DML, RPC ni datos clínicos; devuelve metadatos y conteos.
 -- Ejecutar exclusivamente en el proyecto Supabase cvokrtrdzxfchntwwslz (verificar el identificador en la URL del panel ANTES de ejecutar),
 -- con el rol administrativo del SQL Editor. Es seguro ejecutarla dentro de una transacción de solo lectura.
 -- Esperado al completar el conjunto: VEREDICTO = OK, todas las migraciones completas y sin BLOCK; filas INSTANTANEA idénticas antes/después.
 -- También sirve después de CADA migración: las posteriores aparecerán como pendientes (INFO) y las aplicadas deben estar completas.
--- Funciones con EXECUTE para service_role esperadas por las migraciones: 65.
+-- Funciones con EXECUTE para service_role esperadas por las migraciones: 74.
 --
 -- Migraciones cubiertas (sha256 del archivo con saltos de línea LF):
 --   01  20261020000000_plusmedik_persistent_audit.sql  1110edc1e1b3f6c4961b87bdb763ecea535ef5b1d6ba9086ff314a86b88ad61a
@@ -28,6 +28,8 @@
 --   18  20261106000000_plusmedik_daily_reply_cap.sql  c16ed9d3088c055169e62f7a75cce78f25855d44ddba57a9a77128387b9cc606
 --   19  20261107000000_plusmedik_batch_fold.sql  c64848610b18f85e0b0a388adb0263379478af5aba86b66c2ea62ef87814e25a
 --   20  20261108000000_plusmedik_quote_shadow_peek.sql  82d45e295d56a8580b882b5bfd94a2741b1961a315af4b7bf1e23b2beeecfe9f
+--   21  20261109000000_plusmedik_message_history.sql  00c79db4d432b9c1b799b6d726e48ab3e8fcec8f4007af22be97c707d3731547
+--   22  20261110000000_plusmedik_message_history_plaintext.sql  6bec8f72e94d362fa13ff31a914b0693eec67601b6b2c68b8d5a7f50c445a1fb
 --
 -- Resultado: una tabla (orden, seccion, comprobacion, estado, detalle). Estados: OK · INFO · WARN (revisar) · BLOCK (detenerse).
 -- La primera fila es el VEREDICTO. Guardar el resultado completo: las filas INSTANTANEA deben ser IDÉNTICAS antes y después.
@@ -299,7 +301,24 @@ manifest(mig, kind, name, parent) as (
     (17, 'table', 'plusmedik_conversation_messages', ''),
     (18, 'function', 'plusmedik_turn_reserve_send_capped', ''),
     (19, 'function', 'plusmedik_turn_fold', ''),
-    (20, 'function', 'plusmedik_quote_shadow_peek', '')
+    (20, 'function', 'plusmedik_quote_shadow_peek', ''),
+    (21, 'function', 'plusmedik_history_attach_text', ''),
+    (21, 'function', 'plusmedik_history_delivery', ''),
+    (21, 'function', 'plusmedik_history_erase', ''),
+    (21, 'function', 'plusmedik_history_export', ''),
+    (21, 'function', 'plusmedik_history_gaps', ''),
+    (21, 'function', 'plusmedik_history_purge', ''),
+    (21, 'function', 'plusmedik_history_rank', ''),
+    (21, 'function', 'plusmedik_history_record', ''),
+    (21, 'index', 'plusmedik_message_history_access_at_idx', 'plusmedik_message_history_access'),
+    (21, 'index', 'plusmedik_message_history_contact_idx', 'plusmedik_message_history'),
+    (21, 'index', 'plusmedik_message_history_expiry_idx', 'plusmedik_message_history'),
+    (21, 'index', 'plusmedik_message_history_time_idx', 'plusmedik_message_history'),
+    (21, 'table', 'plusmedik_message_history', ''),
+    (21, 'table', 'plusmedik_message_history_access', ''),
+    (22, 'column', 'body', 'plusmedik_message_history'),
+    (22, 'function', 'plusmedik_history_attach', ''),
+    (22, 'function', 'plusmedik_history_save', '')
 ),
 migration_files(mig, file) as (
   values
@@ -322,7 +341,9 @@ migration_files(mig, file) as (
     (17, '20261105000000_plusmedik_conversation_memory.sql'),
     (18, '20261106000000_plusmedik_daily_reply_cap.sql'),
     (19, '20261107000000_plusmedik_batch_fold.sql'),
-    (20, '20261108000000_plusmedik_quote_shadow_peek.sql')
+    (20, '20261108000000_plusmedik_quote_shadow_peek.sql'),
+    (21, '20261109000000_plusmedik_message_history.sql'),
+    (22, '20261110000000_plusmedik_message_history_plaintext.sql')
 ),
 service_functions(name) as (
   values
@@ -351,6 +372,15 @@ service_functions(name) as (
     ('plusmedik_crm_outbox_stats'),
     ('plusmedik_crm_outbox_status'),
     ('plusmedik_facts_usage'),
+    ('plusmedik_history_attach'),
+    ('plusmedik_history_attach_text'),
+    ('plusmedik_history_delivery'),
+    ('plusmedik_history_erase'),
+    ('plusmedik_history_export'),
+    ('plusmedik_history_gaps'),
+    ('plusmedik_history_purge'),
+    ('plusmedik_history_record'),
+    ('plusmedik_history_save'),
     ('plusmedik_kb_approve'),
     ('plusmedik_kb_create_draft'),
     ('plusmedik_kb_deactivate'),
@@ -453,7 +483,7 @@ checks(ord, section, item, status, detail) as (
     from v2_functions f cross join roles r
     where has_function_privilege(r.anon, f.oid, 'EXECUTE') or has_function_privilege(r.authenticated, f.oid, 'EXECUTE')
        or exists (select 1 from aclexplode(coalesce(f.proacl, acldefault('f', f.proowner))) a where a.grantee = 0 and a.privilege_type = 'EXECUTE')
-  union all select 31, 'FUNCIONES', 'service_role_ejecuta_las_esperadas', case when count(*) = 0 then 'OK' else 'BLOCK' end, coalesce('sin EXECUTE: ' || string_agg(distinct f.proname, ', '), 'las 65 funciones de servicio tienen EXECUTE para service_role')
+  union all select 31, 'FUNCIONES', 'service_role_ejecuta_las_esperadas', case when count(*) = 0 then 'OK' else 'BLOCK' end, coalesce('sin EXECUTE: ' || string_agg(distinct f.proname, ', '), 'las 74 funciones de servicio tienen EXECUTE para service_role')
     from v2_functions f cross join roles r where f.expects_service and not coalesce(has_function_privilege(r.service, f.oid, 'EXECUTE'), false)
   union all select 32, 'FUNCIONES', 'security_definer_sin_search_path_fijo', case when count(*) = 0 then 'OK' else 'BLOCK' end, coalesce(string_agg(distinct f.proname, ', '), 'todas fijan search_path')
     from v2_functions f where f.prosecdef and not coalesce(array_to_string(f.proconfig, ',') like '%search_path=%', false)

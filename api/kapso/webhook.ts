@@ -16,6 +16,7 @@ import { ANSWER_TEXTS, detectTopics, lazyKnowledge, ttlCache } from "../../src/k
 import { resolveConversationModel } from "../../src/conversation-openai.js";
 import { resolveConversationMemory } from "../../src/conversation-memory.js";
 import { resolveDailyReplyCap } from "../../src/daily-reply-cap.js";
+import { resolveMessageHistory } from "../../src/message-history.js";
 import { resolveStudyInterpreter } from "../../src/study-interpreter-openai.js";
 import { resolveCrmOutbox } from "../../src/crm-outbox/config.js";
 import { createCrmHandoffSink } from "../../src/crm-outbox/handoff-sink.js";
@@ -115,6 +116,11 @@ if (attentionFilter.enabled && "error" in attentionFilter) logLine("attention_fi
 // de contacto y respetan la pausa manual del CRM; los demás pacientes siguen el flujo de siempre. No toca la pausa automática por mensajes humanos (eso es PLUSMEDIK_HUMAN_CONTROL) ni ALLOWED_PHONES.
 const scopedContactControl = humanControlEnabled ? undefined : resolveScopedContactControl(process.env);
 const contactKeyFor = (phone: string) => contactKeyOf({ hmacKey: process.env.PLUSMEDIK_CONTACT_HMAC_KEY, labPhoneNumberId: process.env.KAPSO_PHONE_NUMBER_ID, contactPhone: phone });
+// Historial de TODOS los mensajes (ENCENDIDO por defecto, sin variables nuevas; ver docs/g6/05-historial-de-mensajes.md y src/message-history.ts): guarda en Supabase lo que escriben los pacientes, las respuestas del agente
+// y los mensajes de la recepción humana, para conservarlos y usarlos desde otros proyectos. Exige las migraciones 21 y 22 aplicadas (sin ellas la escritura falla sin afectar al agente), PLUSMEDIK_CONTACT_HMAC_KEY y
+// KAPSO_PHONE_NUMBER_ID. PLUSMEDIK_HISTORY=off lo apaga; PLUSMEDIK_HISTORY_KEY (opcional) lo guarda cifrado. Es independiente de la memoria conversacional y del resto del agente.
+const messageHistory = resolveMessageHistory(process.env, logLine, { contactKeyFor });
+logLine("history_scope", { enabled: messageHistory !== undefined, encrypted: Boolean(process.env.PLUSMEDIK_HISTORY_KEY?.trim()) });
 
 // El sistema de archivos de Vercel es de solo lectura: sin caché local (el registro de uso, si se escribe, va a /tmp).
 process.env.AI_CACHE ??= "off";
@@ -242,6 +248,7 @@ const realDeps: QuoteDeps = {
     quoteShadowPeek: (...args) => audit().quoteShadowPeek!(...args)
   },
   log: logLine,
+  ...(messageHistory ? { history: messageHistory } : {}),
   requireAuditGuard: humanControlEnabled || turnsEnabled || on("REQUIRE_AUDIT_GUARD"),
   humanControl: humanControlEnabled ? { contactKeyFor } : undefined,
   scopedControl: scopedContactControl ? { contactKeyFor, covers: scopedContactControl.covers } : undefined,
@@ -292,6 +299,7 @@ export async function POST(request: Request): Promise<Response> {
       ? { ...realDeps, turns: undefined, requireAuditGuard: humanControlEnabled || on("REQUIRE_AUDIT_GUARD") }
       : undefined,
     schedule: (task) => waitUntil(task),
+    ...(messageHistory ? { history: messageHistory } : {}),
     humanControl: humanControlEnabled ? { labPhoneNumberId: process.env.KAPSO_PHONE_NUMBER_ID, contactKeyFor, attention: attentionProxy } : undefined,
     log: realDeps.log
   });

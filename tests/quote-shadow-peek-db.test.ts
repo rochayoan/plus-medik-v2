@@ -22,10 +22,12 @@ describe("migración 20 (plusmedik_quote_shadow_peek): forma estática", () => {
   const raw = readFileSync(join(dir, PEEK), "utf8").replaceAll("\r\n", "\n");
   const code = raw.split("\n").filter((line) => !/^\s*--/.test(line)).join("\n");
 
-  it("es la última de la cadena (20), posterior a la del buffering nativo (19)", () => {
-    expect(MIGRATIONS).toHaveLength(20);
-    expect(MIGRATIONS.at(-1)).toBe(PEEK);
-    expect(MIGRATIONS.at(-2)).toBe("20261107000000_plusmedik_batch_fold.sql");
+  it("es la vigésima de la cadena, posterior a la del buffering nativo (19) y anterior a las del historial de mensajes (21 y 22)", () => {
+    expect(MIGRATIONS).toHaveLength(22);
+    expect(MIGRATIONS.at(-1)).toBe("20261110000000_plusmedik_message_history_plaintext.sql");
+    expect(MIGRATIONS.at(-2)).toBe("20261109000000_plusmedik_message_history.sql");
+    expect(MIGRATIONS.at(-3)).toBe(PEEK);
+    expect(MIGRATIONS.at(-4)).toBe("20261107000000_plusmedik_batch_fold.sql");
   });
 
   it("es ADITIVA: una sola función nueva y NADA que escriba, bloquee o borre; no toca el CRM ni el catálogo", () => {
