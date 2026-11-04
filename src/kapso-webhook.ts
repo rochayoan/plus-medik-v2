@@ -1,5 +1,6 @@
 import { AuditWriteError } from "./audit.js";
 import { classifyKapsoEvent, eventsOf, type AttentionRepository, type ClassifiedKapsoEvent, type KapsoEventKind } from "./human-control.js";
+import type { MessageHistory } from "./message-history.js";
 import { extractIncomingTurns, hasProcessableTurns, processTurns } from "./turns.js";
 import { extractIncomingImages, handleImageMessage, isAllowedPhone, maskPhone, verifyWebhookSignature, type QuoteDeps } from "./whatsapp-quote.js";
 
@@ -35,6 +36,8 @@ export interface KapsoWebhookDeps {
     contactKeyFor(phone: string): string | undefined;
     attention: AttentionRepository;
   };
+  // Historial de mensajes para auditoría (apagado si falta; ver src/message-history.ts). Solo OBSERVA: se registra en segundo plano, nunca retrasa ni cambia la respuesta del webhook.
+  history?: MessageHistory;
   log(event: string, data: Record<string, unknown>): void;
 }
 
@@ -58,6 +61,9 @@ export async function handleKapsoWebhook(request: Request, deps: KapsoWebhookDep
   const counts: Partial<Record<KapsoEventKind, number>> = {};
   for (const event of classified) counts[event.kind] = (counts[event.kind] ?? 0) + 1;
   deps.log("webhook_events", { counts });
+
+  // Historial de auditoría: entrantes, mensajes humanos y estados de entrega, en segundo plano y antes de cualquier otra decisión (es idempotente, así que un reintento de Kapso no duplica nada).
+  if (deps.history) deps.schedule(deps.history.observe({ raws, classified, inScope: (phone) => isAllowedPhone(phone, deps.allowedPhones) }));
 
   // Control de atención humana: se registra ANTES de responder (ver política de ACK).
   const control = deps.humanControl;

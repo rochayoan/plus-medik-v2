@@ -85,6 +85,8 @@ export async function resolveAudioTurns(args: { indices: readonly number[]; turn
         const resolved = await audio.resolve({ messageId: turn.messageId, from: turn.from, ...(turn.mediaUrl ? { mediaUrl: turn.mediaUrl } : {}), ...(turn.mediaId ? { mediaId: turn.mediaId } : {}) });
         turns[index] = resolved.ok ? { ...turn, kind: "TEXT", text: resolved.text, fromAudio: true } : { ...turn, kind: "OTHER", audioFailure: resolved.code };
         args.deps.log("audio_turn", { outcome: resolved.ok ? "TRANSCRIBED" : "FAILED", ...(resolved.ok ? {} : { code: resolved.code }) });
+        // Historial de auditoría: la transcripción se agrega al registro del audio (nunca lanza ni altera el turno).
+        if (resolved.ok) await args.deps.history?.recordTranscript({ from: turn.from, messageId: turn.messageId, text: resolved.text, ...(turn.timestamp ? { at: new Date(turn.timestamp * 1000) } : {}) });
       } catch {
         turns[index] = { ...turn, kind: "OTHER", audioFailure: "UNAVAILABLE" };
       }

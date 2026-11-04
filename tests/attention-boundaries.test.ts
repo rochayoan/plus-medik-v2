@@ -144,7 +144,8 @@ describe("G6.0: el contexto que recibe el modelo", () => {
     expect(turns).toMatch(/audit\.quoteLastStudies\?\.\(runId, lease,/);
     // el estado de la conversación existe con las sesiones de cotización (lo pide la atención selectiva o el silencio ante lo ajeno, cada uno por su bandera)
     expect(turns).toMatch(/\.\.\.\(deps\.turns\?\.quoteSessions\s*\? \{[^}]*async memory\(options\?: \{ wait\?: boolean \}\)/);
-    expect(readdirSync(join(root, "supabase/migrations")).filter((name) => name.endsWith(".sql"))).toHaveLength(20);
+    // sin contar la migración 21 (historial de mensajes, que es de otra capa): esta memoria no agregó ninguna
+    expect(readdirSync(join(root, "supabase/migrations")).filter((name) => name.endsWith(".sql") && !name.includes("message_history"))).toHaveLength(20);
     expect(code(join(root, "src/attention-filter.ts"))).not.toMatch(/plusmedik_|rpc\(/);
   });
 

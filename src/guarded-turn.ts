@@ -256,6 +256,17 @@ export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claime
     if (delivered && result === "conversation" && contactKey && deps.turns?.memory) {
       await deps.turns.memory.rememberReply({ contactKey, messageId: delivered.providerMessageId ?? `reply:${ref.messageId}`, text: reply });
     }
+    // Historial de auditoría: la respuesta que Kapso aceptó (o cuyo envío quedó incierto). Va después del envío y de su registro: una falla del historial nunca altera el resultado.
+    if (deps.history) {
+      await deps.history.recordAgentReply({
+        to: ref.from,
+        messageId: delivered ? delivered.providerMessageId ?? `reply:${ref.messageId}` : `uncertain:${ref.messageId}`,
+        replyTo: ref.messageId,
+        text: reply,
+        state: delivered ? "ACCEPTED" : "UNCERTAIN",
+        ...(auditRunId ? { auditRunId } : {})
+      });
+    }
     return result;
   }
 

@@ -5,6 +5,9 @@ import type { PgDatabase } from "./ephemeral-postgres.js";
 // PostgreSQL real sin red. Un SQLSTATE de la forma PT### se devuelve como HTTP ###, igual que hace PostgREST.
 
 export const PARAM_TYPES: Record<string, string> = {
+  // historial de mensajes (migración 21)
+  p_account_id: "text", p_direction: "text", p_origin: "text", p_content_kind: "text", p_message_type: "text", p_body_cipher: "text", p_key_id: "text", p_media_ref: "text", p_delivery_state: "text",
+  p_audit_run_id: "uuid", p_reply_to: "text", p_retention_days: "integer", p_state: "text", p_at: "timestamptz", p_from: "timestamptz", p_to: "timestamptz", p_after_seq: "bigint", p_since: "timestamptz",
   p_run_id: "uuid", p_payload: "jsonb", p_owner: "text", p_fence: "bigint", p_close: "jsonb", p_kind: "text", p_lease_seconds: "integer", p_reply: "jsonb", p_message_id: "text", p_media_id: "text",
   p_schema_version: "integer", p_engine_version: "text", p_flags: "jsonb", p_max_attempts: "integer", p_reserved_grace_seconds: "integer", p_abandon_grace_seconds: "integer", p_limit: "integer",
   p_refs: "jsonb", p_key: "text", p_actor_id: "text", p_actor_type: "text", p_actor_role: "text", p_source_ref: "text", p_valid_from: "timestamptz", p_valid_until: "timestamptz", p_version_id: "uuid", p_status: "text",
@@ -36,7 +39,7 @@ export const newNetwork = (): Network => ({ down: false, downFor: new Set(), cal
 export function postgrestOverPsql(db: PgDatabase, network: Network): typeof fetch {
   return (async (input: unknown, init?: RequestInit) => {
     const name = String(input).split("/rest/v1/rpc/")[1];
-    if (!name || !/^plusmedik_(audit|attention|turn|kb|reply_guard|quote|study|facts|crm)_[a-z_]+$/.test(name)) throw new Error("solo RPC de auditoría o atención");
+    if (!name || !/^plusmedik_(audit|attention|turn|kb|reply_guard|quote|study|facts|crm|history)_[a-z_]+$/.test(name)) throw new Error("solo RPC de auditoría o atención");
     network.calls.push(name);
     if (network.down || network.downFor.has(name)) throw new TypeError("fetch failed");
     const args = JSON.parse(String(init?.body)) as Record<string, unknown>;

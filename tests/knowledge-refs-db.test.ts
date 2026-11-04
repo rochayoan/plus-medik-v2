@@ -182,7 +182,7 @@ describe("la migración 9 es aditiva y no cambia nada anterior", () => {
   it("es la novena (la 10 es la guarda de respuestas, G3.2; la 11, las sesiones de cotización, G4.0) y las ocho anteriores no se modificaron (hashes fijados)", () => {
     const files = readdirSync(dir).filter((name) => name.endsWith(".sql")).sort();
     expect(files[8]).toBe(REFS);
-    expect(files).toHaveLength(20);
+    expect(files).toHaveLength(21);
     expect(Object.fromEntries(files.slice(0, 8).map((name) => [name, sha(name)]))).toEqual({
       "20261020000000_plusmedik_persistent_audit.sql": "1110edc1e1b3f6c4961b87bdb763ecea535ef5b1d6ba9086ff314a86b88ad61a",
       "20261021000000_plusmedik_audit_telemetry.sql": "08e555cf0c872ce2380cbd5046c2296a525c20b6caaddee6ae51ccdb53243256",
