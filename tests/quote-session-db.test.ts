@@ -616,7 +616,7 @@ describe.skipIf(!bin)("sesiones de cotización contra PostgreSQL real (migració
     it("es la undécima (la 12 son los datos por estudio, G4.1; la 14 es el flujo por texto, G5.9) y las diez anteriores no se modificaron (hash de la 10 fijado)", () => {
       expect(MIGRATIONS[10]).toBe(SESSIONS);
       expect(MIGRATIONS[13]).toBe(TEXT_FLOW);
-      expect(MIGRATIONS).toHaveLength(22);
+      expect(MIGRATIONS).toHaveLength(23);
       expect(sha("20261029000000_plusmedik_reply_guard.sql")).toBe("689c71aa2de466a38cf93fdfeb853a90a8f4ac3bca232995df194014456aec3f");
     });
 

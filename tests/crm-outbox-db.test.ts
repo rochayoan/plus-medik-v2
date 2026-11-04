@@ -420,7 +420,7 @@ describe.skipIf(!bin)("cola de salida hacia el CRM contra PostgreSQL real (migra
 
     it("es la trece (la 14, G5.9, solo reemplaza dos funciones de la 11) y las doce anteriores no se modificaron (hash de la 12 fijado)", () => {
       expect(MIGRATIONS[12]).toBe(OUTBOX);
-      expect(MIGRATIONS).toHaveLength(22);
+      expect(MIGRATIONS).toHaveLength(23);
       expect(sha("20261031000000_plusmedik_study_facts.sql")).toBe("0958eb09426a1b56305f0988c97c21163ea44dd71108bb66e48d52fc6aae8391");
     });
 

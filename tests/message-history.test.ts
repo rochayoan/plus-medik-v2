@@ -174,7 +174,10 @@ describe("servicio: observe", () => {
     const row = store.rows[0]!;
     expect(row).toMatchObject({ accountId: ACCOUNT, contactKey: CONTACT, messageId: "wamid.T1", direction: "IN", actor: "PATIENT", kind: "TEXT", state: "RECEIVED", keyId: keyIdOf(KEY) });
     expect(JSON.stringify(row)).not.toContain(SENTINEL);
-    expect(JSON.stringify(row)).not.toContain(PHONE);
+    // el teléfono (solo dígitos) viaja en contactPhone, pero jamás dentro del texto cifrado ni en los registros
+    expect(row.contactPhone).toBe(PHONE);
+    expect(JSON.stringify({ ...row, contactPhone: undefined })).not.toContain(PHONE);
+    expect(JSON.stringify(logs)).not.toContain(PHONE);
     expect(openMessage(row.bodyCipher!, KEY, { accountId: ACCOUNT, contactKey: CONTACT, direction: "IN", messageId: "wamid.T1" })).toBe(`dolor de cabeza ${SENTINEL}`);
     expect(logs).toEqual([["message_history", { op: "OBSERVE", recorded: 1, duplicate: 0, statusUpdated: 0, statusIgnored: 0, failed: 0, skipped: 0 }]]);
   });
@@ -436,8 +439,8 @@ describe("independencia y límites", () => {
   });
 
   it("solo toca la base por funciones plusmedik_history_*", () => {
-    const names = [...src("message-history.ts").matchAll(/call\("([a-z_]+)"/g)].map((match) => match[1]);
-    expect(new Set(names)).toEqual(new Set(["plusmedik_history_save", "plusmedik_history_attach", "plusmedik_history_delivery", "plusmedik_history_export", "plusmedik_history_erase", "plusmedik_history_purge", "plusmedik_history_gaps"]));
+    const names = [...src("message-history.ts").matchAll(/"(plusmedik_history_[a-z_]+)"/g)].map((match) => match[1]);
+    expect(new Set(names)).toEqual(new Set(["plusmedik_history_save", "plusmedik_history_put", "plusmedik_history_attach", "plusmedik_history_delivery", "plusmedik_history_export", "plusmedik_history_erase", "plusmedik_history_purge", "plusmedik_history_gaps"]));
   });
 
   it("los demás módulos del agente solo reciben el historial inyectado: no lo crean, no leen su configuración y NO leen nada de él", () => {

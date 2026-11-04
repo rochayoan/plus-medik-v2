@@ -6,7 +6,7 @@ import type { PgDatabase } from "./ephemeral-postgres.js";
 
 export const PARAM_TYPES: Record<string, string> = {
   // historial de mensajes (migración 21)
-  p_account_id: "text", p_body: "text", p_direction: "text", p_origin: "text", p_content_kind: "text", p_message_type: "text", p_body_cipher: "text", p_key_id: "text", p_media_ref: "text", p_delivery_state: "text",
+  p_account_id: "text", p_contact_phone: "text", p_body: "text", p_direction: "text", p_origin: "text", p_content_kind: "text", p_message_type: "text", p_body_cipher: "text", p_key_id: "text", p_media_ref: "text", p_delivery_state: "text",
   p_audit_run_id: "uuid", p_reply_to: "text", p_retention_days: "integer", p_state: "text", p_at: "timestamptz", p_from: "timestamptz", p_to: "timestamptz", p_after_seq: "bigint", p_since: "timestamptz",
   p_run_id: "uuid", p_payload: "jsonb", p_owner: "text", p_fence: "bigint", p_close: "jsonb", p_kind: "text", p_lease_seconds: "integer", p_reply: "jsonb", p_message_id: "text", p_media_id: "text",
   p_schema_version: "integer", p_engine_version: "text", p_flags: "jsonb", p_max_attempts: "integer", p_reserved_grace_seconds: "integer", p_abandon_grace_seconds: "integer", p_limit: "integer",
