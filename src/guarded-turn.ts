@@ -53,7 +53,7 @@ export interface TurnsConfig {
   dailyCap?: { max: number; windowSeconds: number };
   // Memoria conversacional corta (apagada si falta; ver src/conversation-memory.ts): se guardan los mensajes de texto del paciente y las respuestas conversacionales confirmadas como enviadas.
   memory?: ConversationMemory;
-  // Memoria estructurada en SOMBRA (PLUSMEDIK_LLM_CONVERSATION=on; apagada si falta; ver src/conversation-state-store.ts): solo observa y registra; nunca cambia una respuesta, un lease ni un envío.
+  // Memoria estructurada en SOMBRA (la bandera del agente conversacional; apagada si falta; ver src/conversation-state-store.ts): solo observa y registra; nunca cambia una respuesta, un lease ni un envío.
   convState?: ConversationRecorder;
   // AGENTE CONVERSACIONAL ÚNICO (apagado si falta; ver src/agent/pilot.ts): mientras el interruptor de emergencia de la base esté encendido, decide la respuesta de un lote de
   // texto; la ENVÍA esta misma máquina (lease, reserva, pausa humana, un envío por lote, tope). Si no puede o no debe responder, responde la ruta de siempre.

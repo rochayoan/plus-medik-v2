@@ -125,7 +125,7 @@ export interface CrmAttentionDeps {
   config: CrmControlConfig | undefined;
   // Se pide al primer uso real (así una base sin configurar no rompe al cargar el módulo).
   repository(): CrmAttentionRepository;
-  // Memoria estructurada en SOMBRA (PLUSMEDIK_LLM_CONVERSATION=on): anota que una persona reanudó al agente. Se carga solo si la bandera está encendida (apagada, esta ruta no importa nada nuevo). Mejor esfuerzo:
+  // Memoria estructurada en SOMBRA (la bandera del agente conversacional): anota que una persona reanudó al agente. Se carga solo si la bandera está encendida (apagada, esta ruta no importa nada nuevo). Mejor esfuerzo:
   // nunca cambia la respuesta al CRM ni el estado de atención.
   convState?: () => Promise<{ humanResume(input: { contactKey: string; operationId: string }): void; flush(timeoutMs?: number): Promise<void> } | undefined>;
   log(event: string, data: Record<string, unknown>): void;

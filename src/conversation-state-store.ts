@@ -8,7 +8,7 @@ import { classifyText, DRAFT_TEXTS } from "./text-handler.js";
 
 // Persistencia, lectura y REGISTRO EN SOMBRA de la memoria de conversación (Fase 1 del plan G7). Ver src/conversation-state.ts (dominio puro) y supabase/migrations/20261112000000 (tabla de eventos).
 //
-// MODO SOMBRA (PLUSMEDIK_LLM_CONVERSATION=on; ausente u «off» = apagado; cualquier otro valor = apagado y un código en el registro): solo OBSERVA. No cambia ninguna respuesta, no toma ni espera
+// MODO SOMBRA (la bandera del agente conversacional; ausente u «off» = apagado; cualquier otro valor = apagado y un código en el registro): solo OBSERVA. No cambia ninguna respuesta, no toma ni espera
 // ningún lease, no bloquea ningún envío y ningún fallo se propaga: cada escritura es de mejor esfuerzo, con tiempo acotado y SIN lanzar. Lo que se escribe son hechos mínimos e idempotentes (ver la
 // migración): ids y códigos, nunca texto de pacientes ni precios. El texto de un mensaje pasa por la memoria del proceso solo para clasificarlo y se descarta.
 // Seguridad de la concurrencia: cada evento tiene una clave única (reintentos de Kapso o turnos repetidos no duplican nada) y el orden se reconstruye por instante; un turno que perdió su lease no puede
@@ -224,7 +224,7 @@ export function createConversationRecorder(options: {
 
 // ───────────────────────────── configuración ─────────────────────────────
 
-// La memoria persistente es parte NORMAL del agente conversacional: se enciende con la misma bandera (PLUSMEDIK_LLM_CONVERSATION=on) y no tiene variables propias. Exige la migración 24, PLUSMEDIK_CONTACT_HMAC_KEY
+// La memoria persistente es parte NORMAL del agente conversacional: se enciende con la misma bandera (la bandera del agente conversacional) y no tiene variables propias. Exige la migración 24, PLUSMEDIK_CONTACT_HMAC_KEY
 // y KAPSO_PHONE_NUMBER_ID; si la base no responde, el agente decide con los mensajes recientes del historial y nunca se detiene.
 export function resolveConversationState(
   env: Record<string, string | undefined>,
