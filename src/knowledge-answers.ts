@@ -241,6 +241,8 @@ export interface AnswerOptions {
   studyFacts?: StudyFactsQueries;
   // G4.1: ids de los estudios de la última cotización entregada a este contacto (si la hay y es reciente). Solo se pide cuando el mensaje pregunta por un estudio sin nombrarlo.
   contextStudyIds?: () => Promise<readonly string[]>;
+  // Métodos de pago en silencio (ausente = se responden como siempre): la respuesta no incluye nada sobre cómo pagar, ni siquiera «no hay información». Un mensaje solo de pagos se queda sin tema (sin respuesta).
+  skipPayment?: boolean;
 }
 
 interface Section {
@@ -270,7 +272,7 @@ function weeklyLines(weekly: Array<{ day: number; opens: string; closes: string 
 export async function answerFromKnowledge(text: string, options: AnswerOptions): Promise<KnowledgeAnswer | undefined> {
   const texts = options.texts ?? ANSWER_TEXTS;
   const now = options.now ?? (() => new Date());
-  const topics = detectTopics(text, Boolean(options.studyFacts));
+  const topics = detectTopics(text, Boolean(options.studyFacts)).filter((topic) => !(options.skipPayment && topic.kind === "PAYMENT"));
   const asksNow = NOW.test(plain(text.slice(0, 4000)));
   const sections: Section[] = [];
   // El estudio por el que se pregunta se resuelve una sola vez (y solo si algún tema lo necesita).

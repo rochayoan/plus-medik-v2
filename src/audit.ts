@@ -150,10 +150,36 @@ export interface AnalysisEvidence {
 //   LEASE_LOST       la ejecución ya no posee el lease (HTTP 410): no debe escribir ni enviar nada más.
 export type AuditWriteErrorKind = "REJECTED" | "CONFLICT" | "UNKNOWN_OUTCOME" | "LEASE_LOST";
 export class AuditWriteError extends Error {
-  constructor(readonly kind: AuditWriteErrorKind, readonly httpStatus?: number) {
+  // `serverCode`: código del error de la base/PostgREST (PT422, PGRST202, 23505…) y `requestId`: identificador de la petición en Supabase, ambos validados con un patrón estricto. Nunca el mensaje ni el cuerpo del servidor.
+  constructor(readonly kind: AuditWriteErrorKind, readonly httpStatus?: number, readonly detail: { serverCode?: string; requestId?: string } = {}) {
     super(`audit_write_${kind.toLowerCase()}`);
     this.name = "AuditWriteError";
   }
+}
+
+// Campos para el registro cuando falla una escritura de auditoría: tipo, estado HTTP y código del servidor. Sin texto del servidor, sin contenido, sin claves.
+export function auditErrorFields(error: unknown): { kind?: AuditWriteErrorKind; httpStatus?: number; serverCode?: string; requestId?: string } {
+  if (!(error instanceof AuditWriteError)) return {};
+  return { kind: error.kind, ...(error.httpStatus !== undefined ? { httpStatus: error.httpStatus } : {}), ...(error.detail.serverCode ? { serverCode: error.detail.serverCode } : {}), ...(error.detail.requestId ? { requestId: error.detail.requestId } : {}) };
+}
+
+// Del cuerpo de un rechazo del servidor SOLO se extrae `code` (si cumple el patrón de los códigos de PostgREST/PostgreSQL/PT) y del encabezado el id de la petición. El resto (mensaje, detalles, pistas, que pueden traer filas o contenido)
+// se descarta sin guardarse. Nunca lanza.
+const SERVER_CODE = /^(PT\d{3}|PGRST\d{3}|[0-9A-Z]{5})$/;
+const REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9-]{7,63}$/;
+async function rejectionDetail(response: Response): Promise<{ serverCode?: string; requestId?: string }> {
+  const detail: { serverCode?: string; requestId?: string } = {};
+  try {
+    const header = typeof response.headers?.get === "function" ? (response.headers.get("sb-request-id") ?? response.headers.get("x-request-id")) : null;
+    if (header && REQUEST_ID.test(header)) detail.requestId = header;
+    if (typeof response.text === "function") {
+      const parsed = JSON.parse((await response.text()).slice(0, 4096)) as { code?: unknown };
+      if (typeof parsed?.code === "string" && SERVER_CODE.test(parsed.code)) detail.serverCode = parsed.code;
+    }
+  } catch {
+    // cuerpo ausente, truncado o que no es JSON: no hay código
+  }
+  return detail;
 }
 
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
@@ -410,7 +436,7 @@ export function createSupabaseRpc(options: SupabaseRpcOptions = {}): (name: stri
   // Llamada a una función transaccional e IDEMPOTENTE de la base. El cuerpo se serializa una vez: si una petición termina sin respuesta (timeout, red caída,
   // 5xx) no se sabe si la transacción se confirmó; se repite UNA vez con exactamente el mismo contenido (todas las funciones usadas aquí responden igual ante
   // el mismo contenido y el mismo owner/fence). Si tampoco hay respuesta, el resultado queda DESCONOCIDO (UNKNOWN_OUTCOME): no se reintenta más. Nunca se lee
-  // ni se propaga el cuerpo de un error del servidor. 410 = lease perdido (no se reintenta), 409 = conflicto, otros 4xx = rechazo.
+  // ni se propaga el cuerpo de un error del servidor: en un 409 o un 4xx solo se extrae `code` (patrón estricto de PostgREST/PostgreSQL/PT) y el id de la petición, y todo lo demás se descarta (ver rejectionDetail). 410 = lease perdido (no se reintenta), 409 = conflicto, otros 4xx = rechazo.
   return async function rpc(name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
     const body = JSON.stringify(args);
     const attempts = 2;
@@ -426,8 +452,8 @@ export function createSupabaseRpc(options: SupabaseRpcOptions = {}): (name: stri
         return typeof result === "object" && result !== null && !Array.isArray(result) ? (result as Record<string, unknown>) : {};
       }
       if (response && response.status === 410) throw new AuditWriteError("LEASE_LOST", 410);
-      if (response && response.status === 409) throw new AuditWriteError("CONFLICT", 409);
-      if (response && response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429) throw new AuditWriteError("REJECTED", response.status);
+      if (response && response.status === 409) throw new AuditWriteError("CONFLICT", 409, await rejectionDetail(response));
+      if (response && response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429) throw new AuditWriteError("REJECTED", response.status, await rejectionDetail(response));
       if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
     }
     throw new AuditWriteError("UNKNOWN_OUTCOME");

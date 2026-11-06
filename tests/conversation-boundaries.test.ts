@@ -22,7 +22,7 @@ describe("G5.3: dónde puede aparecer la conversación con modelo", () => {
   });
 
   it("solo la propia capa, el manejador de texto (como TIPO) y el cableado de Vercel la nombran", () => {
-    const allowed = new Set(["src/conversation-model.ts", "src/conversation-openai.ts", "src/conversation-facts.ts", "src/system-prompt.ts", "src/text-handler.ts", "src/conversation-memory.ts", "src/study-interpreter.ts", "api/kapso/webhook.ts"]);
+    const allowed = new Set(["src/conversation-model.ts", "src/conversation-openai.ts", "src/conversation-facts.ts", "src/system-prompt.ts", "src/text-handler.ts", "src/conversation-memory.ts", "src/study-interpreter.ts", "src/agent/verify.ts", "src/agent/openai.ts", "src/agent/shadow.ts", "src/agent/pilot.ts", "api/kapso/webhook.ts"]);
     for (const path of files) {
       if (allowed.has(rel(path))) continue;
       expect(source(path), rel(path)).not.toMatch(MENTION);
@@ -35,8 +35,15 @@ describe("G5.3: dónde puede aparecer la conversación con modelo", () => {
 
 describe("G5.3: el proveedor y la red", () => {
   it("la lógica (conversation-model.ts) no importa ningún proveedor ni toca la red, el entorno ni el motor de recetas", () => {
-    expect(importsOf(join(root, "src/conversation-model.ts")).sort()).toEqual(["./conversation-facts.js", "./text-normalize.js", "zod"]);
+    // ./provider-error.js (G7) es PURO —sin imports, red, entorno ni registro—: solo convierte un error en códigos de lista blanca para el log; ver la prueba siguiente.
+    expect(importsOf(join(root, "src/conversation-model.ts")).sort()).toEqual(["./conversation-facts.js", "./provider-error.js", "./text-normalize.js", "zod"]);
     expect(code(join(root, "src/conversation-model.ts"))).not.toMatch(/\bfetch\s*\(|process\.env|from "openai"|new OpenAI|responses\.create|openrouter|anthropic|supabase|console\./i);
+  });
+
+  it("provider-error.ts (causa de un fallo, solo códigos) es puro: sin imports, red, entorno, base de datos ni registro, y nunca lee el mensaje del error", () => {
+    const file = join(root, "src/provider-error.ts");
+    expect(importsOf(file)).toEqual([]);
+    expect(code(file)).not.toMatch(/\bfetch\s*\(|process\.env|console\.|supabase|from "openai"|\.message\b/i);
   });
 
   it("solo conversation-openai.ts habla con OpenAI en esta capa: respeta el modo offline, no guarda el texto en el proveedor, sin reintentos ocultos y sin la caché de disco", () => {

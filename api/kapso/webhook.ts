@@ -12,9 +12,14 @@ import { resolveScopedContactControl } from "../../src/crm-attention.js";
 import { contactKeyOf, createAttentionRepository, type AttentionRepository } from "../../src/human-control.js";
 import { handleKapsoWebhook } from "../../src/kapso-webhook.js";
 import { createSupabaseKnowledgeStore, KnowledgeService } from "../../src/knowledge/index.js";
-import { ANSWER_TEXTS, detectTopics, lazyKnowledge, ttlCache } from "../../src/knowledge-answers.js";
+import { ANSWER_TEXTS, answerFromKnowledge, detectTopics, lazyKnowledge, ttlCache } from "../../src/knowledge-answers.js";
 import { resolveConversationModel } from "../../src/conversation-openai.js";
 import { resolveConversationMemory } from "../../src/conversation-memory.js";
+import { resolveAgentSettings } from "../../src/agent/openai.js";
+import { createAgentPilot, createPilotSwitch, createRecentProvider, resolveAgentPilotSettings } from "../../src/agent/pilot.js";
+import { resolveAgentMode } from "../../src/agent/pipeline.js";
+import { createAgentShadow } from "../../src/agent/shadow.js";
+import { createConversationReader, createSupabaseConversationStore, resolveConversationState } from "../../src/conversation-state-store.js";
 import { resolveDailyReplyCap } from "../../src/daily-reply-cap.js";
 import { resolveMessageHistory } from "../../src/message-history.js";
 import { resolveStudyInterpreter } from "../../src/study-interpreter-openai.js";
@@ -121,6 +126,11 @@ const contactKeyFor = (phone: string) => contactKeyOf({ hmacKey: process.env.PLU
 // KAPSO_PHONE_NUMBER_ID. PLUSMEDIK_HISTORY=off lo apaga; PLUSMEDIK_HISTORY_KEY (opcional) lo guarda cifrado. Es independiente de la memoria conversacional y del resto del agente.
 const messageHistory = resolveMessageHistory(process.env, logLine, { contactKeyFor });
 logLine("history_scope", { enabled: messageHistory !== undefined, encrypted: Boolean(process.env.PLUSMEDIK_HISTORY_KEY?.trim()) });
+// Memoria estructurada de la conversación en SOMBRA (APAGADA por defecto; ver docs/g7/10 y src/conversation-state-store.ts): PLUSMEDIK_CONV_STATE=shadow registra peticiones, respuestas, mensajes humanos y recetas por ids para
+// calcular lo pendiente, SIN cambiar ninguna respuesta, lease, envío ni la pausa humana. Exige la migración 24 (sin ella las escrituras fallan sin afectar al agente) y PLUSMEDIK_CONTACT_HMAC_KEY + KAPSO_PHONE_NUMBER_ID.
+// Apagada no escribe ni una línea nueva en el registro.
+const convState = resolveConversationState(process.env, logLine, { contactKeyFor });
+if (convState) logLine("conv_state_scope", { mode: convState.mode });
 
 // El sistema de archivos de Vercel es de solo lectura: sin caché local (el registro de uso, si se escribe, va a /tmp).
 process.env.AI_CACHE ??= "off";
@@ -177,6 +187,64 @@ if (audioRequested && !(turnsEnabled && textHandlerEnabled)) logLine("audio_inac
 if (audioRequested) logLine("audio_scope", { enabled: audioPipeline !== undefined });
 // Los audios solo se activan si están realmente encendidos (turnos, manejador de texto y guarda de respuestas válida).
 const audioActive = Boolean(audioPipeline && turnsEnabled && textHandlerEnabled && !replyGuardInvalid);
+
+// Conocimiento aprobado del laboratorio: el servicio se crea al primer uso; el catálogo (solo para identificar el estudio por el que se pregunta) se pide únicamente ante preguntas de preparación y se guarda 5 min.
+// Lo usan el manejador de texto de siempre y, en sombra, el núcleo conversacional (herramienta lab_info).
+const knowledgeOptions = knowledgeAnswersEnabled
+  ? { skipPayment: true, service: lazyKnowledge(() => new KnowledgeService({ store: createSupabaseKnowledgeStore({ requestTimeoutMs: 3000, retryDelayMs: 200 }) })), loadCatalog: ttlCache(() => loadActiveCatalog(), 5 * 60_000), studyFacts: studyInfoEnabled ? { getSample: (...args: Parameters<ReturnType<typeof studyFacts>["getSample"]>) => studyFacts().getSample(...args), getTurnaround: (...args: Parameters<ReturnType<typeof studyFacts>["getTurnaround"]>) => studyFacts().getTurnaround(...args) } : undefined }
+  : undefined;
+
+// Núcleo conversacional EN SOMBRA (APAGADO por defecto; ver docs/g7/12 y src/agent/): PLUSMEDIK_AGENT=shadow + OPENAI_AGENT_MODEL (obligatorio) decide en segundo plano qué respondería a cada lote reclamado, SIN
+// ENVIAR NADA ni cambiar ninguna respuesta, lease, pausa, tope ni precio. Exige el modo turnos. Usa la memoria de la Fase 1 si PLUSMEDIK_CONV_STATE=shadow. Apagado no escribe ni una línea nueva en el registro.
+const agentSettings = resolveAgentSettings(process.env, logLine);
+const agentMode = resolveAgentMode(process.env, () => undefined);
+if (agentSettings && !turnsEnabled) logLine("agent_config_invalid", { error: "TURNS_REQUIRED" });
+const agentShadow = agentSettings && agentMode === "shadow" && turnsEnabled
+  ? createAgentShadow({
+      model: agentSettings.model,
+      modelName: agentSettings.modelName,
+      sample: agentSettings.sample,
+      loadCatalog: ttlCache(() => loadActiveCatalog(), 60_000),
+      ...(knowledgeOptions ? { answer: (question: string) => answerFromKnowledge(question, knowledgeOptions) } : {}),
+      ...(convState ? { reader: createConversationReader({ store: createSupabaseConversationStore() }) } : {}),
+      contactKeyFor,
+      // La derivación humana del agente está DESACTIVADA hasta validar la integración con el CRM: la capacidad es fija y NINGUNA bandera la enciende (ni siquiera la de la cola al CRM). Solo cotizar está disponible.
+      capabilities: { handoff: false, quote: true },
+      ...(conversationMemory ? { recent: async ({ messageId, contactKey }: { messageId: string; contactKey: string }) => conversationMemory.history({ contactKey, currentMessageId: messageId }) } : {}),
+      log: logLine
+    })
+  : undefined;
+if (agentShadow) logLine("agent_scope", { mode: agentShadow.mode, model: agentSettings!.modelName, sample: agentSettings!.sample });
+
+// PILOTO del nuevo agente (APAGADO por defecto; ver docs/g7/14 y src/agent/pilot.ts): PLUSMEDIK_AGENT=pilot + OPENAI_AGENT_MODEL + PLUSMEDIK_AGENT_PILOT_PHONES (1 a 5 números) hace que el núcleo conversacional RESPONDA,
+// por la misma máquina de envío de siempre, SOLO a esos números y SOLO mientras el interruptor de la base (migración 25; nace apagado) diga «encendido». Los demás contactos siguen con el agente actual, sin
+// llamadas nuevas. Exige el modo turnos; la memoria de la fase 1 (PLUSMEDIK_CONV_STATE=shadow) es opcional. Cualquier configuración incompleta lo deja apagado con un código.
+// PLUSMEDIK_AGENT=live: el mismo núcleo para TODOS los contactos elegibles (menos PLUSMEDIK_AGENT_EXCLUDE_PHONES), con el mismo interruptor de la base (apaga a todos al instante), el mismo respaldo al agente
+// de siempre y un corta-circuito si el modelo falla seguido. Ver docs/g7/15.
+const pilotSettings = agentSettings && (agentMode === "pilot" || agentMode === "live") ? resolveAgentPilotSettings(process.env, logLine, agentMode) : undefined;
+// La memoria estructurada (PLUSMEDIK_CONV_STATE, migración 24) es OPCIONAL: sin ella el agente decide con los mensajes recientes del historial (últimas 24 h) y las herramientas.
+const agentPilot = agentSettings && pilotSettings && turnsEnabled
+  ? createAgentPilot({
+      model: agentSettings.model,
+      modelName: agentSettings.modelName,
+      ...(pilotSettings.phones ? { phones: pilotSettings.phones } : {}),
+      ...(pilotSettings.exclude ? { everyone: { exclude: pilotSettings.exclude, contactKeyFor } } : {}),
+      switch: createPilotSwitch({ log: logLine }),
+      handoffEnabled: pilotSettings.handoffEnabled,
+      ...(pilotSettings.dailyMax !== undefined ? { dailyCap: { max: pilotSettings.dailyMax, windowSeconds: 86_400 } } : {}),
+      ...(pilotSettings.deadlineMs !== undefined ? { deadlineMs: pilotSettings.deadlineMs } : {}),
+      context: {
+        loadCatalog: ttlCache(() => loadActiveCatalog(), 60_000),
+        ...(knowledgeOptions ? { answer: (question: string) => answerFromKnowledge(question, knowledgeOptions) } : {}),
+        ...(convState ? { reader: createConversationReader({ store: createSupabaseConversationStore() }) } : {}),
+        contactKeyFor,
+        recent: createRecentProvider({}),
+        capabilities: { handoff: false, quote: true }
+      },
+      log: logLine
+    })
+  : undefined;
+if (agentPilot) logLine("agent_scope", { mode: agentPilot.mode, model: agentSettings!.modelName, ...(pilotSettings!.phones ? { phones: pilotSettings!.phones.size } : { everyone: true, excluded: pilotSettings!.exclude!.size }), handoff: pilotSettings!.handoffEnabled, ...(pilotSettings!.dailyMax !== undefined ? { dailyMax: pilotSettings!.dailyMax } : {}) });
 
 const realDeps: QuoteDeps = {
   async downloadImage(image: IncomingImage) {
@@ -252,8 +320,10 @@ const realDeps: QuoteDeps = {
   requireAuditGuard: humanControlEnabled || turnsEnabled || on("REQUIRE_AUDIT_GUARD"),
   humanControl: humanControlEnabled ? { contactKeyFor } : undefined,
   scopedControl: scopedContactControl ? { contactKeyFor, covers: scopedContactControl.covers } : undefined,
-  turns: turnsEnabled ? { contactKeyFor, replyGuard: replyGuardConfig, attention: attentionConfig, instantPhotoQuotes: instantPhotoQuotesEnabled, dailyCap: dailyReplyCap, memory: conversationMemory,
+  turns: turnsEnabled ? { contactKeyFor, replyGuard: replyGuardConfig, attention: attentionConfig, instantPhotoQuotes: instantPhotoQuotesEnabled, dailyCap: dailyReplyCap, memory: conversationMemory, ...(convState ? { convState } : {}), ...(agentShadow ? { agentShadow } : {}), ...(agentPilot ? { agentPilot } : {}),
     crmHandoff: crmOutbox,
+    // Métodos de pago ignorados hasta que se implementen (decisión del dueño): ni agente de siempre ni agente nuevo dicen nada de pagos; el resto del mensaje se atiende.
+    ignorePayment: true,
     ...(batchEngineMode ? { batchEngine: { mode: batchEngineMode } } : {}),
     ...(audioActive ? { audio: audioPipeline } : {}),
     quoteSessions: quoteSessionsEnabled && !replyGuardInvalid
@@ -270,10 +340,7 @@ const realDeps: QuoteDeps = {
       const contactKey = contactKeyFor(turn.from);
       return contactKey ? conversationMemory.history({ contactKey, currentMessageId: turn.messageId }) : [];
     } : undefined,
-    // El servicio se crea al primer uso; el catálogo (solo para identificar el estudio por el que se pregunta) se pide únicamente ante preguntas de preparación y se guarda 5 min.
-    knowledge: knowledgeAnswersEnabled
-      ? { service: lazyKnowledge(() => new KnowledgeService({ store: createSupabaseKnowledgeStore({ requestTimeoutMs: 3000, retryDelayMs: 200 }) })), loadCatalog: ttlCache(() => loadActiveCatalog(), 5 * 60_000), studyFacts: studyInfoEnabled ? { getSample: (...args) => studyFacts().getSample(...args), getTurnaround: (...args) => studyFacts().getTurnaround(...args) } : undefined }
-      : undefined
+    knowledge: knowledgeOptions
   }) } : undefined } : undefined
 };
 
@@ -300,6 +367,7 @@ export async function POST(request: Request): Promise<Response> {
       : undefined,
     schedule: (task) => waitUntil(task),
     ...(messageHistory ? { history: messageHistory } : {}),
+    ...(convState ? { convState } : {}),
     humanControl: humanControlEnabled ? { labPhoneNumberId: process.env.KAPSO_PHONE_NUMBER_ID, contactKeyFor, attention: attentionProxy } : undefined,
     log: realDeps.log
   });

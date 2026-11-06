@@ -1,5 +1,6 @@
 import { AuditWriteError } from "./audit.js";
 import { classifyKapsoEvent, eventsOf, type AttentionRepository, type ClassifiedKapsoEvent, type KapsoEventKind } from "./human-control.js";
+import type { ConversationRecorder } from "./conversation-state-store.js";
 import type { MessageHistory } from "./message-history.js";
 import { extractIncomingTurns, hasProcessableTurns, processTurns } from "./turns.js";
 import { extractIncomingImages, handleImageMessage, isAllowedPhone, maskPhone, verifyWebhookSignature, type QuoteDeps } from "./whatsapp-quote.js";
@@ -38,6 +39,8 @@ export interface KapsoWebhookDeps {
   };
   // Historial de mensajes para auditoría (apagado si falta; ver src/message-history.ts). Solo OBSERVA: se registra en segundo plano, nunca retrasa ni cambia la respuesta del webhook.
   history?: MessageHistory;
+  // Memoria estructurada en SOMBRA (PLUSMEDIK_CONV_STATE=shadow): registra que una persona escribió. Solo observa; no retrasa ni cambia la respuesta del webhook (se espera con `schedule`).
+  convState?: ConversationRecorder;
   log(event: string, data: Record<string, unknown>): void;
 }
 
@@ -136,7 +139,7 @@ async function registerControlEvent(event: ClassifiedKapsoEvent, idempotencyKey:
     try {
       await control.attention.recordEvent({ eventKey, contactKey, kind: event.kind as "UNKNOWN_ORIGIN" | "OTHER_APP_OUTBOUND" | "META_AGENT_OUTBOUND", occurredAt: event.occurredAt, detail: { origin: (event.origin ?? "missing").replace(/[^a-z0-9_]/g, "_").slice(0, 40) } });
     } catch (error) {
-      deps.log("attention_event_not_recorded", { kind: event.kind, ...(error instanceof AuditWriteError ? { error: error.kind } : {}) });
+      deps.log("attention_event_not_recorded", { kind: event.kind, ...(error instanceof AuditWriteError ? { error: error.kind, httpStatus: error.httpStatus, serverCode: error.detail.serverCode, requestId: error.detail.requestId } : {}) });
     }
     return true;
   }
@@ -148,9 +151,14 @@ async function registerControlEvent(event: ClassifiedKapsoEvent, idempotencyKey:
   try {
     const result = await control.attention.registerHumanMessage({ eventKey, contactKey, occurredAt: event.occurredAt });
     deps.log("human_event", { outcome: result.outcome, revision: result.revision, blockedRuns: result.blockedRuns, lateReservedRuns: result.lateReservedRuns, repliedAfterEventRuns: result.repliedAfterEventRuns, phone: maskPhone(event.contactPhone) });
+    // Memoria en sombra: el registro (idempotente por evento) corre en segundo plano; el 200 al webhook no lo espera.
+    if (deps.convState) {
+      deps.convState.humanMessage({ contactKey, eventKey, ...(event.occurredAt ? { at: event.occurredAt } : {}) });
+      deps.schedule(deps.convState.flush());
+    }
     return true;
   } catch (error) {
-    deps.log("human_event_failed", error instanceof AuditWriteError ? { error: error.kind } : {});
+    deps.log("human_event_failed", error instanceof AuditWriteError ? { error: error.kind, httpStatus: error.httpStatus, serverCode: error.detail.serverCode, requestId: error.detail.requestId } : {});
     return false;
   }
 }

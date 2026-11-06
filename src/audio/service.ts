@@ -57,11 +57,11 @@ export class AudioPipeline {
       } catch (error) {
         last = error instanceof AudioFailure ? error : new AudioFailure("UNAVAILABLE", true);
         if (!last.retryable) break;
-        this.o.log("audio_job", { event: "retry", code: last.code, attempt });
+        this.o.log("audio_job", { event: "retry", code: last.code, attempt, ...(last.cause ?? {}) });
       }
     }
     const code: AudioFailureCode = last.retryable ? "UNAVAILABLE" : last.code;
-    this.o.log("audio_job", { event: "failed", code });
+    this.o.log("audio_job", { event: "failed", code, ...(last.cause ?? {}) });
     return { ok: false, code };
   }
 }

@@ -7,6 +7,7 @@ import {
   assertSafeInterpreterTexts, assertSafeQuoteTexts, DEFAULT_QUOTE_SESSIONS, evaluateSession, extractStudyRequests, formatAck, formatInterpretationNote, formatSessionQuote, formatTextReply, isGeneralQuestion, mergeInterpretation, optionsOf, parseSessionCommand, parseSessionReply, QUOTE_TEXTS,
   summarizeSession, withNote, compactQuote, type ItemResult, type QuoteBeginResult, type QuoteCloseInput, type QuoteCloseResult, type QuoteReadResult, type QuoteSessionsConfig, type QuoteTexts, type SessionItem, type SessionReply, type TextDoubt
 } from "./quote-session.js";
+import { summarizeAiFailures } from "./provider-error.js";
 import { looksAutomated, looksLikeOwnReply } from "./reply-guard.js";
 import { asksForPrice, classifyText } from "./text-handler.js";
 import type { CatalogStudy } from "./types.js";
@@ -137,12 +138,15 @@ export function sessionImageProducer(image: IncomingImage, deps: QuoteDeps, conf
       evidenceAttempted = true;
       await ctx.persist("evidence", (audit, runId, lease) => audit.recordEvidence(runId, { analysis, aiCalls, catalog: catalogFingerprint(catalog) }, lease));
       const item = itemFromAnalysis(analysis);
+      // Memoria en sombra (PLUSMEDIK_CONV_STATE): la receta leída por ids; nunca precios ni texto.
+      deps.turns?.convState?.artifact({ from: image.from, key: image.messageId, kind: "RECIPE", studyIds: item.studyIds, unrecognized: analysis.internal?.pending.length ?? 0 });
       await withSession(ctx, "quote_finish", (audit, runId, lease) => needs(audit, "quoteFinish")(runId, lease, item));
       if (item.status === "UNREADABLE") return withPhoto(plain(texts.unreadable_image), { status: "UNREADABLE", studyIds: [] });
       return withPhoto(ack(formatAck({ texts, kind: "IMAGE", names: namesOf(item.studyIds, catalog), position: begun.position, hasDoubt: item.status !== "RESOLVED", repeated: 0 }), begun.position), { status: item.status === "RESOLVED" ? "RESOLVED" : "UNCERTAIN", studyIds: item.studyIds });
     } catch (error) {
       const errorCode = processingFailureCode(error instanceof SessionUnavailableError ? "OTHER" : phase);
-      deps.log("processing_failed", { messageId: image.messageId, phone: who, errorCode, ...(error instanceof SessionUnavailableError ? { stage: error.stage } : {}) });
+      const aiFailures = summarizeAiFailures(aiCalls);
+      deps.log("processing_failed", { messageId: image.messageId, phone: who, errorCode, ...(error instanceof SessionUnavailableError ? { stage: error.stage } : {}), ...(aiFailures.length > 0 ? { aiFailures } : {}) });
       if (!evidenceAttempted) await ctx.persist("evidence", (audit, runId, lease) => audit.recordEvidence(runId, { aiCalls }, lease));
       // Si la foto ya estaba en la sesión «en proceso», se marca ilegible: «listo» pedirá otra en vez de quedarse esperando algo que no llegará.
       if (began) await ctx.persist("quote_finish", async (audit, runId, lease) => { await needs(audit, "quoteFinish")(runId, lease, UNREADABLE("UNREADABLE_IMAGE")); });
@@ -306,6 +310,7 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
     if (closed.status === "pending") return plain(texts.waiting);
     if (closed.status === "not_open") return plain(texts.empty);
     if (evaluation.kind === "QUOTE") {
+      deps.turns?.convState?.artifact({ from: turn.from, key: read.sessionId, kind: "QUOTE", studyIds: evaluation.lines.map((line) => line.studyId) });
       let body = withNote(formatSessionQuote(evaluation.lines, evaluation.duplicates, texts), note);
       if (deps.quotePreparations) {
         try {

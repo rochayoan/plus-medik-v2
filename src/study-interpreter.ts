@@ -3,6 +3,7 @@ import { z } from "zod";
 import { mentionsKnownStudy, searchCatalog } from "./catalog-search.js";
 import { normalizeStudyKey } from "./consensus.js";
 import { looksMedical, sanitizeForModel } from "./conversation-model.js";
+import { describeProviderError } from "./provider-error.js";
 import { cleanMention, type InterpretedStudyRequest, type StudyInterpreter } from "./quote-session.js";
 import { classifyText } from "./text-handler.js";
 import type { CatalogStudy } from "./types.js";
@@ -276,9 +277,9 @@ export function createStudyInterpreter(options: StudyInterpreterOptions): StudyI
         maxRounds: INTERPRETER_LIMITS.maxRounds,
         runTool: (name, args) => toolbox.run(name, args)
       });
-    } catch {
-      // Nunca el texto del error: puede traer el contenido del mensaje.
-      return fail("ERROR");
+    } catch (error) {
+      // Nunca el texto del error: puede traer el contenido del mensaje. Solo códigos de lista blanca de la causa (cuota vs. tasa, retry-after…): ver src/provider-error.ts.
+      return fail("ERROR", describeProviderError(error));
     }
     const usage = { inputTokens: response.usage?.inputTokens, outputTokens: response.usage?.outputTokens, reasoningTokens: response.usage?.reasoningTokens };
 

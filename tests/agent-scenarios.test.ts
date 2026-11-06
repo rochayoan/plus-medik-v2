@@ -1,0 +1,183 @@
+import { describe, expect, it } from "vitest";
+import { evaluate, gate, preflight, runAll, runScenario, scriptedModel, summarize } from "../scripts/g7/lib/agent-eval.js";
+import { AGENT_SCENARIOS, type AgentScenario } from "../scripts/g7/lib/agent-scenarios.js";
+
+// Escenarios SINTÉTICOS del núcleo conversacional, sin red. Dos cosas: (1) el verificador NO bloquea respuestas correctas y naturales de un buen modelo; (2) SÍ bloquea las inventadas, con el código esperado.
+// Cada escenario corre por el camino de producción (ejecutor en sombra, memoria, herramientas reales sobre un catálogo y conocimiento ficticios).
+
+describe("escenarios sintéticos: cobertura del corpus", () => {
+  it("hay escenarios de saludo, cotización, ambigüedad, horario, varias preguntas, pendientes, salud, persona, inyección y datos inexistentes", () => {
+    const ids = AGENT_SCENARIOS.map((scenario) => scenario.id);
+    for (const id of ["saludo", "cotizar-por-nombre", "estudio-ambiguo", "horario", "horario-y-cotizacion", "mensaje-partido", "pendiente-de-antes", "ultima-cotizacion", "salud", "pide-una-persona", "intento-de-inyeccion", "pago-ignorado"]) expect(ids).toContain(id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(AGENT_SCENARIOS.every((scenario) => scenario.good.length > 0)).toBe(true);
+  });
+});
+
+describe("el verificador acepta las respuestas CORRECTAS (sin falsos bloqueos)", () => {
+  for (const scenario of AGENT_SCENARIOS) {
+    scenario.good.forEach((reply, index) => {
+      it(`${scenario.id} · respuesta correcta ${index + 1}`, async () => {
+        const { decision, skipped } = await runScenario(scriptedModel(reply), scenario);
+        expect(decision, `sin decisión (${skipped})`).toBeDefined();
+        expect(decision!.violations, JSON.stringify(decision!.violations)).toEqual([]);
+        expect(decision!.status).toBe("VERIFIED");
+        expect(evaluate(decision, scenario.expect)).toEqual([]);
+      });
+    });
+  }
+});
+
+describe("el verificador RECHAZA las respuestas inventadas, con el código esperado", () => {
+  for (const scenario of AGENT_SCENARIOS) {
+    (scenario.bad ?? []).forEach((reply, index) => {
+      it(`${scenario.id} · respuesta mala ${index + 1} (${reply.reject})`, async () => {
+        const { decision } = await runScenario(scriptedModel(reply), scenario);
+        expect(decision?.status).toBe("REJECTED");
+        expect(decision!.violations.map((violation) => violation.code)).toContain(reply.reject);
+        expect(decision!.reply).toBeUndefined();
+      });
+    });
+  }
+});
+
+describe("las herramientas del escenario usan el catálogo y el conocimiento ficticios", () => {
+  const find = (id: string): AgentScenario => AGENT_SCENARIOS.find((scenario) => scenario.id === id)!;
+
+  it("la cotización lleva los precios del catálogo (solo en el bloque del sistema) y el modelo no los ve", async () => {
+    const scenario = find("cotizar-por-nombre");
+    const seen: string[] = [];
+    const base = scriptedModel(scenario.good[0]!);
+    const { decision } = await runScenario({ plan: base.plan, respond: async (input) => { seen.push(JSON.stringify(input.facts)); return base.respond(input); } }, scenario);
+    expect(decision?.reply).toMatch(/HEMOGRAMA COMPLETO[\s\S]*GLUCOSA EN AYUNAS[\s\S]*75[.,]5/);
+    expect(seen.join("")).not.toMatch(/\b45\b|30[.,]5|75[.,]5|Bs/);
+  });
+
+  it("lo pendiente de antes llega como petición a cubrir (P1) y la última cotización como hecho con nombres del catálogo", async () => {
+    const ids: string[] = [];
+    await runScenario({ plan: async () => ({ toolCalls: [] }), respond: async (input) => { ids.push(...input.utterances.map((u) => `${u.id}:${u.carried ? "pendiente" : "nuevo"}`)); return { acts: [{ kind: "ACK", utterances: input.utterances.map((u) => u.id) }], text: "Hola, con gusto." }; } }, find("pendiente-de-antes"));
+    expect(ids).toEqual(["U1:nuevo", "P1:pendiente"]);
+    const last = await runScenario(scriptedModel(find("ultima-cotizacion").good[1]!), find("ultima-cotizacion"));
+    expect(last.decision?.facts.map((fact) => fact.text)).toEqual(["Última cotización entregada en esta conversación: HEMOGRAMA COMPLETO; TSH"]);
+  });
+
+  it("la derivación humana está desactivada: un plan con HANDOFF se rechaza aunque el modelo lo pida", async () => {
+    const scenario = find("pide-una-persona");
+    const { decision } = await runScenario(scriptedModel(scenario.bad![0]!), scenario);
+    expect(decision?.violations.map((v) => v.code)).toContain("HANDOFF_UNAVAILABLE");
+  });
+
+  it("un mensaje de salud llega al modelo con su tema MEDICAL (el agente solo puede aplazar o derivar, nunca aconsejar)", async () => {
+    const scenario = find("salud");
+    let utterances = "";
+    await runScenario({ plan: async (input) => { utterances = JSON.stringify(input.utterances); return { toolCalls: [] }; }, respond: async () => scriptedModel(scenario.good[0]!).respond({} as never) }, scenario);
+    expect(utterances).toMatch(/pecho/);
+    expect(utterances).toContain("MEDICAL");
+  });
+});
+
+describe("el arnés de evaluación", () => {
+  it("evalúa un modelo guionado perfecto: todo pasa; resume latencia, tokens y costo con los precios que se indiquen", async () => {
+    const runs = [];
+    for (const scenario of AGENT_SCENARIOS) runs.push(...await runAll(scriptedModel(scenario.good[0]!, { inputTokens: 100, outputTokens: 20 }), { scenarios: [scenario] }));
+    const summary = summarize(runs, { inputPerMTok: 2, outputPerMTok: 10 });
+    expect(summary).toMatchObject({ scenarios: AGENT_SCENARIOS.length, passed: AGENT_SCENARIOS.length, rejected: 0, modelErrors: 0, skipped: 0, rejectedList: [], failedList: [] });
+    expect(summary.usage).toMatchObject({ inputTokens: 200 * AGENT_SCENARIOS.length, outputTokens: 40 * AGENT_SCENARIOS.length, calls: 2 * AGENT_SCENARIOS.length });
+    expect(summary.costUsd).toBeCloseTo((200 * 2 + 40 * 10) * AGENT_SCENARIOS.length / 1_000_000, 4);
+    expect(summarize(runs).costUsd).toBeUndefined();
+  });
+
+  it("detecta lo que falla: un rechazo del verificador, una expectativa incumplida y un error del modelo", async () => {
+    const quote = AGENT_SCENARIOS.find((s) => s.id === "cotizar-por-nombre")!;
+    const rejected = await runAll(scriptedModel(quote.bad![0]!), { scenarios: [quote] });
+    expect(summarize(rejected)).toMatchObject({ rejected: 1, passed: 0, rejectedList: [{ id: "cotizar-por-nombre", violations: expect.arrayContaining(["PRICE_OUTSIDE_QUOTE"]) }] });
+    const hours = AGENT_SCENARIOS.find((s) => s.id === "horario")!;
+    const wrongAct = await runAll(scriptedModel({ calls: hours.good[0]!.calls, acts: [{ kind: "ANSWER", utterances: ["U1"], factIds: ["lab_info:1"] }], text: "Atendemos de lunes a viernes." }), { scenarios: [hours] });
+    expect(wrongAct[0]!.failures.join(" ")).toMatch(/el mensaje no cumple/);
+    const failing = await runAll({ plan: async () => { throw Object.assign(new Error("x"), { status: 429, code: "insufficient_quota" }); }, respond: async () => { throw new Error("no"); } }, { scenarios: [hours] });
+    expect(summarize(failing)).toMatchObject({ modelErrors: 1, passed: 0 });
+    expect(failing[0]!.failures[0]).toMatch(/MODEL_ERROR causa QUOTA_OR_BILLING/);
+  });
+});
+
+describe("verificación previa de la configuración de la vista previa", () => {
+  const FULL = { PLUSMEDIK_AGENT: "shadow", OPENAI_AGENT_MODEL: "modelo-x", OPENAI_API_KEY: "sk-secreto-no-mostrar", PLUSMEDIK_TURNS: "on", PLUSMEDIK_CONV_STATE: "shadow", PLUSMEDIK_AGENT_SAMPLE: "10", PLUSMEDIK_KNOWLEDGE_ANSWERS: "on" };
+  const levels = (env: Record<string, string | undefined>) => preflight(env).map((line) => `${line.level}:${line.item}`);
+
+  it("con todo configurado no hay bloqueos ni avisos, y la derivación humana figura desactivada; nunca muestra la clave", () => {
+    const lines = preflight(FULL);
+    expect(lines.filter((line) => line.level !== "OK")).toEqual([]);
+    expect(lines.at(-1)).toMatchObject({ item: "derivación humana del agente", detail: expect.stringContaining("DESACTIVADA") });
+    expect(JSON.stringify(lines)).not.toContain("sk-secreto");
+  });
+
+  it("bloquea lo que impide el funcionamiento y avisa de lo recomendable", () => {
+    expect(levels({})).toEqual(expect.arrayContaining(["BLOCK:PLUSMEDIK_AGENT", "BLOCK:configuración del modelo", "BLOCK:OPENAI_API_KEY", "BLOCK:PLUSMEDIK_TURNS", "WARN:PLUSMEDIK_CONV_STATE", "WARN:PLUSMEDIK_KNOWLEDGE_ANSWERS"]));
+    expect(levels({ ...FULL, OPENAI_AGENT_MODEL: undefined })).toContain("BLOCK:configuración del modelo");
+    expect(levels({ ...FULL, PLUSMEDIK_AGENT_SAMPLE: "100" })).toContain("WARN:PLUSMEDIK_AGENT_SAMPLE");
+    expect(levels({ ...FULL, PLUSMEDIK_AGENT_SAMPLE: "0" })).toContain("BLOCK:configuración del modelo");
+  });
+});
+
+describe("verificación previa del PILOTO", () => {
+  const PILOT = { PLUSMEDIK_AGENT: "pilot", OPENAI_AGENT_MODEL: "modelo-x", OPENAI_API_KEY: "sk-secreto-no-mostrar", PLUSMEDIK_TURNS: "on", PLUSMEDIK_CONV_STATE: "shadow", PLUSMEDIK_KNOWLEDGE_ANSWERS: "on", PLUSMEDIK_AGENT_PILOT_PHONES: "59170000001" };
+  const find = (lines: ReturnType<typeof preflight>, item: string) => lines.find((line) => line.item === item);
+
+  it("completo: sin bloqueos; recuerda que el interruptor nace apagado; no muestra ni la clave ni el teléfono; la derivación figura desactivada", () => {
+    const lines = preflight(PILOT);
+    expect(lines.filter((line) => line.level === "BLOCK")).toEqual([]);
+    expect(find(lines, "PLUSMEDIK_AGENT_PILOT_PHONES")).toMatchObject({ level: "OK", detail: expect.stringContaining("1 número") });
+    expect(find(lines, "interruptor de la base (migración 25)")!.detail).toMatch(/NACE APAGADO[\s\S]*\(false, 'motivo'\)/);
+    expect(find(lines, "derivación humana del agente")).toMatchObject({ level: "OK", detail: expect.stringContaining("DESACTIVADA") });
+    expect(JSON.stringify(lines)).not.toMatch(/sk-secreto|59170000001/);
+  });
+
+  it("bloquea lo que el piloto exige: lista de números válida, memoria y modo turnos; avisa si se habilita la derivación sin cola al CRM", () => {
+    const blocked = (env: Record<string, string | undefined>) => preflight(env).filter((line) => line.level === "BLOCK").map((line) => line.item);
+    expect(blocked({ ...PILOT, PLUSMEDIK_AGENT_PILOT_PHONES: undefined })).toContain("PLUSMEDIK_AGENT_PILOT_PHONES");
+    expect(blocked({ ...PILOT, PLUSMEDIK_AGENT_PILOT_PHONES: "+59170000001" })).toContain("PLUSMEDIK_AGENT_PILOT_PHONES");
+    // la memoria estructurada es opcional: sin ella (y con historial) no bloquea; sin historial NI memoria sí
+    expect(blocked({ ...PILOT, PLUSMEDIK_CONV_STATE: undefined })).not.toContain("PLUSMEDIK_CONV_STATE");
+    expect(blocked({ ...PILOT, PLUSMEDIK_CONV_STATE: undefined, PLUSMEDIK_HISTORY: "off" })).toContain("PLUSMEDIK_CONV_STATE");
+    expect(blocked({ ...PILOT, PLUSMEDIK_TURNS: undefined })).toContain("PLUSMEDIK_TURNS");
+    expect(find(preflight({ ...PILOT, PLUSMEDIK_AGENT_HANDOFF: "on" }), "derivación humana del agente")).toMatchObject({ level: "WARN" });
+  });
+});
+
+describe("verificación previa del alcance GLOBAL", () => {
+  const LIVE = { PLUSMEDIK_AGENT: "live", OPENAI_AGENT_MODEL: "modelo-x", OPENAI_API_KEY: "sk-secreto-no-mostrar", PLUSMEDIK_TURNS: "on", PLUSMEDIK_CONV_STATE: "shadow", PLUSMEDIK_KNOWLEDGE_ANSWERS: "on", PLUSMEDIK_AGENT_DAILY_MAX: "40", PLUSMEDIK_AGENT_EXCLUDE_PHONES: "59170000009" };
+  const find = (lines: ReturnType<typeof preflight>, item: string) => lines.find((line) => line.item === item);
+
+  it("completo: sin bloqueos; el alcance es TODOS sin porcentajes y no pide ninguna variable de alcance; solo recuerda el interruptor; no muestra ni la clave ni los teléfonos", () => {
+    const lines = preflight(LIVE);
+    expect(lines.filter((line) => line.level === "BLOCK")).toEqual([]);
+    expect(lines.filter((line) => line.level === "WARN").map((line) => line.item)).toEqual(["interruptor de la base (migración 25)"]);
+    expect(find(lines, "alcance del agente nuevo")).toMatchObject({ level: "OK", detail: expect.stringContaining("TODOS los contactos elegibles, sin porcentajes") });
+    expect(find(preflight({ ...LIVE, PLUSMEDIK_AGENT_EXCLUDE_PHONES: undefined }), "alcance del agente nuevo")).toMatchObject({ level: "OK" });
+    expect(JSON.stringify(lines)).not.toMatch(/sk-secreto|59170000009|ROLLOUT/);
+  });
+
+  it("un tope sin definir avisa (rige el global de 5 respuestas); la memoria y los turnos son obligatorios; el historial apagado avisa; una exclusión inválida bloquea", () => {
+    const level = (env: Record<string, string | undefined>, item: string) => find(preflight(env), item)?.level;
+    expect(find(preflight({ ...LIVE, PLUSMEDIK_AGENT_DAILY_MAX: undefined }), "PLUSMEDIK_AGENT_DAILY_MAX")).toMatchObject({ level: "WARN", detail: expect.stringContaining("5 respuestas") });
+    expect(level({ ...LIVE, PLUSMEDIK_CONV_STATE: undefined }, "PLUSMEDIK_CONV_STATE")).toBe("WARN");
+    expect(level({ ...LIVE, PLUSMEDIK_TURNS: undefined }, "PLUSMEDIK_TURNS")).toBe("BLOCK");
+    expect(level({ ...LIVE, PLUSMEDIK_HISTORY: "off" }, "PLUSMEDIK_HISTORY")).toBe("WARN");
+    expect(level({ ...LIVE, PLUSMEDIK_AGENT_EXCLUDE_PHONES: "+5917" }, "alcance del agente nuevo")).toBe("BLOCK");
+    expect(level({ ...LIVE, OPENAI_AGENT_MODEL: undefined }, "configuración del modelo")).toBe("BLOCK");
+  });
+});
+
+describe("puerta de aprobación de un modelo real (antes de encender)", () => {
+  it("un modelo perfecto la aprueba; los errores del proveedor, los rechazos frecuentes, las reparaciones frecuentes y la lentitud la niegan con el motivo", async () => {
+    const perfect = [];
+    for (const scenario of AGENT_SCENARIOS) perfect.push(...await runAll(scriptedModel(scenario.good[0]!), { scenarios: [scenario] }));
+    expect(gate(summarize(perfect))).toEqual({ pass: true, reasons: [] });
+    const base = summarize(perfect);
+    expect(gate({ ...base, modelErrors: 2 }).reasons.join(" ")).toMatch(/error del proveedor/);
+    expect(gate({ ...base, passed: 10 }).reasons.join(" ")).toMatch(/escenarios cumplen/);
+    expect(gate({ ...base, firstPass: 5, repaired: 12 }).reasons.join(" ")).toMatch(/a la primera/);
+    expect(gate({ ...base, latencyMs: { ...base.latencyMs, p95: 40_000 } }).reasons.join(" ")).toMatch(/p95/);
+    expect(gate({ ...base, scenarios: 0, passed: 0, firstPass: 0 }).pass).toBe(false);
+  });
+});

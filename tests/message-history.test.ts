@@ -444,11 +444,14 @@ describe("independencia y límites", () => {
   });
 
   it("los demás módulos del agente solo reciben el historial inyectado: no lo crean, no leen su configuración y NO leen nada de él", () => {
+    // Única excepción deliberada (decisión del dueño): el agente nuevo lee los mensajes recientes del contacto, SOLO con la función de lectura acotada plusmedik_history_recent (src/agent/pilot.ts).
+    const isRecentReader = (file: string) => file.replaceAll("\\", "/").endsWith("agent/pilot.ts");
     const others = readdirSync(join(__dirname, "..", "src"), { recursive: true }).map(String).filter((file) => file.endsWith(".ts") && !file.endsWith("message-history.ts"));
     for (const file of others) {
       const code = src(file).replace(/\/\/[^\n]*/g, "");
       expect(code, file).not.toMatch(/resolveMessageHistory|createMessageHistory|createSupabaseHistoryStore|exportHistory|PLUSMEDIK_HISTORY/);
-      expect(code, file).not.toMatch(/plusmedik_history_/);
+      if (isRecentReader(file)) expect([...code.matchAll(/plusmedik_history_\w+/g)].map((match) => match[0])).toEqual(["plusmedik_history_recent"]);
+      else expect(code, file).not.toMatch(/plusmedik_history_/);
     }
   });
 

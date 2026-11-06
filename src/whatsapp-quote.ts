@@ -6,6 +6,7 @@ import { buildVisionDiagnostic, visionDiagnosticKeyFor } from "./vision-diagnost
 import type { MessageHistory } from "./message-history.js";
 import { runGuardedTurn, type Produced, type TurnContext, type TurnProducer, type TurnsConfig } from "./guarded-turn.js";
 import type { PublicQuote } from "./partial-auto.js";
+import { summarizeAiFailures } from "./provider-error.js";
 import type { CatalogStudy } from "./types.js";
 
 // Integración mínima WhatsApp (Kapso): recibir una imagen -> motor de PlusMedik -> responder con la cotización. Esta capa NO decide nada del AUTO MATCH:
@@ -266,6 +267,9 @@ export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProduc
         // Todas las evidencias del análisis se confirman juntas o ninguna (una transacción en la base). Si falla, el envío al paciente sigue igual.
         evidenceAttempted = true;
         await ctx.persist("evidence", (audit, runId, lease) => audit.recordEvidence(runId, { analysis, aiCalls, catalog: catalogFingerprint(catalog) }, lease));
+        // Memoria en sombra (PLUSMEDIK_CONV_STATE): la receta leída, solo con ids de estudios y cuántos puntos quedaron pendientes (nunca precios ni texto). Mejor esfuerzo: no espera ni lanza.
+        const readIds = (analysis.internal?.quoted.lines ?? analysis.quote?.lines ?? []).map((line) => line.id);
+        deps.turns?.convState?.artifact({ from: image.from, key: image.messageId, kind: "RECIPE", studyIds: readIds, unrecognized: analysis.internal?.pending.length ?? 0 });
         if (analysis.publicQuote && analysis.outcome !== "HUMAN_REVIEW") {
           reply = formatQuoteMessage(analysis.publicQuote, { partial: analysis.outcome === "AUTO_PARTIAL", instant });
           if (deps.quotePreparations) {
@@ -281,6 +285,7 @@ export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProduc
             }
           }
           result = "quoted";
+          deps.turns?.convState?.artifact({ from: image.from, key: image.messageId, kind: "QUOTE", studyIds: readIds });
         } else {
           reply = instant ? NO_QUOTE_MESSAGE_INSTANT : NO_QUOTE_MESSAGE;
           result = "no_quote";
@@ -288,7 +293,9 @@ export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProduc
       }
     } catch (error) {
       const errorCode = processingFailureCode(phase);
-      deps.log("processing_failed", { messageId: image.messageId, phone: who, errorCode });
+      // Qué llamada a qué modelo falló y por qué (cuota/tasa/tiempo…), solo con códigos de lista blanca: sin esto un fallo de IA era indistinguible de otro.
+      const aiFailures = summarizeAiFailures(aiCalls);
+      deps.log("processing_failed", { messageId: image.messageId, phone: who, errorCode, ...(aiFailures.length > 0 ? { aiFailures } : {}) });
       if (!evidenceAttempted) await ctx.persist("evidence", (audit, runId, lease) => audit.recordEvidence(runId, { aiCalls }, lease));
       await ctx.persist("failure", (audit, runId, lease) => audit.recordFailure(runId, errorCode, lease));
       reply = TECHNICAL_ISSUE_MESSAGE;
