@@ -207,7 +207,7 @@ function replyOf(decision: Awaited<ReturnType<typeof runAgentTurn>>): PilotReply
     processingStatus: "COMPLETED",
     stale: "NEWER_TURN",
     // Firma de la respuesta (código cerrado para la guarda de repeticiones).
-    signature: `agent:${quoted ? "QUOTE" : decision.handoffRegistered ? "HANDOFF" : "ANSWER"}`,
+    signature: `AGENT:${quoted ? "QUOTE" : decision.handoffRegistered ? "HANDOFF" : "ANSWER"}`,
     quality,
     quotedStudyIds
   };

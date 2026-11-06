@@ -16,6 +16,7 @@ import { handleKapsoWebhook, type KapsoWebhookDeps } from "../src/kapso-webhook.
 import { createMessageHistory, createSupabaseHistoryStore } from "../src/message-history.js";
 import { resolveQuoteSessionsConfig } from "../src/quote-session-turns.js";
 import { createTextHandler, DRAFT_TEXTS } from "../src/text-handler.js";
+import { DEFAULT_REPLY_GUARD } from "../src/reply-guard.js";
 import type { CatalogStudy } from "../src/types.js";
 import type { QuoteDeps } from "../src/whatsapp-quote.js";
 import { fixtureAnswer } from "../scripts/g7/lib/agent-scenarios.js";
@@ -97,6 +98,8 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
     // Memoria de la fase 1 (la exige el piloto en producción; también el mundo de referencia la usa para comparar lo mismo).
     memory?: boolean;
     cap?: { max: number; windowSeconds: number };
+    // La guarda de repeticiones de la base ENCENDIDA, como en producción (la firma de la respuesta viaja a la base y debe cumplir su forma).
+    guard?: boolean;
     crm?: CrmHandoff;
     sessions?: boolean;
   }
@@ -132,7 +135,7 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
       sendText: vi.fn(async (to: string, body: string) => { sends.push({ to, body }); return { providerMessageId: `wamid.out-${sends.length}-${++counter}` }; }),
       log, audit: createSupabaseAuditRepository(rpcOptions()), leaseRenewIntervalMs: 3_600_000, history,
       turns: {
-        contactKeyFor, busyDelayMs: 20, busyRetries: 400, attention, ...(convState ? { convState } : {}), ...(pilot ? { agentPilot: pilot } : {}), ...(options.cap ? { dailyCap: options.cap } : {}), ...(options.crm ? { crmHandoff: options.crm } : {}),
+        contactKeyFor, busyDelayMs: 20, busyRetries: 400, attention, ...(convState ? { convState } : {}), ...(pilot ? { agentPilot: pilot } : {}), ...(options.cap ? { dailyCap: options.cap } : {}), ...(options.guard ? { replyGuard: DEFAULT_REPLY_GUARD } : {}), ...(options.crm ? { crmHandoff: options.crm } : {}),
         handlers: { text: createTextHandler({ log, attention: true }) }, ignorePayment: true,
         ...(options.sessions !== false ? { quoteSessions: resolveQuoteSessionsConfig({ waitDelayMs: 25, waitRetries: 400, attention: { gate: attention.gate, settleMs: attention.settleMs }, ownTexts: Object.values(DRAFT_TEXTS) }) } : {})
       }
@@ -241,6 +244,16 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
       const w2 = setup({ pilot: { phones: [p.phone], model: lab } });
       await say(w2, p.phone, "a que hora abren?");
       expect(w2.sends).toHaveLength(1);
+    });
+
+    it("REGRESIÓN PT422: con la guarda de repeticiones de la base encendida (como en producción) la respuesta de CONVERSACIÓN del agente se envía; antes su firma en minúsculas rechazaba la reserva y no salía", async () => {
+      const p = patient();
+      const model = fakeAgentModel({ text: "Claro, aquí estoy para ayudarte." });
+      const w = setup({ pilot: { phones: [p.phone], model }, guard: true });
+      await switchTo(true);
+      await say(w, p.phone, "hola, buenas");
+      expect(w.sends.map((s) => s.body)).toEqual(["Claro, aquí estoy para ayudarte."]);
+      expect(w.logs.filter(([event]) => event === "audit_unavailable")).toEqual([]);
     });
 
     it("MÉTODOS DE PAGO IGNORADOS en un lote: «hola», «quiero cotizar…» y «voy a pagar por QR» → se cotiza y del QR no se dice nada; el modelo ni siquiera recibe el mensaje de pago", async () => {
