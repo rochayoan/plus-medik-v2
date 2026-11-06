@@ -111,7 +111,7 @@ describe("la decisión", () => {
   it("entrega la respuesta verificada con su resultado, firma y calidad; los registros llevan solo códigos", async () => {
     const { pilot, logs } = make({}, { text: "¡Hola! Cuéntame qué necesitas y te ayudo." });
     const reply = await pilot.produce({ from: PHONE, turns: [turn("wamid.A", "hola, soy Maria Perez 71234567")] });
-    expect(reply).toMatchObject({ body: "¡Hola! Cuéntame qué necesitas y te ayudo.", result: "conversation", processingStatus: "COMPLETED", stale: "NEWER_TURN", signature: "agent:ANSWER", quality: "ANSWER", quotedStudyIds: [] });
+    expect(reply).toMatchObject({ body: "¡Hola! Cuéntame qué necesitas y te ayudo.", result: "conversation", processingStatus: "COMPLETED", stale: "NEWER_TURN", signature: "AGENT:ANSWER", quality: "ANSWER", quotedStudyIds: [] });
     expect(reply).not.toHaveProperty("closes");
     expect(reply).not.toHaveProperty("cap");
     expect(pilotLogs(logs)[0]).toMatchObject({ status: "VERIFIED", model: "modelo-x", utterances: 1 });
@@ -121,7 +121,7 @@ describe("la decisión", () => {
   it("una cotización sale como «quoted» con los precios del catálogo agregados por el sistema y los ids de estudios para la memoria", async () => {
     const { pilot, model } = make({}, { calls: [{ tool: "quote_studies", input: { studies: ["hemograma", "glucosa"] } }], text: "¡Claro! Abajo tienes el detalle de tu cotización." });
     const reply = await pilot.produce({ from: PHONE, turns: [turn("w1", "cuanto cuesta un hemograma y una glucosa?")] });
-    expect(reply).toMatchObject({ result: "quoted", quality: "QUOTE", signature: "agent:QUOTE" });
+    expect(reply).toMatchObject({ result: "quoted", quality: "QUOTE", signature: "AGENT:QUOTE" });
     expect(reply!.body).toMatch(/HEMOGRAMA COMPLETO[\s\S]*GLUCOSA EN AYUNAS[\s\S]*75[.,]5/);
     expect(reply!.quotedStudyIds.sort()).toEqual(["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002"]);
     expect(JSON.stringify(model.responds)).not.toMatch(/\b45\b|Bs/);
@@ -157,6 +157,25 @@ describe("la decisión", () => {
     expect(reply).toMatchObject({ silent: true, body: "" });
     expect(model.responds).toEqual([]);
     expect(pilotLogs(logs)[0]).toMatchObject({ status: "SILENT" });
+  });
+});
+
+describe("la firma de la respuesta cumple lo que exige la base (regresión PT422)", () => {
+  // La guarda de repeticiones de la base solo acepta ^[A-Z0-9_.:-]{1,64}$: una firma en minúsculas rechazaba la reserva con PT422 y la respuesta de conversación no se enviaba.
+  const DB_SIGNATURE = /^[A-Z0-9_.:-]{1,64}$/;
+
+  it("toda firma del agente (respuesta, cotización, derivación) tiene la forma que acepta la base", async () => {
+    const answer = await make({}, { text: "¡Hola! ¿En qué te ayudo?" }).pilot.produce({ from: PHONE, turns: [turn("w1", "hola")] });
+    const quote = await make({}, { calls: [{ tool: "quote_studies", input: { studies: ["hemograma"] } }], text: "Abajo el detalle." }).pilot.produce({ from: PHONE, turns: [turn("w1", "cotiza hemograma")] });
+    const handoff = await make({ handoffEnabled: true }, { plan: { handoff: "HUMAN_REQUEST" }, text: "Te paso con una persona del laboratorio." }).pilot.produce({ from: PHONE, turns: [turn("w1", "quiero una persona")], handoff: async () => true });
+    for (const reply of [answer, quote, handoff]) expect(reply?.signature, JSON.stringify(reply?.signature)).toMatch(DB_SIGNATURE);
+  });
+
+  it("guardSignature normaliza cualquier firma a esa forma (minúsculas, caracteres raros, largo)", async () => {
+    const { guardSignature } = await import("../src/guarded-turn.js");
+    for (const raw of ["agent:ANSWER", "Agente respuesta/ñandú", "a".repeat(200), "ya:VALIDA_1.2-3"]) expect(guardSignature(raw), raw).toMatch(DB_SIGNATURE);
+    expect(guardSignature("agent:ANSWER")).toBe("AGENT:ANSWER");
+    expect(guardSignature("CONVERSATION:HOURS")).toBe("CONVERSATION:HOURS");
   });
 });
 
@@ -220,7 +239,7 @@ describe("la derivación humana al CRM", () => {
     order.push("entregar");
     expect(order).toEqual(["registrar:HUMAN_REQUEST", "entregar"]);
     expect(handoff).toHaveBeenCalledTimes(1);
-    expect(reply).toMatchObject({ body: "Claro, te paso con una persona del laboratorio.", signature: "agent:HANDOFF" });
+    expect(reply).toMatchObject({ body: "Claro, te paso con una persona del laboratorio.", signature: "AGENT:HANDOFF" });
     expect(pilotLogs(logs)[0]).toMatchObject({ status: "VERIFIED", handoff: "REGISTERED" });
     expect(model.responds[0]!.capabilities.handoff).toBe(true);
     expect(model.responds[0]!.handoff).toBe(true);

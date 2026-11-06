@@ -92,6 +92,9 @@ export interface PhotoReport {
   studyIds: readonly string[];
 }
 
+// La base solo acepta firmas de la guarda con la forma ^[A-Z0-9_.:-]{1,64}$ (si no, rechaza la reserva con PT422 y la respuesta NO se envía). Cualquier productor queda a salvo: se normaliza aquí.
+export const guardSignature = (signature: string): string => signature.toUpperCase().replace(/[^A-Z0-9_.:-]/g, "_").slice(0, 64);
+
 export interface TurnContext {
   // Número del turno dentro de su contacto, en el orden de llegada a la base (solo en modo turnos).
   seq?: number;
@@ -208,7 +211,7 @@ export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claime
       for (;;) {
         try {
           // La guarda (G3.2) solo acompaña a lo conversacional; la base lo vuelve a comprobar (una imagen o una cotización nunca se limitan).
-          const guard = deps.turns?.replyGuard && ref.kind !== "IMAGE" && (result === "conversation" || result === "technical_issue") ? { config: deps.turns.replyGuard, ...(produced.signature ? { signature: produced.signature } : {}) } : undefined;
+          const guard = deps.turns?.replyGuard && ref.kind !== "IMAGE" && (result === "conversation" || result === "technical_issue") ? { config: deps.turns.replyGuard, ...(produced.signature ? { signature: guardSignature(produced.signature) } : {}) } : undefined;
           reservation = deps.turns ? await deps.audit!.reserveSend(auditRunId!, result, lease!, { stale, ...(guard ? { guard } : {}), ...(produced.cap ? { cap: produced.cap } : deps.turns.dailyCap ? { cap: deps.turns.dailyCap } : {}) }) : await deps.audit!.reserveSend(auditRunId!, result, lease!);
         } catch (error) {
           reservation = "unavailable";
