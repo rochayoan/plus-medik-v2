@@ -123,9 +123,9 @@ describe("el adaptador real contra un servidor local de Responses", () => {
 
   it("una salida que no es el JSON pedido es INVALID_OUTPUT; una respuesta vacía también", async () => {
     respond = (_request, response) => json(response, 200, completion("claro, te ayudo con eso"));
-    expect((await runScenario(modelOf(), AGENT_SCENARIOS[0]!)).decision?.modelError).toEqual({ cause: "INVALID_OUTPUT" });
+    expect((await runScenario(modelOf(), AGENT_SCENARIOS[0]!)).decision?.modelError).toEqual({ cause: "INVALID_OUTPUT", stage: "plan", reason: "not_json" });
     respond = (_request, response) => json(response, 200, { ...completion(""), output: [] });
-    expect((await runScenario(modelOf(), AGENT_SCENARIOS[0]!)).decision?.modelError).toEqual({ cause: "INVALID_OUTPUT" });
+    expect((await runScenario(modelOf(), AGENT_SCENARIOS[0]!)).decision?.modelError).toEqual({ cause: "INVALID_OUTPUT", stage: "plan", reason: "empty" });
   });
 
   it("un modelo que primero se equivoca y luego corrige: el segundo intento llega con los códigos y la decisión queda verificada", async () => {

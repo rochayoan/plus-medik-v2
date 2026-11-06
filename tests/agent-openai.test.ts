@@ -99,7 +99,7 @@ describe("interpretar lo que devuelve el modelo", () => {
     }
   });
 
-  it("los actos se arman con su campo propio y se rechaza una combinación incompleta", () => {
+  it("los actos se arman con su campo propio; una combinación incompleta se normaliza (ver agent-regression-4203) y solo un tipo de acto desconocido se rechaza", () => {
     const ok = parseActs(JSON.stringify({
       text: "Hola",
       acts: [
@@ -117,8 +117,9 @@ describe("interpretar lo que devuelve el modelo", () => {
       { kind: "HANDOFF", utterances: ["U4"], reason: "MEDICAL" }, { kind: "DEFER", utterances: ["U5"], reason: "NO_DATA" }, { kind: "ACK", utterances: ["U6"] }
     ]);
     const base = { utterances: ["U1"], factIds: [], code: null, reason: null };
-    for (const act of [{ ...base, kind: "CLARIFY" }, { ...base, kind: "HANDOFF", reason: "NO_DATA" }, { ...base, kind: "DEFER" }, { ...base, kind: "DEFER", reason: "MEDICAL" }, { ...base, kind: "BAILAR" }]) {
-      expect(() => parseActs(JSON.stringify({ text: "x", acts: [act] })), JSON.stringify(act)).toThrow(AgentOutputError);
+    expect(() => parseActs(JSON.stringify({ text: "x", acts: [{ ...base, kind: "BAILAR" }] }))).toThrow(AgentOutputError);
+    for (const act of [{ ...base, kind: "CLARIFY" }, { ...base, kind: "HANDOFF", reason: "NO_DATA" }, { ...base, kind: "DEFER" }, { ...base, kind: "DEFER", reason: "MEDICAL" }]) {
+      expect(() => parseActs(JSON.stringify({ text: "x", acts: [act] })), JSON.stringify(act)).not.toThrow();
     }
   });
 });
@@ -169,6 +170,25 @@ describe("el cliente de OpenAI (API Responses)", () => {
     expect(create.mock.calls[0]![0].reasoning).toBeUndefined();
     create.mockResolvedValueOnce({ output_text: "  " });
     await expect(createOpenAiAgentClient({ apiKey: "k", model: "m" }).run({ instructions: "i", input: "m", schemaName: "n", schema: {}, maxOutputTokens: 1, timeoutMs: 1000 })).rejects.toBeInstanceOf(AgentOutputError);
+  });
+
+  it("una salida vacía explica POR QUÉ con un código: cortada por el tope de tokens, rechazo del modelo o vacía", async () => {
+    const run = () => createOpenAiAgentClient({ apiKey: "k", model: "m" }).run({ instructions: "i", input: "m", schemaName: "n", schema: {}, maxOutputTokens: 1, timeoutMs: 1000 });
+    const reason = async () => { try { await run(); } catch (error) { return (error as AgentOutputError).reason; } return undefined; };
+    create.mockResolvedValueOnce({ output_text: "", status: "incomplete", incomplete_details: { reason: "max_output_tokens" } });
+    expect(await reason()).toBe("empty_incomplete_max_output_tokens");
+    create.mockResolvedValueOnce({ output_text: "", status: "completed", output: [{ type: "message", content: [{ type: "refusal", refusal: "no puedo" }] }] });
+    expect(await reason()).toBe("empty_refusal");
+    create.mockResolvedValueOnce({ output_text: "", status: "completed", output: [] });
+    expect(await reason()).toBe("empty");
+  });
+
+  it("la etapa queda registrada: una salida inválida del plan o de la respuesta lleva stage plan o respond", async () => {
+    const client = (text: string): AgentClient => ({ run: async () => ({ text }) });
+    const stageOf = async (fn: () => Promise<unknown>) => { try { await fn(); } catch (error) { return (error as AgentOutputError).stage; } return undefined; };
+    const input = { utterances: [], recent: [], facts: [], hasQuoteBlock: false, capabilities: CAPS };
+    expect(await stageOf(() => createAgentModel({ client: client("no json") }).plan({ utterances: [], recent: [], tools: [], capabilities: CAPS }))).toBe("plan");
+    expect(await stageOf(() => createAgentModel({ client: client("no json") }).respond(input))).toBe("respond");
   });
 });
 

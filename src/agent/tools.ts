@@ -114,7 +114,9 @@ export function quoteStudiesTool(options: { loadCatalog: () => Promise<readonly 
     async run(input) {
       const { studies } = input as { studies: string[] };
       const catalog = await options.loadCatalog();
-      const extraction = extractStudyRequests(studies.join(", "), catalog);
+      // El motor distingue «un pedido de estudios» de «charla» por el texto: un nombre que no está en el catálogo (o con una errata) solo cuenta como pedido si el texto habla de cotizar. Sin esta palabra la
+      // herramienta devolvía «nada» (NO_DATA) y el agente no sabía que el estudio no se encontró (prueba real del 6-nov).
+      const extraction = extractStudyRequests(`cotizar ${studies.join(", ")}`, catalog);
       if (!extraction || !extraction.isRequest) return undefined;
       const result = extraction.result;
       const facts: Array<Omit<Fact, "id">> = [];
