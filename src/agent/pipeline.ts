@@ -42,10 +42,12 @@ const addUsage = (total: ModelUsage, used: Partial<ModelUsage> | undefined): Mod
 });
 
 // Un error del modelo se describe SOLO con códigos de la lista blanca (sin mensaje, sin cuerpo). Una salida con forma inválida lleva un código propio.
-const modelFailure = (error: unknown): AgentDecision["modelError"] => (error instanceof Error && error.name === "AgentOutputError" ? { cause: "INVALID_OUTPUT" } : describeProviderError(error));
+const modelFailure = (error: unknown): AgentDecision["modelError"] =>
+  error instanceof AgentOutputError ? { cause: "INVALID_OUTPUT", ...(error.stage ? { stage: error.stage } : {}), reason: error.reason, ...(error.detail ? { detail: error.detail } : {}) } : describeProviderError(error);
 
+// Una salida del modelo que no se puede usar. SOLO códigos: `reason` (qué falló), `detail` (campo del esquema y tipo de problema, p. ej. «acts.0.kind:invalid_value»; nunca valores) y `stage` (plan o respond).
 export class AgentOutputError extends Error {
-  constructor(readonly reason: string) {
+  constructor(readonly reason: string, readonly detail?: string, public stage?: "plan" | "respond") {
     super(`agent_output_${reason}`);
     this.name = "AgentOutputError";
   }

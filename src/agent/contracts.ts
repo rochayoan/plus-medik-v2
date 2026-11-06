@@ -154,7 +154,7 @@ export interface AgentDecision {
   reply?: string;
   violations: Violation[];
   // Causa codificada si falló el modelo (lista blanca; nunca el mensaje del error).
-  modelError?: ProviderErrorInfo | { cause: "INVALID_OUTPUT" };
+  modelError?: ProviderErrorInfo | { cause: "INVALID_OUTPUT"; stage?: "plan" | "respond"; reason: string; detail?: string };
   intents?: IntentReading[];
   // true si se ejecutó una derivación registrada (la persona del laboratorio ya tiene el caso).
   handoffRegistered?: boolean;
