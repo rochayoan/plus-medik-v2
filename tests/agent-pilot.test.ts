@@ -1,17 +1,17 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import type { Act, AgentModel, HandoffReason, IntentReading, RespondInput } from "../src/agent/contracts.js";
+import type { AgentModel, HandoffReason, PlanOutput, RespondInput } from "../src/agent/contracts.js";
 import { createAgentPilot, createPilotSwitch, createRecentProvider, PILOT_LIMITS, type PilotSwitch } from "../src/agent/pilot.js";
 import { AGENT_SCENARIOS } from "../scripts/g7/lib/agent-scenarios.js";
 import { CONTACT_KEY, FIXTURE_CATALOG, fixtureAnswer, NOW, PHONE } from "../scripts/g7/lib/agent-scenarios.js";
 import type { ObservedTurn } from "../src/conversation-state-store.js";
 
-// Piloto del nuevo agente: la lista de números, el interruptor que falla cerrado, la decisión (y su respaldo al agente de siempre ante CUALQUIER problema), la derivación real y la configuración.
+// Piloto del agente: los contactos elegibles, el interruptor de emergencia que falla cerrado, la decisión (y su respaldo, el modo esencial, ante CUALQUIER problema), el silencio y la derivación real.
 
 const turn = (id: string, text: string): ObservedTurn => ({ messageId: id, kind: "TEXT", text });
 const quoteScenario = AGENT_SCENARIOS.find((scenario) => scenario.id === "cotizar-por-nombre")!;
 
-interface ModelScript { calls?: Array<{ tool: string; input: unknown }>; intents?: IntentReading[]; acts?: (input: RespondInput) => Act[]; text?: string; failPlan?: Error; hang?: boolean }
+interface ModelScript { calls?: Array<{ tool: string; input: unknown }>; plan?: Partial<PlanOutput>; text?: string; failPlan?: Error; hang?: boolean }
 function fakeModel(script: ModelScript = {}): AgentModel & { plans: number; responds: RespondInput[] } {
   const model = {
     plans: 0,
@@ -20,11 +20,11 @@ function fakeModel(script: ModelScript = {}): AgentModel & { plans: number; resp
       model.plans += 1;
       if (script.hang) return new Promise<never>(() => undefined);
       if (script.failPlan) throw script.failPlan;
-      return { toolCalls: script.calls ?? [], ...(script.intents ? { intents: script.intents } : {}) };
+      return { toolCalls: script.calls ?? [], ...script.plan };
     },
     async respond(input: RespondInput) {
       model.responds.push(input);
-      return { acts: script.acts ? script.acts(input) : [{ kind: "ACK" as const, utterances: input.utterances.map((u) => u.id) }], text: script.text ?? "¡Hola! ¿En qué te puedo ayudar?" };
+      return { text: script.text ?? "¡Hola! ¿En qué te puedo ayudar?" };
     }
   };
   return model;
@@ -40,7 +40,7 @@ function make(overrides: Partial<Parameters<typeof createAgentPilot>[0]> = {}, s
   const pilotSwitch = switchOf(true);
   const pilot = createAgentPilot({
     model, modelName: "modelo-x", phones: new Set([PHONE]), switch: pilotSwitch,
-    context: { loadCatalog: async () => FIXTURE_CATALOG, answer: fixtureAnswer, contactKeyFor: (phone) => (phone.replace(/\D/g, "") === PHONE ? CONTACT_KEY : undefined), now: () => NOW },
+    context: { loadCatalog: async () => FIXTURE_CATALOG, answer: fixtureAnswer, contactKeyFor: (phone) => (phone.replace(/\D/g, "") === PHONE ? CONTACT_KEY : undefined) },
     log: (event, data) => { logs.push([event, data]); }, now: () => NOW, ...overrides
   });
   return { pilot, model, logs, pilotSwitch: (overrides.switch as ReturnType<typeof switchOf> | undefined) ?? pilotSwitch };
@@ -108,16 +108,18 @@ describe("el interruptor falla cerrado y apaga de inmediato", () => {
 });
 
 describe("la decisión", () => {
-  it("entrega la respuesta verificada con su resultado, firma, calidad y tope propio; los registros llevan solo códigos", async () => {
-    const { pilot, logs } = make({ dailyCap: { max: 40, windowSeconds: 86_400 } }, { text: "¡Hola! Cuéntame qué necesitas y te ayudo." });
+  it("entrega la respuesta verificada con su resultado, firma y calidad; los registros llevan solo códigos", async () => {
+    const { pilot, logs } = make({}, { text: "¡Hola! Cuéntame qué necesitas y te ayudo." });
     const reply = await pilot.produce({ from: PHONE, turns: [turn("wamid.A", "hola, soy Maria Perez 71234567")] });
-    expect(reply).toMatchObject({ body: "¡Hola! Cuéntame qué necesitas y te ayudo.", result: "conversation", processingStatus: "COMPLETED", stale: "NEWER_TURN", signature: "agent:ACK", quality: "ANSWER", cap: { max: 40, windowSeconds: 86_400 }, quotedStudyIds: [] });
-    expect(pilotLogs(logs)[0]).toMatchObject({ status: "VERIFIED", model: "modelo-x", acts: { ACK: 1 } });
+    expect(reply).toMatchObject({ body: "¡Hola! Cuéntame qué necesitas y te ayudo.", result: "conversation", processingStatus: "COMPLETED", stale: "NEWER_TURN", signature: "agent:ANSWER", quality: "ANSWER", quotedStudyIds: [] });
+    expect(reply).not.toHaveProperty("closes");
+    expect(reply).not.toHaveProperty("cap");
+    expect(pilotLogs(logs)[0]).toMatchObject({ status: "VERIFIED", model: "modelo-x", utterances: 1 });
     expect(JSON.stringify(logs)).not.toMatch(/Maria|Perez|71234567|wamid|Cuéntame|59170000001/);
   });
 
   it("una cotización sale como «quoted» con los precios del catálogo agregados por el sistema y los ids de estudios para la memoria", async () => {
-    const { pilot, model } = make({}, { calls: [{ tool: "quote_studies", input: { studies: ["hemograma", "glucosa"] } }], acts: () => [{ kind: "QUOTE", utterances: ["U1"] }], text: "¡Claro! Abajo tienes el detalle de tu cotización." });
+    const { pilot, model } = make({}, { calls: [{ tool: "quote_studies", input: { studies: ["hemograma", "glucosa"] } }], text: "¡Claro! Abajo tienes el detalle de tu cotización." });
     const reply = await pilot.produce({ from: PHONE, turns: [turn("w1", "cuanto cuesta un hemograma y una glucosa?")] });
     expect(reply).toMatchObject({ result: "quoted", quality: "QUOTE", signature: "agent:QUOTE" });
     expect(reply!.body).toMatch(/HEMOGRAMA COMPLETO[\s\S]*GLUCOSA EN AYUNAS[\s\S]*75[.,]5/);
@@ -126,8 +128,8 @@ describe("la decisión", () => {
     expect(quoteScenario.expect.quoteBlock).toBe(true);
   });
 
-  it("una cotización PARCIAL (un estudio dudoso junto a uno seguro) se envía con los precios del seguro y deja lo dudoso pendiente a la vista", async () => {
-    const { pilot } = make({}, { calls: [{ tool: "quote_studies", input: { studies: ["hemograma", "creatinina"] } }], acts: () => [{ kind: "QUOTE", utterances: ["U1"] }, { kind: "CLARIFY", utterances: ["U1"], code: "WHICH_STUDY" }], text: "Te dejo abajo el hemograma; para la creatinina, ¿la quieres sérica o en orina?" });
+  it("una cotización PARCIAL (un estudio dudoso junto a uno seguro) se envía con los precios del seguro y deja lo dudoso a la vista (calidad UNRESOLVED)", async () => {
+    const { pilot } = make({}, { calls: [{ tool: "quote_studies", input: { studies: ["hemograma", "creatinina"] } }], text: "Te dejo abajo el hemograma; para la creatinina, ¿la quieres sérica o en orina?" });
     const reply = await pilot.produce({ from: PHONE, turns: [turn("w1", "cuanto cuesta un hemograma y una creatinina?")] });
     expect(reply).toMatchObject({ result: "quoted", quality: "UNRESOLVED" });
     expect(reply!.body).toMatch(/HEMOGRAMA COMPLETO[\s\S]*45/);
@@ -135,24 +137,30 @@ describe("la decisión", () => {
     expect(reply!.quotedStudyIds).toEqual(["00000000-0000-4000-8000-000000000001"]);
   });
 
-  it("lo aplazado queda visible para la memoria: DEFER = sin resolver; DEFER de salud o de «quiero una persona» = sin derivación", async () => {
-    const defer = (reason: "NO_DATA" | "NOT_SUPPORTED"): ModelScript["acts"] => (input) => [{ kind: "DEFER", utterances: input.utterances.map((u) => u.id), reason }];
-    const unresolved = make({}, { acts: defer("NO_DATA"), text: "No tengo ese dato confirmado por ahora." });
-    expect((await unresolved.pilot.produce({ from: PHONE, turns: [turn("w1", "tienen servicio de ambulancia?")] }))?.quality).toBe("UNRESOLVED");
-    const medical = make({}, { intents: [{ utterance: "U1", intent: "MEDICAL" }], acts: defer("NOT_SUPPORTED"), text: "Eso conviene consultarlo con tu médico." });
-    expect((await medical.pilot.produce({ from: PHONE, turns: [turn("w1", "quiero saber si es normal este valor de mi análisis")] }))?.quality).toBe("BLOCKED");
-    const human = make({}, { intents: [{ utterance: "U1", intent: "HUMAN" }], acts: defer("NOT_SUPPORTED"), text: "Por este medio no puedo pasarte con una persona por ahora." });
-    expect((await human.pilot.produce({ from: PHONE, turns: [turn("w1", "quiero hablar con una persona")] }))?.quality).toBe("BLOCKED");
+  it("«sin datos» no es un fallo: una pregunta sin dato aprobado se responde con honestidad y sale por el agente", async () => {
+    const { pilot, logs } = make({}, { calls: [{ tool: "lab_info", input: { question: "donde queda" } }], text: "Ahora mismo no tengo la dirección confirmada. ¿Te ayudo con algo más?" });
+    const reply = await pilot.produce({ from: PHONE, turns: [turn("w1", "donde queda el laboratorio?")] });
+    expect(reply).toMatchObject({ body: "Ahora mismo no tengo la dirección confirmada. ¿Te ayudo con algo más?", quality: "ANSWER" });
+    expect(pilotLogs(logs)[0]).toMatchObject({ status: "VERIFIED", tools: [{ tool: "lab_info", ok: false, error: "NO_DATA", why: "NO_APPROVED_DATA" }] });
   });
 
-  it("la intención la decide el MODELO: si entendió que es de salud aunque las reglas no lo vieran, solo puede derivar o aplazar", async () => {
-    const answerFromFacts = make({}, { calls: [{ tool: "lab_info", input: { question: "a que hora abren" } }], intents: [{ utterance: "U1", intent: "MEDICAL" }], acts: () => [{ kind: "ANSWER", utterances: ["U1"], factIds: ["lab_info:1"] }], text: "Abrimos de 07:00 a 18:00." });
-    expect(await answerFromFacts.pilot.produce({ from: PHONE, turns: [turn("w1", "a que hora abren, es para mi examen del azúcar")] })).toBeUndefined();
-    expect(pilotLogs(answerFromFacts.logs)[0]).toMatchObject({ status: "REJECTED", violations: expect.arrayContaining(["MEDICAL_NOT_HANDED_OFF"]), intents: ["MEDICAL"] });
+  it("un mensaje de salud sin pedir precio no se conversa con el modelo: responde el modo esencial (sin llamar al modelo)", async () => {
+    const { pilot, model, logs } = make({}, { text: "no debía usarse" });
+    expect(await pilot.produce({ from: PHONE, turns: [turn("w1", "me duele el pecho y tengo fiebre")] })).toBeUndefined();
+    expect(model.plans).toBe(0);
+    expect(pilotLogs(logs)[0]).toMatchObject({ status: "FALLBACK", reason: "MEDICAL" });
+  });
+
+  it("claramente ajeno al laboratorio y sin conversación previa: SILENCIO (sin respuesta, sin caer al modo esencial)", async () => {
+    const { pilot, model, logs } = make({}, { plan: { silent: true }, text: "no debía usarse" });
+    const reply = await pilot.produce({ from: PHONE, turns: [turn("w1", "jajaja viste el partido de anoche")] });
+    expect(reply).toMatchObject({ silent: true, body: "" });
+    expect(model.responds).toEqual([]);
+    expect(pilotLogs(logs)[0]).toMatchObject({ status: "SILENT" });
   });
 });
 
-describe("ante cualquier problema responde la ruta de siempre (undefined)", () => {
+describe("ante cualquier problema responde el modo esencial (undefined)", () => {
   it("modelo caído, verificación fallida (cifra inventada) y precio escrito por el modelo", async () => {
     const quota = Object.assign(new Error("x"), { name: "RateLimitError", status: 429, code: "insufficient_quota" });
     const failed = make({}, { failPlan: quota });
@@ -165,22 +173,22 @@ describe("ante cualquier problema responde la ruta de siempre (undefined)", () =
     expect(await price.pilot.produce({ from: PHONE, turns: [turn("w1", "cuanto cuesta un hemograma")] })).toBeUndefined();
   });
 
-  it("un lote sin texto o con una persona al mando no se decide (sin llamar al modelo)", async () => {
+  it("un lote sin texto no se decide (sin llamar al modelo)", async () => {
     const media = make();
     expect(await media.pilot.produce({ from: PHONE, turns: [{ messageId: "i1", kind: "IMAGE" }] })).toBeUndefined();
     expect(media.model.plans).toBe(0);
     expect(pilotLogs(media.logs)[0]).toMatchObject({ status: "FALLBACK", reason: "NO_TEXT" });
   });
 
-  it("el plazo vence: responde la ruta de siempre, el trabajo tardío ya no puede derivar a nadie", async () => {
+  it("el plazo vence: responde el modo esencial, el trabajo tardío ya no puede derivar a nadie", async () => {
     const handoff = vi.fn(async () => true);
     const hung = make({ deadlineMs: 40, handoffEnabled: true }, { hang: true });
     expect(await hung.pilot.produce({ from: PHONE, turns: [turn("w1", "hola")], handoff })).toBeUndefined();
     expect(pilotLogs(hung.logs).at(-1)).toMatchObject({ status: "FALLBACK", reason: "DEADLINE" });
-    // un modelo lento que termina DESPUÉS del plazo con un acto HANDOFF: no se registra ningún caso tardío
+    // un modelo lento que termina DESPUÉS del plazo pidiendo una derivación: no se registra ningún caso tardío
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
-    const slowModel: AgentModel = { async plan() { await gate; return { toolCalls: [] }; }, async respond(input) { return { acts: [{ kind: "HANDOFF", utterances: input.utterances.map((u) => u.id), reason: "HUMAN_REQUEST" }], text: "Te paso con una persona del laboratorio." }; } };
+    const slowModel: AgentModel = { async plan() { await gate; return { toolCalls: [], handoff: "HUMAN_REQUEST" }; }, async respond() { return { text: "Te paso con una persona del laboratorio." }; } };
     const slow = make({ model: slowModel, deadlineMs: 30, handoffEnabled: true });
     expect(await slow.pilot.produce({ from: PHONE, turns: [turn("w1", "quiero hablar con una persona")], handoff })).toBeUndefined();
     release();
@@ -190,14 +198,13 @@ describe("ante cualquier problema responde la ruta de siempre (undefined)", () =
 });
 
 describe("la derivación humana al CRM", () => {
-  const humanAct: ModelScript["acts"] = (input) => [{ kind: "HANDOFF", utterances: input.utterances.map((u) => u.id), reason: "HUMAN_REQUEST" }];
-  const script: ModelScript = { acts: humanAct, text: "Claro, te paso con una persona del laboratorio." };
+  const script: ModelScript = { plan: { handoff: "HUMAN_REQUEST" }, text: "Claro, te paso con una persona del laboratorio." };
   const turns = [turn("w1", "quiero hablar con una persona")];
 
-  it("sin ejecutor (no hay cola al CRM) o sin habilitar, HANDOFF no existe: el plan se rechaza y responde la ruta de siempre", async () => {
+  it("sin ejecutor (no hay cola al CRM) o sin habilitar, no existe: el texto que lo promete se rechaza y responde el modo esencial", async () => {
     const none = make({ handoffEnabled: true }, script);
     expect(await none.pilot.produce({ from: PHONE, turns })).toBeUndefined();
-    expect(pilotLogs(none.logs)[0]).toMatchObject({ status: "REJECTED", violations: ["HANDOFF_UNAVAILABLE"] });
+    expect(pilotLogs(none.logs)[0]).toMatchObject({ status: "REJECTED", violations: ["UNREGISTERED_HANDOFF_PROMISE"] });
     const disabled = make({ handoffEnabled: false }, script);
     const handoff = vi.fn(async () => true);
     expect(await disabled.pilot.produce({ from: PHONE, turns, handoff })).toBeUndefined();
@@ -214,11 +221,12 @@ describe("la derivación humana al CRM", () => {
     expect(order).toEqual(["registrar:HUMAN_REQUEST", "entregar"]);
     expect(handoff).toHaveBeenCalledTimes(1);
     expect(reply).toMatchObject({ body: "Claro, te paso con una persona del laboratorio.", signature: "agent:HANDOFF" });
-    expect(pilotLogs(logs)[0]).toMatchObject({ status: "VERIFIED", handoff: "REGISTERED", acts: { HANDOFF: 1 } });
+    expect(pilotLogs(logs)[0]).toMatchObject({ status: "VERIFIED", handoff: "REGISTERED" });
     expect(model.responds[0]!.capabilities.handoff).toBe(true);
+    expect(model.responds[0]!.handoff).toBe(true);
   });
 
-  it("si el CRM no registra el caso (o falla), NO se promete nada: responde la ruta de siempre", async () => {
+  it("si el CRM no registra el caso (o falla), NO se promete nada: responde el modo esencial", async () => {
     for (const executor of [async () => false, async () => { throw new Error("CRM caído"); }]) {
       const { pilot, logs } = make({ handoffEnabled: true }, script);
       expect(await pilot.produce({ from: PHONE, turns, handoff: executor })).toBeUndefined();
@@ -271,7 +279,7 @@ describe("alcance global: todos los contactos elegibles, exclusiones y corta-cir
     const pilot = createAgentPilot({
       model, modelName: "modelo-x", switch: pilotSwitch,
       everyone: { exclude: new Set(options.exclude ?? []), contactKeyFor: keyFor },
-      context: { loadCatalog: async () => FIXTURE_CATALOG, answer: fixtureAnswer, contactKeyFor: keyFor, now: () => clock.now },
+      context: { loadCatalog: async () => FIXTURE_CATALOG, answer: fixtureAnswer, contactKeyFor: keyFor },
       log: (event, data) => { logs.push([event, data]); }, now: () => clock.now
     });
     return { pilot, model, logs, pilotSwitch };
@@ -325,9 +333,9 @@ describe("alcance global: todos los contactos elegibles, exclusiones y corta-cir
   it("el corta-circuito cuenta SOLO fallos del proveedor: un éxito lo reinicia y un rechazo del verificador no lo abre", async () => {
     const quota = Object.assign(new Error("x"), { status: 429, code: "insufficient_quota" });
     let fail = true;
-    const flaky: AgentModel = { async plan() { if (fail) throw quota; return { toolCalls: [] }; }, async respond(input) { return { acts: [{ kind: "ACK", utterances: input.utterances.map((u) => u.id) }], text: "¡Hola! ¿En qué te ayudo?" }; } };
+    const flaky: AgentModel = { async plan() { if (fail) throw quota; return { toolCalls: [] }; }, async respond() { return { text: "¡Hola! ¿En qué te ayudo?" }; } };
     const logs: Array<[string, Record<string, unknown>]> = [];
-    const pilot = createAgentPilot({ model: flaky, modelName: "m", switch: switchOf(true), everyone: { exclude: new Set(), contactKeyFor: keyOf }, context: { loadCatalog: async () => FIXTURE_CATALOG, contactKeyFor: keyOf, now: () => NOW }, log: (event, data) => { logs.push([event, data]); }, now: () => NOW });
+    const pilot = createAgentPilot({ model: flaky, modelName: "m", switch: switchOf(true), everyone: { exclude: new Set(), contactKeyFor: keyOf }, context: { loadCatalog: async () => FIXTURE_CATALOG, contactKeyFor: keyOf }, log: (event, data) => { logs.push([event, data]); }, now: () => NOW });
     const from = "59170000001";
     await pilot.produce({ from, turns: [turn("a", "hola")] });
     await pilot.produce({ from, turns: [turn("b", "hola")] });

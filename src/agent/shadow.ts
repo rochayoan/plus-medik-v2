@@ -1,100 +1,76 @@
 import { createHash } from "node:crypto";
 import { socialOf } from "../attention-filter.js";
-import type { ConversationState } from "../conversation-state.js";
-import { GOAL_BY_CATEGORY, type ConversationReader, type ObservedTurn } from "../conversation-state-store.js";
+import type { ConversationReader, ObservedTurn } from "../conversation-state-store.js";
 import type { KnowledgeAnswer } from "../knowledge-answers.js";
 import { stripPaymentTalk } from "../payment-talk.js";
 import { fold } from "../text-normalize.js";
-import { classifyText } from "../text-handler.js";
+import { asksForPrice, classifyText } from "../text-handler.js";
 import type { CatalogStudy } from "../types.js";
-import type { AgentDecision, AgentModel, Capabilities, RecentEntry, Utterance } from "./contracts.js";
-import { runAgentTurn } from "./pipeline.js";
+import type { AgentDecision, Capabilities, RecentEntry, ToolDef, Utterance } from "./contracts.js";
 import { conversationStateTool, createToolRegistry, findStudiesTool, labInfoTool, quoteStudiesTool } from "./tools.js";
-import type { ToolDef } from "./contracts.js";
 
-// Preparación del turno del agente conversacional: peticiones (una por mensaje de texto), pendientes de la memoria, mensajes recientes del historial y herramientas. Un fallo de cualquier parte
-// (memoria, historial) no detiene la decisión: se decide con lo que haya. El texto del paciente solo viaja al modelo y NUNCA se registra (el registro lleva contadores y códigos).
+// Preparación del turno del agente conversacional: los mensajes de texto del lote, los mensajes recientes del historial y las herramientas. Un fallo del historial no detiene la decisión: se decide con lo que haya.
+// El texto del paciente solo viaja al modelo y NUNCA se registra (el registro lleva contadores y códigos).
 
-export const SHADOW_LIMITS = { maxPending: 3, pendingMaxAgeMs: 24 * 3600 * 1000, maxTexts: 6, maxConcurrent: 4, runTimeoutMs: 60_000, flushMs: 90_000 } as const;
+export const PREPARE_LIMITS = { maxTexts: 6 } as const;
 
 export interface AgentContextOptions {
   loadCatalog: () => Promise<readonly CatalogStudy[]>;
   // Conocimiento aprobado del laboratorio. Sin él no existe la herramienta lab_info.
   answer?: (question: string) => Promise<KnowledgeAnswer | undefined>;
-  // Memoria estructurada opcional (pendientes y última cotización). Sin ella el agente decide con los mensajes recientes.
+  // Memoria persistente (última cotización y última receta por nombres del catálogo). Sin ella el agente decide con los mensajes recientes.
   reader?: ConversationReader;
   contactKeyFor(phone: string): string | undefined;
   // Mensajes recientes de la conversación (del historial).
   recent?: (input: { from: string; messageId: string; contactKey: string; excludeIds: readonly string[] }) => Promise<readonly RecentEntry[]>;
   capabilities?: Capabilities;
-  now?: () => number;
 }
 
 // Un pedido largo (una lista de estudios, una receta transcrita) debe llegar entero: cortarlo cotizaría de menos en silencio.
 const MAX_TEXT = 1500;
 
-
-// Una petición por mensaje de TEXTO del lote (los audios, fotos y documentos siguen su ruta de siempre). El texto viaja tal cual lo escribió el paciente (decisión del dueño, 6-nov).
 // Palabras que delatan que un mensaje que las reglas dejaron en «OTHER» sí habla del laboratorio: nunca se calla.
 const LAB_WORDS = /laboratori|plusmedik|analisis|estudio|examen|muestra|resultado|sangre|orina|cotiz|precio|cuesta|receta|horario|sucursal|\bcita\b|turno/;
 const labMention = (text: string): boolean => LAB_WORDS.test(fold(text));
 
+// Un mensaje por texto del lote (los audios, fotos y documentos siguen su ruta de siempre). El texto viaja tal cual lo escribió el paciente (decisión del dueño, 6-nov).
 export function utterancesOf(turns: readonly ObservedTurn[]): { utterances: Utterance[]; mediaSkipped: number } {
   const utterances: Utterance[] = [];
   let mediaSkipped = 0;
   for (const turn of turns) {
     if (turn.kind !== "TEXT") { mediaSkipped += 1; continue; }
     const text = turn.text?.trim();
-    if (!text || utterances.length >= SHADOW_LIMITS.maxTexts) continue;
-    const id = `U${utterances.length + 1}`;
-    if (socialOf(text) !== undefined) { utterances.push({ id, topic: "SOCIAL", goal: "OTHER", text: text.slice(0, MAX_TEXT) }); continue; }
-    const topic = labMention(text) && classifyText(text) === "OTHER" ? "OTHER_LAB" : classifyText(text);
-    utterances.push({ id, topic, goal: GOAL_BY_CATEGORY[topic] ?? "OTHER", text: text.slice(0, MAX_TEXT) });
+    if (!text || utterances.length >= PREPARE_LIMITS.maxTexts) continue;
+    const topic = socialOf(text) !== undefined ? "SOCIAL" : labMention(text) && classifyText(text) === "OTHER" ? "OTHER_LAB" : classifyText(text);
+    utterances.push({ topic, text: text.slice(0, MAX_TEXT) });
   }
   return { utterances, mediaSkipped };
 }
 
-// Lo que quedó pospuesto de turnos anteriores (por un texto fijo, un fallo o «no puedo derivar») o REABIERTO tras una reanudación manual de la recepción, con cuidado de no repetir lo de este lote ni lo que
-// espera por la pausa humana.
-export function pendingUtterances(state: ConversationState | undefined, now: number, currentMessageIds: ReadonlySet<string>, startAt: number): Utterance[] {
-  if (!state || state.holder === "HUMAN") return [];
-  const carried = state.questions
-    .filter((question) => (question.status === "CARRIED" || question.status === "OPEN") && question.reason !== "HUMAN_PAUSED" && !currentMessageIds.has(question.messageId) && now - question.openedAt <= SHADOW_LIMITS.pendingMaxAgeMs)
-    .slice(-SHADOW_LIMITS.maxPending);
-  return carried.map((question, index): Utterance => {
-    const goal = state.goals.find((candidate) => candidate.id === question.goalId)?.kind ?? "OTHER";
-    return { id: `P${startAt + index}`, topic: question.topic, goal, carried: true, ref: question.messageId };
-  });
-}
-
 const hashOf = (text: string): string => createHash("sha256").update(text).digest("hex").slice(0, 8);
 
-function summarize(decision: AgentDecision, extra: { utterances: number; carried: number; mediaSkipped: number; latencyMs: number; model: string }): Record<string, unknown> {
-  const acts: Record<string, number> = {};
-  for (const act of decision.acts ?? []) acts[act.kind] = (acts[act.kind] ?? 0) + 1;
-  const error = decision.modelError;
+// Registro técnico de una decisión: contadores y CÓDIGOS, nunca texto del paciente ni del agente.
+export function summarizeDecision(decision: AgentDecision, extra: { utterances: number; mediaSkipped: number; latencyMs: number; model: string }): Record<string, unknown> {
   return {
     status: decision.status,
     utterances: extra.utterances,
-    carried: extra.carried,
     mediaSkipped: extra.mediaSkipped,
-    acts,
-    tools: decision.toolRuns.map((run) => ({ tool: run.tool, ok: run.ok, ...(run.error ? { error: run.error } : {}) })),
+    tools: decision.toolRuns.map((run) => ({ tool: run.tool, ok: run.ok, ...(run.error ? { error: run.error } : {}), ...(run.why ? { why: run.why } : {}) })),
     violations: decision.violations.map((violation) => violation.code),
+    ...(decision.planFallback ? { planFallback: decision.planFallback } : {}),
     ...(decision.repairs ? { repairs: decision.repairs, firstViolations: (decision.firstViolations ?? []).map((violation) => violation.code) } : {}),
-    ...(decision.reply ? { replyChars: decision.reply.length, replyHash: hashOf(decision.reply), withQuote: (decision.acts ?? []).some((act) => act.kind === "QUOTE") } : {}),
-    ...(error ? { modelError: error } : {}),
+    ...(decision.reply ? { replyChars: decision.reply.length, replyHash: hashOf(decision.reply), withQuote: decision.quoted === true } : {}),
+    ...(decision.modelError ? { modelError: decision.modelError } : {}),
     ...(decision.usage ? { usage: decision.usage } : {}),
     latencyMs: extra.latencyMs,
     model: extra.model
   };
 }
 
-// Todo lo que el núcleo necesita para decidir UN lote de un contacto: peticiones (una por mensaje de texto + lo pendiente de antes), herramientas, mensajes recientes y memoria. Lo usan por igual la sombra y el
-// piloto, de modo que deciden exactamente con lo mismo.
+// Todo lo que el agente necesita para decidir UN lote de un contacto: los mensajes de texto, las herramientas y los mensajes recientes.
 export type PreparedTurn =
-  | { kind: "skip"; reason: "NO_TEXT" | "HUMAN_HOLDER"; mediaSkipped: number }
-  | { kind: "ready"; utterances: Utterance[]; current: number; carried: number; mediaSkipped: number; contactKey: string | undefined; recent: readonly RecentEntry[]; tools: ReturnType<typeof createToolRegistry> };
+  | { kind: "skip"; reason: "NO_TEXT" | "MEDICAL"; mediaSkipped: number }
+  | { kind: "ready"; utterances: Utterance[]; mediaSkipped: number; contactKey: string | undefined; recent: readonly RecentEntry[]; tools: ReturnType<typeof createToolRegistry> };
 
 export function buildAgentTools(options: AgentContextOptions, contactKey: string | undefined) {
   const capabilities = options.capabilities ?? { handoff: false, quote: true };
@@ -110,21 +86,17 @@ export function buildAgentTools(options: AgentContextOptions, contactKey: string
 const keepSafety = (clause: string): boolean => { const category = classifyText(clause); return category === "MEDICAL" || category === "HUMAN_REQUEST"; };
 
 export async function prepareAgentTurn(options: AgentContextOptions, from: string, turns: readonly ObservedTurn[]): Promise<PreparedTurn> {
-  const now = options.now ?? Date.now;
   const contactKey = options.contactKeyFor(from);
-  const { utterances: current, mediaSkipped } = utterancesOf(turns);
-  if (current.length === 0) return { kind: "skip", reason: "NO_TEXT", mediaSkipped };
-  const state = options.reader && contactKey ? await options.reader.stateOf(contactKey) : undefined;
-  // Con una persona al mando el agente no decide nada (la pausa humana manda).
-  if (state?.holder === "HUMAN") return { kind: "skip", reason: "HUMAN_HOLDER", mediaSkipped };
-  const carried = pendingUtterances(state, now(), new Set(turns.map((turn) => turn.messageId)), 1);
+  const { utterances, mediaSkipped } = utterancesOf(turns);
+  if (utterances.length === 0) return { kind: "skip", reason: "NO_TEXT", mediaSkipped };
+  // SALUD: un mensaje de salud (síntomas, medicamentos, interpretar resultados) sin pedir precio de estudios no se conversa con el modelo: lo atiende el modo esencial, que es determinista (texto fijo y derivación
+  // registrada). Si en el mismo mensaje piden precios, el agente los atiende (no aconseja ni interpreta).
+  if (utterances.some((utterance) => utterance.topic === "MEDICAL") && !utterances.some((utterance) => asksForPrice(utterance.text))) return { kind: "skip", reason: "MEDICAL", mediaSkipped };
   let recent: readonly RecentEntry[] = [];
   if (options.recent && contactKey) {
     try { recent = await options.recent({ from, messageId: turns[0]!.messageId, contactKey, excludeIds: turns.map((turn) => turn.messageId) }); } catch { /* sin historial: el agente decide con lo demás */ }
   }
   // Métodos de pago ignorados: tampoco llegan al modelo como mensajes anteriores (del paciente, de la recepción ni del propio asistente).
   recent = recent.map((entry) => ({ ...entry, text: stripPaymentTalk(entry.text, { keep: keepSafety }) })).filter((entry) => entry.text.trim() !== "");
-  return { kind: "ready", utterances: [...current, ...carried], current: current.length, carried: carried.length, mediaSkipped, contactKey, recent, tools: buildAgentTools(options, contactKey) };
+  return { kind: "ready", utterances, mediaSkipped, contactKey, recent, tools: buildAgentTools(options, contactKey) };
 }
-
-export const summarizeDecision = summarize;

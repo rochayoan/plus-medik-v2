@@ -2,7 +2,7 @@ import { createHmac } from "node:crypto";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Act, AgentModel, IntentReading, PlanInput, RespondInput } from "../src/agent/contracts.js";
+import type { AgentModel, PlanInput, PlanOutput, RespondInput } from "../src/agent/contracts.js";
 import { createAgentPilot, createPilotSwitch, createRecentProvider, type AgentPilot } from "../src/agent/pilot.js";
 import { createReplyGate, createRepeatTracker, type AttentionConfig } from "../src/attention-filter.js";
 import { createSupabaseAuditRepository, createSupabaseRpc } from "../src/audit.js";
@@ -55,13 +55,13 @@ const signedPost = (payload: unknown, headers: Record<string, string> = {}) => {
 const RECEIVED = { "x-webhook-event": "whatsapp.message.received" };
 const SENT = { "x-webhook-event": "whatsapp.message.sent" };
 
-interface Script { calls?: Array<{ tool: string; input: unknown }>; intents?: IntentReading[]; acts?: (input: RespondInput) => Act[]; text?: string; fail?: Error; hang?: boolean }
+interface Script { calls?: Array<{ tool: string; input: unknown }>; plan?: Partial<PlanOutput>; text?: string; fail?: Error; hang?: boolean }
 function fakeAgentModel(script: Script = {}): AgentModel & { plans: PlanInput[]; responds: RespondInput[] } {
   const model = {
     plans: [] as PlanInput[],
     responds: [] as RespondInput[],
-    async plan(input: PlanInput) { model.plans.push(input); if (script.hang) return new Promise<never>(() => undefined); if (script.fail) throw script.fail; return { toolCalls: script.calls ?? [], ...(script.intents ? { intents: script.intents } : {}) }; },
-    async respond(input: RespondInput) { model.responds.push(input); return { acts: script.acts ? script.acts(input) : [{ kind: "ACK" as const, utterances: input.utterances.map((u) => u.id) }], text: script.text ?? "¡Hola! ¿En qué te puedo ayudar?" }; }
+    async plan(input: PlanInput) { model.plans.push(input); if (script.hang) return new Promise<never>(() => undefined); if (script.fail) throw script.fail; return { toolCalls: script.calls ?? [], ...script.plan }; },
+    async respond(input: RespondInput) { model.responds.push(input); return { text: script.text ?? "¡Hola! ¿En qué te puedo ayudar?" }; }
   };
   return model;
 }
@@ -93,7 +93,7 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
 
   interface Options {
     // phones = piloto (lista); everyone = alcance global (todos los contactos elegibles menos los excluidos).
-    pilot?: { phones?: string[]; everyone?: { exclude?: string[] }; model: AgentModel; handoffEnabled?: boolean; dailyMax?: number; deadlineMs?: number };
+    pilot?: { phones?: string[]; everyone?: { exclude?: string[] }; model: AgentModel; handoffEnabled?: boolean; deadlineMs?: number };
     // Memoria de la fase 1 (la exige el piloto en producción; también el mundo de referencia la usa para comparar lo mismo).
     memory?: boolean;
     cap?: { max: number; windowSeconds: number };
@@ -119,7 +119,6 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
           switch: createPilotSwitch({ rpc: createSupabaseRpc(rpcOptions()), ttlMs: 0, log }),
           handoffEnabled: options.pilot.handoffEnabled ?? false,
           // piloto: tope propio de 40 por omisión; global: solo si se indica (si no, rige el tope global de siempre)
-          ...(options.pilot.dailyMax !== undefined || !options.pilot.everyone ? { dailyCap: { max: options.pilot.dailyMax ?? 40, windowSeconds: 86_400 } } : {}),
           ...(options.pilot.deadlineMs ? { deadlineMs: options.pilot.deadlineMs } : {}),
           context: { loadCatalog: async () => CATALOG(), answer: fixtureAnswer, ...(memory ? { reader: createConversationReader({ store }) } : {}), contactKeyFor, recent: createRecentProvider({ rpc: createSupabaseRpc(rpcOptions()) }), capabilities: { handoff: false, quote: true } },
           log
@@ -198,7 +197,6 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
       const p = patient();
       const model = fakeAgentModel({
         calls: [{ tool: "lab_info", input: { question: "a que hora abren" } }, { tool: "quote_studies", input: { studies: ["hemograma", "glucosa"] } }],
-        acts: () => [{ kind: "ANSWER", utterances: ["U1"], factIds: ["lab_info:1"] }, { kind: "QUOTE", utterances: ["U2"] }],
         text: "¡Hola! Atendemos de lunes a viernes de 07:00 a 18:00 y los sábados de 08:00 a 12:00. Abajo tienes el detalle de tu cotización."
       });
       const w = setup({ pilot: { phones: [p.phone], model } });
@@ -217,7 +215,7 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
       // la corrida de auditoría del lote responde; la otra queda cerrada sin respuesta
       expect((await runStatuses(p.phone)).split(",").length).toBe(2);
       expect(await runStatuses(p.phone)).not.toMatch(/FAILED/);
-      expect(pilotLogs(w).at(-1)).toMatchObject({ status: "VERIFIED", acts: { ANSWER: 1, QUOTE: 1 }, withQuote: true });
+      expect(pilotLogs(w).at(-1)).toMatchObject({ status: "VERIFIED", withQuote: true });
       // memoria: la respuesta quedó como cotizada y la cotización como artefacto (por ids de estudios)
       await w.settle();
       const state = (await stateOf(w, p.key))!;
@@ -227,7 +225,7 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
 
     it("SILENCIO ante lo claramente ajeno al laboratorio: no se envía nada, no queda pendiente y el siguiente mensaje normal se atiende", async () => {
       const p = patient();
-      const model = fakeAgentModel({ intents: [{ utterance: "U1", intent: "OFF_TOPIC" }], text: "RESPUESTA DEL AGENTE NUEVO" });
+      const model = fakeAgentModel({ plan: { silent: true }, text: "RESPUESTA DEL AGENTE NUEVO" });
       const w = setup({ pilot: { phones: [p.phone], model } });
       await switchTo(true);
       await say(w, p.phone, "jajaja mira el partido de anoche");
@@ -239,7 +237,7 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
       const state = await stateOf(w, p.key);
       expect(state ? pending(state, Date.now()) : []).toEqual([]);
       // con una pregunta del laboratorio el modelo ya no la lee como ajena y sí se responde
-      const lab = fakeAgentModel({ intents: [{ utterance: "U1", intent: "INFO" }], text: "Atendemos de lunes a viernes." });
+      const lab = fakeAgentModel({ text: "Atendemos de lunes a viernes." });
       const w2 = setup({ pilot: { phones: [p.phone], model: lab } });
       await say(w2, p.phone, "a que hora abren?");
       expect(w2.sends).toHaveLength(1);
@@ -249,7 +247,6 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
       const p = patient();
       const model = fakeAgentModel({
         calls: [{ tool: "quote_studies", input: { studies: ["hemograma", "glucosa"] } }],
-        acts: () => [{ kind: "ACK", utterances: ["U1"] }, { kind: "QUOTE", utterances: ["U2"] }],
         text: "¡Hola! Abajo tienes el detalle de tu cotización. Y sí, puedes pagar con QR."
       });
       const w = setup({ pilot: { phones: [p.phone], model } });
@@ -396,17 +393,13 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
       expect(w.sends.map((s) => s.body).join("")).not.toContain("NO DEBE SALIR");
     });
 
-    it("el tope diario propio del piloto: el número del piloto conversa más allá del tope global de siempre, y los demás siguen sujetos al tope global", async () => {
+    it("UN solo tope: las respuestas del agente cuentan igual que las demás (el límite de la reserva de envío); al alcanzarlo el paciente no recibe más ese día", async () => {
       const p = patient();
-      const other = patient();
       const model = fakeAgentModel({ text: "Claro, aquí estoy para ayudarte." });
-      const w = setup({ pilot: { phones: [p.phone], model, dailyMax: 5 }, cap: { max: 1, windowSeconds: 3600 } });
+      const w = setup({ pilot: { phones: [p.phone], model }, cap: { max: 2, windowSeconds: 3600 } });
       await switchTo(true);
       for (const body of ["hola, buenas", "tengo una consulta", "quiero saber algo más"]) await say(w, p.phone, body);
-      expect(w.sends.filter((s) => s.to === p.phone)).toHaveLength(3);
-      await say(w, other.phone, "quiero cotizar mis estudios");
-      await say(w, other.phone, "y tambien quiero preguntar otra cosa");
-      expect(w.sends.filter((s) => s.to === other.phone)).toHaveLength(1);
+      expect(w.sends.filter((s) => s.to === p.phone)).toHaveLength(2);
     });
   });
 
@@ -434,35 +427,30 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
   // ───────────────────────────── memoria y continuidad ─────────────────────────────
 
   describe("memoria, continuidad y pendientes", () => {
-    it("lo que quedó pendiente con el agente de siempre llega al nuevo; cuando lo atiende de verdad, la memoria lo cierra aunque el mensaje actual sea de otro tema", async () => {
+    it("la continuidad viene del historial: lo que se habló con el modo esencial llega al agente nuevo como mensajes recientes (sin identificadores ni pendientes)", async () => {
       const p = patient();
-      const model = fakeAgentModel({
-        acts: (input) => [{ kind: "ACK", utterances: input.utterances.filter((u) => !u.carried).map((u) => u.id) }, { kind: "CLARIFY", utterances: input.utterances.filter((u) => u.carried).map((u) => u.id), code: "SEND_RECIPE" }],
-        text: "¡Hola! Sobre tu cotización de antes: envíame la foto de tu receta o escribe los nombres de tus estudios."
-      });
+      const model = fakeAgentModel({ text: "¡Hola! Sobre tu cotización de antes: envíame la foto de tu receta o escribe los nombres de tus estudios." });
       const w = setup({ pilot: { phones: [p.phone], model } });
-      await say(w, p.phone, "quiero cotizar mis estudios"); // interruptor apagado: lo de siempre (texto fijo → queda pendiente)
+      await say(w, p.phone, "quiero cotizar mis estudios"); // interruptor apagado: lo de siempre (texto fijo)
       expect(w.sends.map((s) => s.body)).toEqual([DRAFT_TEXTS.send_recipe]);
-      await w.settle();
-      expect(pending((await stateOf(w, p.key))!, Date.now()).map((q) => `${q.topic}:${q.reason}`)).toEqual(["RECIPE_OR_QUOTE:FIXED_REPLY_ONLY"]);
       await switchTo(true);
       await say(w, p.phone, "hola?");
-      expect(model.plans[0]!.utterances.map((u) => `${u.id}:${u.topic}:${u.carried ?? false}`)).toEqual(["U1:GREETING:false", "P1:RECIPE_OR_QUOTE:true"]);
+      expect(model.plans[0]!.utterances).toEqual([{ topic: "GREETING", text: "hola?" }]);
+      expect(model.plans[0]!.recent).toEqual([{ from: "PATIENT", text: "quiero cotizar mis estudios" }, { from: "ASSISTANT", text: DRAFT_TEXTS.send_recipe }]);
       expect(w.sends.at(-1)!.body).toMatch(/^¡Hola! Sobre tu cotización de antes/);
-      await w.settle();
-      expect(pending((await stateOf(w, p.key))!, Date.now())).toEqual([]);
     });
 
-    it("lo que el agente nuevo aplaza queda pendiente y visible (sin resolver o sin derivación), y el paciente recibe una respuesta honesta", async () => {
+    it("un mensaje de SALUD sin pedir precio no se conversa con el modelo: responde el modo esencial (determinista) y el modelo ni se toca", async () => {
       const p = patient();
-      const model = fakeAgentModel({ intents: [{ utterance: "U1", intent: "MEDICAL" }], acts: () => [{ kind: "DEFER", utterances: ["U1"], reason: "NOT_SUPPORTED" }], text: "Eso conviene consultarlo con tu médico; por este medio no puedo orientarte." });
+      const model = fakeAgentModel({ text: "RESPUESTA DEL AGENTE NUEVO" });
       const w = setup({ pilot: { phones: [p.phone], model } });
       await switchTo(true);
       await say(w, p.phone, `me duele el pecho ${SENTINEL}`);
-      expect(w.sends.map((s) => s.body)).toEqual(["Eso conviene consultarlo con tu médico; por este medio no puedo orientarte."]);
-      expect(model.plans[0]!.utterances[0]).toMatchObject({ topic: "MEDICAL", text: `me duele el pecho ${SENTINEL}` });
-      await w.settle();
-      expect(pending((await stateOf(w, p.key))!, Date.now()).map((q) => `${q.topic}:${q.reason}`)).toEqual(["MEDICAL:HANDOFF_UNAVAILABLE"]);
+      expect(model.plans).toEqual([]);
+      expect(w.sends).toHaveLength(1);
+      expect(w.sends[0]!.body).not.toContain("RESPUESTA DEL AGENTE NUEVO");
+      expect(w.sends[0]!.body).not.toContain(SENTINEL);
+      expect(pilotLogs(w).at(-1)).toMatchObject({ status: "FALLBACK", reason: "MEDICAL" });
     });
 
     it("SOLO HISTORIAL (sin la memoria estructurada ni la migración 24 en uso): el agente nuevo responde igual, con los mensajes recientes como contexto y sin la herramienta de memoria ni escrituras de eventos", async () => {
@@ -510,7 +498,7 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
   // ───────────────────────────── derivación humana al CRM ─────────────────────────────
 
   describe("derivación humana al CRM", () => {
-    const humanScript: Script = { intents: [{ utterance: "U1", intent: "HUMAN" }], acts: () => [{ kind: "HANDOFF", utterances: ["U1"], reason: "HUMAN_REQUEST" }], text: "Claro, te paso con una persona del laboratorio." };
+    const humanScript: Script = { plan: { handoff: "HUMAN_REQUEST" }, text: "Claro, te paso con una persona del laboratorio." };
     const crmOf = (state: "REGISTERED" | "FAILED") => {
       const submit = vi.fn(async (_ctx: unknown, _cases: unknown) => [{ state }]);
       return { submit, crm: { submit, submitSessionReview: async () => [] } as unknown as CrmHandoff };
@@ -522,7 +510,7 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
       await switchTo(true);
       await say(w, p.phone, "quiero hablar con una persona");
       expect(w.sends.map((s) => s.body)).not.toContain("Claro, te paso con una persona del laboratorio.");
-      expect(pilotLogs(w).at(-1)).toMatchObject({ status: "REJECTED", violations: ["HANDOFF_UNAVAILABLE"] });
+      expect(pilotLogs(w).at(-1)).toMatchObject({ status: "REJECTED", violations: ["UNREGISTERED_HANDOFF_PROMISE"] });
     });
 
     it("con la cola al CRM y la derivación habilitada: el caso se registra con el mensaje del lote ANTES de responder, y solo entonces el agente dice que una persona atenderá", async () => {
@@ -640,16 +628,12 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
       expect(pilotLogs(w).filter((entry) => entry.reason === "BREAKER_OPEN")).toHaveLength(2);
     });
 
-    it("el tope diario: sin tope propio rige el global de siempre también para el agente nuevo; con tope propio el paciente conversa más allá", async () => {
-      const run = async (dailyMax?: number) => {
-        const p = patient();
-        const w = setup({ pilot: { everyone: {}, model: fakeAgentModel({ text: "Claro, aquí estoy para ayudarte." }), ...(dailyMax ? { dailyMax } : {}) }, cap: { max: 1, windowSeconds: 3600 } });
-        await switchTo(true);
-        for (const body of ["hola, buenas", "tengo una consulta", "quiero saber algo más"]) await say(w, p.phone, body);
-        return w.sends.filter((s) => s.to === p.phone).length;
-      };
-      expect(await run()).toBe(1);
-      expect(await run(5)).toBe(3);
+    it("el tope de 6 respuestas por contacto cada 24 horas es el MISMO para el agente y para el modo esencial", async () => {
+      const p = patient();
+      const w = setup({ pilot: { everyone: {}, model: fakeAgentModel({ text: "Claro, aquí estoy para ayudarte." }) }, cap: { max: 6, windowSeconds: 86_400 } });
+      await switchTo(true);
+      for (const body of ["hola 1", "hola 2", "hola 3", "hola 4", "hola 5", "hola 6", "hola 7", "hola 8"]) await say(w, p.phone, body);
+      expect(w.sends.filter((s) => s.to === p.phone)).toHaveLength(6);
     });
 
     it("las garantías de la máquina de envío no cambian con el alcance global: una entrega repetida 3 veces y simultánea produce UNA respuesta; la pausa humana se respeta; las fotos van por la ruta de siempre", async () => {
@@ -683,7 +667,7 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
   describe("privacidad", () => {
     it("el registro del piloto lleva solo códigos y contadores: ni texto del paciente, ni del agente, ni teléfonos, ni ids de mensaje; la base solo recibe lo ya habitual", async () => {
       const p = patient();
-      const model = fakeAgentModel({ calls: [{ tool: "lab_info", input: { question: "a que hora abren" } }], acts: () => [{ kind: "ANSWER", utterances: ["U1"], factIds: ["lab_info:1"] }], text: "Atendemos de lunes a viernes de 07:00 a 18:00 y los sábados de 08:00 a 12:00." });
+      const model = fakeAgentModel({ calls: [{ tool: "lab_info", input: { question: "a que hora abren" } }], text: "Atendemos de lunes a viernes de 07:00 a 18:00 y los sábados de 08:00 a 12:00." });
       const w = setup({ pilot: { phones: [p.phone], model } });
       await switchTo(true);
       await say(w, p.phone, `a que hora abren ${SENTINEL}`);

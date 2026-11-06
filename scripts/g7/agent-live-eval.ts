@@ -99,6 +99,6 @@ for (const modelName of models) {
   if (!verdict.pass) process.exitCode = 3;
   if (summary.rejectedList.length > 0) console.log(`Rechazadas por el verificador (LEA el mensaje propuesto en el archivo: ¿bloqueó algo correcto?): ${summary.rejectedList.map((item) => `${item.id} [${item.violations.join(",")}]`).join("; ")}`);
   const file = join(outDir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${modelName.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
-  writeFileSync(file, JSON.stringify({ model: modelName, reasoning: reasoning ?? null, repeat, summary, runs: all.map((run) => ({ id: run.id, title: run.title, latencyMs: run.latencyMs, failures: run.failures, status: run.decision?.status, acts: run.decision?.acts, toolRuns: run.decision?.toolRuns, violations: run.decision?.violations, firstViolations: run.decision?.firstViolations, repairs: run.decision?.repairs, modelError: run.decision?.modelError, usage: run.decision?.usage, reply: run.decision?.reply })) }, null, 2));
+  writeFileSync(file, JSON.stringify({ model: modelName, reasoning: reasoning ?? null, repeat, summary, runs: all.map((run) => ({ id: run.id, title: run.title, latencyMs: run.latencyMs, failures: run.failures, status: run.decision?.status, toolRuns: run.decision?.toolRuns, violations: run.decision?.violations, firstViolations: run.decision?.firstViolations, repairs: run.decision?.repairs, modelError: run.decision?.modelError, usage: run.decision?.usage, reply: run.decision?.reply })) }, null, 2));
   console.log(`Detalle: ${file}\n`);
 }
