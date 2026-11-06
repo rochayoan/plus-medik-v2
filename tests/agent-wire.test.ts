@@ -7,7 +7,7 @@ import { runAll, runScenario, summarize } from "../scripts/g7/lib/agent-eval.js"
 import { AGENT_SCENARIOS, type ScriptedReply } from "../scripts/g7/lib/agent-scenarios.js";
 
 // El adaptador REAL (SDK oficial de OpenAI, API Responses) contra un servidor LOCAL que imita /v1/responses. No hay red externa, ni clave real, ni datos de pacientes: sirve para comprobar el formato del cable
-// (petición estricta, sin estado, sin herramientas nativas; lectura de output_text y del uso de tokens) y cómo se ven los errores reales del SDK (429 de cuota, 500, tiempo agotado, salida inválida).
+// (el PLAN con esquema estricto y la RESPUESTA en texto libre, sin estado ni herramientas nativas; lectura de output_text y del uso de tokens) y cómo se ven los errores reales del SDK (429 de cuota, 500, tiempo agotado, salida vacía).
 
 interface Captured { path: string; auth: string | undefined; body: Record<string, any> }
 let server: Server;
@@ -22,6 +22,14 @@ const completion = (text: string, usage = { input_tokens: 120, output_tokens: 30
   output: [{ type: "message", id: "msg_1", status: "completed", role: "assistant", content: [{ type: "output_text", text, annotations: [] }] }],
   usage
 });
+// El plan se distingue de la respuesta porque lleva el esquema estricto; la respuesta es texto libre (sin `text.format`).
+const isPlan = (request: Captured): boolean => request.body.text?.format?.name === "plusmedik_agent_plan";
+const planOf = (reply: ScriptedReply) => JSON.stringify({
+  toolCalls: reply.calls.map((call) => { const input = call.input as Record<string, any>; return { tool: call.tool, text: input.question ?? input.query ?? null, studies: input.studies ?? null }; }),
+  silent: reply.silent ?? false,
+  handoff: reply.handoff ?? null
+});
+const scripted = (reply: () => ScriptedReply | undefined) => (request: Captured, response: ServerResponse) => { const current = reply()!; return json(response, 200, completion(isPlan(request) ? planOf(current) : current.text)); };
 
 beforeAll(async () => {
   // Las pruebas bloquean toda la red; aquí (solo aquí) se libera para hablar con el servidor LOCAL de esta prueba, y se vuelve a bloquear al terminar.
@@ -47,59 +55,50 @@ afterAll(async () => {
 });
 
 const modelOf = (timeoutMs = 10_000) => createAgentModel({ client: createOpenAiAgentClient({ apiKey: "sk-clave-falsa-local", model: "modelo-local", reasoningEffort: "medium" }), timeoutMs });
+const find = (id: string) => AGENT_SCENARIOS.find((scenario) => scenario.id === id)!;
 
 describe("el adaptador real contra un servidor local de Responses", () => {
-  it("cada escenario sintético pasa de punta a punta con el SDK real: peticiones estrictas, sin estado y sin herramientas nativas", async () => {
+  it("cada escenario sintético pasa de punta a punta con el SDK real: el plan estricto, la respuesta en texto libre, sin estado y sin herramientas nativas", async () => {
     let current: ScriptedReply | undefined;
-    respond = (request, response) => {
-      // el plan y la respuesta se distinguen por el nombre del esquema, igual que lo haría un modelo
-      const name = request.body.text?.format?.name;
-      if (name === "plusmedik_agent_plan") return json(response, 200, completion(JSON.stringify({ toolCalls: current!.calls.map((call) => {
-        const input = call.input as Record<string, any>;
-        return { tool: call.tool, text: input.question ?? input.query ?? null, studies: input.studies ?? null };
-      }) })));
-      return json(response, 200, completion(JSON.stringify({ text: current!.text, acts: current!.acts.map((act) => ({ kind: act.kind, utterances: act.utterances, factIds: "factIds" in act ? act.factIds : [], code: "code" in act ? act.code : null, reason: "reason" in act ? act.reason : null })) })));
-    };
-    const model = modelOf();
+    respond = scripted(() => current);
     captured.length = 0;
     const runs = [];
     for (const scenario of AGENT_SCENARIOS) {
       current = scenario.good[0];
-      runs.push(...await runAll(model, { scenarios: [scenario], modelName: "modelo-local" }));
+      runs.push(...await runAll(modelOf(), { scenarios: [scenario], modelName: "modelo-local" }));
     }
     const summary = summarize(runs);
     expect(summary).toMatchObject({ scenarios: AGENT_SCENARIOS.length, passed: AGENT_SCENARIOS.length, rejected: 0, modelErrors: 0, failedList: [] });
-    // tokens leídos del cable (output_tokens_details.reasoning_tokens incluido)
-    expect(summary.usage).toMatchObject({ inputTokens: 240 * AGENT_SCENARIOS.length, outputTokens: 60 * AGENT_SCENARIOS.length, reasoningTokens: 20 * AGENT_SCENARIOS.length });
-    expect(captured.length).toBe(2 * AGENT_SCENARIOS.length);
+    // salud sin precio no llama al modelo; fuera de tema solo planifica; el resto, plan + redacción. Tokens leídos del cable (output_tokens_details.reasoning_tokens incluido)
+    const calls = 2 * (AGENT_SCENARIOS.length - 2) + 1;
+    expect(captured.length).toBe(calls);
+    expect(summary.usage).toMatchObject({ inputTokens: 120 * calls, outputTokens: 30 * calls, reasoningTokens: 10 * calls });
     for (const request of captured) {
       expect(request.path).toBe("/v1/responses");
       expect(request.auth).toBe("Bearer sk-clave-falsa-local");
-      expect(request.body).toMatchObject({ model: "modelo-local", store: false, reasoning: { effort: "medium" }, text: { format: { type: "json_schema", strict: true } } });
+      expect(request.body).toMatchObject({ model: "modelo-local", store: false, reasoning: { effort: "medium" } });
       expect(request.body.tools).toBeUndefined();
+      // el plan lleva el esquema estricto; la respuesta es texto libre (sin formato)
+      if (isPlan(request)) expect(request.body.text).toMatchObject({ format: { type: "json_schema", strict: true } });
+      else expect(request.body.text).toBeUndefined();
       // PRIVACIDAD: en el cable real viaja solo esto; nada que identifique al paciente ni la conversación
-      expect(Object.keys(request.body).sort()).toEqual(["input", "instructions", "max_output_tokens", "model", "reasoning", "store", "text"]);
+      expect(Object.keys(request.body).sort()).toEqual(isPlan(request) ? ["input", "instructions", "max_output_tokens", "model", "reasoning", "store", "text"] : ["input", "instructions", "max_output_tokens", "model", "reasoning", "store"]);
       expect(JSON.stringify(request.body)).not.toMatch(/5917\d{7}|wamid|contact_key|[0-9a-f]{64}/);
       expect(typeof request.body.instructions).toBe("string");
       expect(request.body.max_output_tokens).toBeGreaterThan(0);
     }
   });
 
-  it("lo que viaja en la petición es el texto del paciente tal cual (también el de salud, decisión del dueño); el modelo NUNCA ve los precios del catálogo", async () => {
-    respond = (_request, response) => json(response, 200, completion(JSON.stringify({ toolCalls: [] })));
+  it("lo que viaja en la petición es el texto del paciente tal cual (también si menciona salud, decisión del dueño); el modelo NUNCA ve los precios del catálogo", async () => {
+    let current: ScriptedReply = find("salud-con-precio").good[0]!;
+    respond = scripted(() => current);
     captured.length = 0;
-    const salud = AGENT_SCENARIOS.find((scenario) => scenario.id === "salud")!;
-    const cotizar = AGENT_SCENARIOS.find((scenario) => scenario.id === "cotizar-por-nombre")!;
-    let current: ScriptedReply = salud.good[0]!;
-    respond = (request, response) => request.body.text?.format?.name === "plusmedik_agent_plan"
-      ? json(response, 200, completion(JSON.stringify({ toolCalls: current.calls.map((call) => ({ tool: call.tool, text: null, studies: (call.input as any).studies ?? null })) })))
-      : json(response, 200, completion(JSON.stringify({ text: current.text, acts: current.acts.map((act) => ({ kind: act.kind, utterances: act.utterances, factIds: [], code: null, reason: "reason" in act ? act.reason : null })) })));
-    await runScenario(modelOf(), salud);
-    current = cotizar.good[0]!;
-    await runScenario(modelOf(), cotizar);
-    // Se revisa lo que va en `input` (el mensaje con las peticiones y los hechos); las instrucciones fijas mencionan «Bs» para PROHIBIR escribirlo.
+    await runScenario(modelOf(), find("salud-con-precio"));
+    current = find("cotizar-por-nombre").good[0]!;
+    await runScenario(modelOf(), find("cotizar-por-nombre"));
+    // Se revisa lo que va en `input` (el mensaje con lo que escribió el paciente y los hechos); las instrucciones fijas mencionan «Bs» para PROHIBIR escribirlo.
     const sent = JSON.stringify(captured.map((request) => request.body.input));
-    expect(sent).toMatch(/pecho/);
+    expect(sent).toMatch(/diabetes/);
     expect(sent).not.toMatch(/\b45\b|30[.,]5|75[.,]5|Bs/);
     expect(sent).toContain("cuanto cuesta un hemograma");
   });
@@ -121,34 +120,38 @@ describe("el adaptador real contra un servidor local de Responses", () => {
     expect(await causeFor(401, { error: { message: "x", type: "invalid_request_error", code: "invalid_api_key" } })).toMatchObject({ cause: "AUTH", httpStatus: 401 });
   });
 
-  it("una salida que no es el JSON pedido es INVALID_OUTPUT; una respuesta vacía también", async () => {
+  it("ya no existe una «salida inválida» que tumbe el turno: un plan que no es JSON se responde sin herramientas; solo una respuesta VACÍA es INVALID_OUTPUT, con su motivo y etapa", async () => {
+    // el plan ilegible NO tumba el turno
     respond = (_request, response) => json(response, 200, completion("claro, te ayudo con eso"));
-    expect((await runScenario(modelOf(), AGENT_SCENARIOS[0]!)).decision?.modelError).toEqual({ cause: "INVALID_OUTPUT", stage: "plan", reason: "not_json" });
+    const text = await runScenario(modelOf(), AGENT_SCENARIOS[0]!);
+    expect(text.decision).toMatchObject({ status: "VERIFIED", planFallback: "plan_not_json", reply: "claro, te ayudo con eso" });
+    // una respuesta vacía (por ejemplo, cortada por el tope de tokens) sí es un error del modelo, ahora con su motivo
+    respond = (request, response) => json(response, 200, isPlan(request) ? completion(JSON.stringify({ toolCalls: [], silent: false, handoff: null })) : { ...completion(""), status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, output: [] });
+    expect((await runScenario(modelOf(), AGENT_SCENARIOS[0]!)).decision?.modelError).toEqual({ cause: "INVALID_OUTPUT", stage: "respond", reason: "empty_incomplete_max_output_tokens" });
     respond = (_request, response) => json(response, 200, { ...completion(""), output: [] });
-    expect((await runScenario(modelOf(), AGENT_SCENARIOS[0]!)).decision?.modelError).toEqual({ cause: "INVALID_OUTPUT", stage: "plan", reason: "empty" });
+    const both = (await runScenario(modelOf(), AGENT_SCENARIOS[0]!)).decision;
+    expect(both?.modelError).toEqual({ cause: "INVALID_OUTPUT", stage: "respond", reason: "empty" });
+    expect(both?.planFallback).toBe("plan_empty");
   });
 
   it("un modelo que primero se equivoca y luego corrige: el segundo intento llega con los códigos y la decisión queda verificada", async () => {
-    const hours = AGENT_SCENARIOS.find((scenario) => scenario.id === "horario")!;
+    const hours = find("horario");
     let responds = 0;
     respond = (request, response) => {
-      if (request.body.text?.format?.name === "plusmedik_agent_plan") return json(response, 200, completion(JSON.stringify({ toolCalls: [{ tool: "lab_info", text: "a que hora abren", studies: null }] })));
+      if (isPlan(request)) return json(response, 200, completion(planOf(hours.good[0]!)));
       responds += 1;
-      const text = responds === 1 ? "Abrimos de 07:00 a 18:00 y entregamos en 24 horas." : hours.good[0]!.text;
-      return json(response, 200, completion(JSON.stringify({ text, acts: [{ kind: "ANSWER", utterances: ["U1"], factIds: ["lab_info:1"], code: null, reason: null }] })));
+      return json(response, 200, completion(responds === 1 ? "Abrimos de 07:00 a 18:00 y entregamos en 24 horas." : hours.good[0]!.text));
     };
     captured.length = 0;
     const run = await runScenario(modelOf(), hours);
     expect(run.decision).toMatchObject({ status: "VERIFIED", repairs: 1, firstViolations: [{ code: "UNGROUNDED_FIGURE" }] });
-    const retry = captured.filter((request) => request.body.text?.format?.name === "plusmedik_agent_response")[1]!;
+    const retry = captured.filter((request) => !isPlan(request))[1]!;
     expect(retry.body.input).toMatch(/RECHAZADA/);
     expect(retry.body.input).not.toMatch(/24 horas/);
   });
 
   it("el mensaje del paciente viaja tal cual, con sus datos; lo que NO viaja es la clave, el teléfono de la conversación ni los ids de la plataforma", async () => {
-    respond = (request, response) => request.body.text?.format?.name === "plusmedik_agent_plan"
-      ? json(response, 200, completion(JSON.stringify({ toolCalls: [], intents: [] })))
-      : json(response, 200, completion(JSON.stringify({ text: "Claro, con gusto te ayudo.", acts: [{ kind: "ACK", utterances: ["U1"], factIds: [], code: null, reason: null }] })));
+    respond = (request, response) => json(response, 200, completion(isPlan(request) ? JSON.stringify({ toolCalls: [], silent: false, handoff: null }) : "Claro, con gusto te ayudo."));
     captured.length = 0;
     const scenario = { ...AGENT_SCENARIOS[0]!, turns: ["Hola, soy Maria Perez, mi hijo Luis tiene 8 años y quiero cotizar hemograma"] };
     await runScenario(modelOf(), scenario);
@@ -169,4 +172,3 @@ describe("el adaptador real contra un servidor local de Responses", () => {
     server.closeAllConnections?.();
   });
 });
-

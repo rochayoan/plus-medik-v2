@@ -32,9 +32,9 @@ export async function runScenario(model: AgentModel, scenario: AgentScenario, _o
       answer: fixtureAnswer,
       reader: createConversationReader({ store: memoryStore(scenario), now: () => NOW }),
       contactKeyFor: (phone) => (phone === PHONE ? CONTACT_KEY : undefined),
+      recent: async () => scenario.recent ?? [],
       // Mismas capacidades que producción sin la cola al CRM: la derivación humana no está disponible.
-      capabilities: { handoff: false, quote: true },
-      now: () => NOW
+      capabilities: { handoff: false, quote: true }
     },
     PHONE,
     scenario.turns.map((text, index) => ({ messageId: `wamid.eval-${scenario.id}-${index + 1}`, kind: "TEXT" as const, text }))
@@ -47,20 +47,21 @@ export async function runScenario(model: AgentModel, scenario: AgentScenario, _o
 // Falta (texto) de cada expectativa que no se cumple; vacío = cumple.
 export function evaluate(decision: AgentDecision | undefined, expectation: Expectation, skipped?: string): string[] {
   const failures: string[] = [];
+  // La preparación del turno decidió no llamar al modelo (p. ej. salud: lo atiende el modo esencial).
+  if (expectation.skipped) return skipped === expectation.skipped ? [] : [`debía saltarse la preparación por ${expectation.skipped} y fue: ${skipped ?? "no se saltó"}`];
   if (!decision) return [`no hubo decisión${skipped ? ` (${skipped})` : ""}`];
+  if (expectation.silent) return decision.status === "SILENT" ? [] : [`debía quedarse en silencio y fue ${decision.status}`];
   const wantVerified = expectation.verified ?? true;
-  if (wantVerified && decision.status !== "VERIFIED") failures.push(`estado ${decision.status}${decision.violations.length > 0 ? ` (${decision.violations.map((v) => v.code).join(",")})` : ""}${decision.modelError ? ` causa ${decision.modelError.cause}` : ""}`);
+  if (wantVerified && decision.status !== "VERIFIED") failures.push(`estado ${decision.status}${decision.violations.length > 0 ? ` (${decision.violations.map((v) => v.code).join(",")})` : ""}${decision.modelError ? ` causa ${decision.modelError.cause}${"reason" in decision.modelError ? `/${decision.modelError.reason}` : ""}` : ""}`);
   if (!wantVerified && decision.status === "VERIFIED") failures.push("debía rechazarse y pasó");
   if (decision.status !== "VERIFIED") return failures;
-  const kinds = new Set((decision.acts ?? []).map((act) => act.kind));
-  for (const kind of expectation.acts ?? []) if (!kinds.has(kind)) failures.push(`falta el acto ${kind}`);
-  for (const kind of expectation.noActs ?? []) if (kinds.has(kind)) failures.push(`sobra el acto ${kind}`);
   const reply = decision.reply ?? "";
-  const hasBlock = (decision.acts ?? []).some((act) => act.kind === "QUOTE");
-  if (expectation.quoteBlock === true && !hasBlock) failures.push("falta la cotización del sistema");
-  if (expectation.quoteBlock === false && hasBlock) failures.push("no debía cotizar");
+  if (expectation.quoteBlock === true && !decision.quoted) failures.push("falta la cotización del sistema");
+  if (expectation.quoteBlock === false && decision.quoted) failures.push("no debía cotizar");
   const tools = new Set(decision.toolRuns.filter((run) => run.ok).map((run) => run.tool));
   for (const tool of expectation.tools ?? []) if (!tools.has(tool)) failures.push(`no consultó ${tool}`);
+  const empty = new Set(decision.toolRuns.filter((run) => !run.ok && run.error === "NO_DATA").map((run) => run.tool));
+  for (const tool of expectation.noData ?? []) if (!empty.has(tool)) failures.push(`${tool} debía quedar sin datos`);
   for (const pattern of expectation.replyMatch ?? []) if (!pattern.test(reply)) failures.push(`el mensaje no cumple ${pattern}`);
   for (const pattern of expectation.replyNoMatch ?? []) if (pattern.test(reply)) failures.push(`el mensaje no debía cumplir ${pattern}`);
   return failures;
@@ -80,8 +81,8 @@ export async function runAll(model: AgentModel, options: { scenarios?: readonly 
 // Un modelo GUIONADO: devuelve, escenario por escenario, la respuesta que se le indique. Sirve para probar el verificador y el propio arnés sin red.
 export function scriptedModel(reply: ScriptedReply, usage: Partial<ModelUsage> = {}): AgentModel {
   return {
-    async plan() { return { toolCalls: reply.calls, usage }; },
-    async respond() { return { acts: reply.acts, text: reply.text, usage }; }
+    async plan() { return { toolCalls: reply.calls, ...(reply.silent ? { silent: true } : {}), ...(reply.handoff ? { handoff: reply.handoff } : {}), usage }; },
+    async respond() { return { text: reply.text, usage }; }
   };
 }
 

@@ -24,6 +24,18 @@ Variables eliminadas: `PLUSMEDIK_CONV_STATE`, `PLUSMEDIK_CONV_STATE_RETENTION_DA
 - **Herramientas reutilizadas** (sin duplicar): catálogo (`find_studies`), cotización (`quote_studies`, motor de sesiones de cotización), conocimiento aprobado (`lab_info`), memoria (`conversation_state`) y derivación al CRM (cola de siempre). Las **fotos/recetas** las lee el motor de recetas de siempre (el agente las conoce por la memoria).
 - **Sin modo sombra ni piloto por lista**: se eliminó el ejecutor en sombra, `PLUSMEDIK_AGENT`, la lista de números y sus topes propios.
 
+## Simplificación del núcleo (7-nov): conversar con naturalidad, sin estructura innecesaria
+Después de la primera prueba real (contacto …4203) se quitó la estructura que no aportaba y que causaba fallos:
+- **Sin identificadores ni actos**: desaparecen U1/P1, los actos (ANSWER, CLARIFY, QUOTE, ACK, DEFER), las citas de hechos, las intenciones y la cobertura «cada petición debe tener un acto». Eran estructura que el modelo tenía que rellenar y que el parseo rechazaba entero.
+- **Dos llamadas, la segunda en TEXTO LIBRE**: (1) el **plan** (JSON estricto y corto): qué herramientas consultar —solo cuando hacen falta datos reales: precios, ubicación, horarios, preparación—, y si el mensaje es claramente ajeno (`silent`) o pide una persona (`handoff`); (2) la **respuesta**, un mensaje natural sin esquema. Con esto **no existe** el `INVALID_OUTPUT` de la respuesta: lo único que lo produce es una salida vacía (cortada por el tope de tokens o rechazada), y ahora lleva su motivo, su etapa y el detalle del campo. Un plan ilegible o vacío tampoco tumba el turno: se responde sin herramientas y el motivo queda en el registro (`planFallback`).
+- **«Sin datos» no es un fallo**: una herramienta sin datos devuelve un motivo en código (`NO_TOPIC`, `NO_APPROVED_DATA`, `NO_MATCH`, `NO_STATE`…) y el modelo recibe una nota para responder con honestidad. `lab_info` además prueba con lo que el paciente escribió si la pregunta que armó el modelo no delata el tema (una paráfrasis ya no deja ubicación u horarios en «sin datos»); `quote_studies` dice qué estudio no pudo identificar.
+- **Sin pendientes duplicados**: la continuidad viene del **historial** (7 mensajes, 24 h) —ve lo que quedó sin responder, lo que ya dijo el asistente y las respuestas cortas— y de la **memoria persistente** solo para lo que el historial no trae bien: la última cotización y la última receta por nombre del catálogo. Se retiran las peticiones «pendientes de antes» (P1), su cierre y la comprobación de «persona al mando» del agente (la pausa humana ya la aplica el reclamo del turno).
+- **Salud**: un mensaje de salud sin pedir precio no se conversa con el modelo: responde el modo esencial (determinista, con la derivación registrada si está encendida). Si piden precios en el mismo mensaje, el agente los atiende sin aconsejar.
+- **Un solo tope**: se retiró el tope propio del agente; rige el de 6 respuestas por contacto cada 24 h de la reserva de envío.
+- Quedan la verificación por procedencia (cifras, dinero, promesas de una persona) con un segundo intento, los pagos ignorados, el silencio y la derivación registrada.
+
+Pendiente de limpieza (sin urgencia): el reductor de la memoria (preguntas y objetivos abiertos por lote) sigue escribiendo eventos en la tabla de la migración 24 aunque el agente ya no lea los pendientes; el campo `closes` de las respuestas queda sin uso.
+
 ## Lo que NO cambia (protecciones)
 Idempotencia, leases y fencing, reserva de envío, **un solo envío por lote**, pausa humana, tope diario, guarda de respuestas, precios solo del catálogo, métodos de pago ignorados, cifras solo de hechos citados y la regla de no dar consejos médicos.
 

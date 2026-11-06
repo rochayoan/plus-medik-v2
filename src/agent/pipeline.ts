@@ -1,18 +1,18 @@
 import { stripPaymentTalk } from "../payment-talk.js";
 import { describeProviderError } from "../provider-error.js";
-import type { AgentDecision, AgentModel, Capabilities, HandoffReason, IntentReading, ModelUsage, RecentEntry, Utterance, Violation } from "./contracts.js";
+import type { AgentDecision, AgentModel, Capabilities, HandoffReason, ModelUsage, RecentEntry, Utterance, Violation } from "./contracts.js";
 import { runToolCalls, type ToolRegistry } from "./tools.js";
-import { validateActs, verifyReply } from "./verify.js";
+import { verifyReply } from "./verify.js";
 
-// Tubería FIJA del núcleo conversacional (no un bucle libre del modelo): entender y pedir datos → ejecutar herramientas de solo lectura → decidir actos y redactar → validar actos → verificar por procedencia.
-// En esta fase solo produce una DECISIÓN para auditar (el mensaje propuesto NO se envía): `PLUSMEDIK_AGENT=shadow` la compara con lo que respondió el agente actual. Ante cualquier fallo del modelo, de una
-// herramienta o de la verificación devuelve un estado y sin mensaje; el sistema actual sigue respondiendo como siempre.
+// Tubería FIJA y corta del agente conversacional (no un bucle libre del modelo): 1) el modelo decide qué consultar (a veces nada: saludos, agradecimientos, charla) → 2) herramientas de solo lectura →
+// 3) el modelo redacta en TEXTO LIBRE con lo que devolvieron → 4) verificación por procedencia (cifras, dinero, promesas de una persona), con un segundo intento si algo se rechaza.
+// «Sin datos» de una herramienta NO es un fallo: el modelo lo sabe y responde con honestidad. Ante un error del modelo devuelve un estado y sin mensaje; quien responde usa el modo esencial.
 
 // off = apagado; live = el agente conversacional ÚNICO atiende a todos los contactos elegibles, con el interruptor de emergencia de la base (src/agent/pilot.ts) y el MODO ESENCIAL (textos fijos, catálogo,
 // cotización y derivación deterministas) cuando el interruptor está apagado o el modelo no puede responder.
 export type AgentMode = "off" | "live";
 
-// PLUSMEDIK_LLM_CONVERSATION=on (la misma bandera de siempre de la capa conversacional) enciende el agente; cualquier otro valor lo deja apagado (una errata nunca lo enciende).
+// PLUSMEDIK_LLM_CONVERSATION=on (la bandera de la capa conversacional) enciende el agente; cualquier otro valor lo deja apagado (una errata nunca lo enciende).
 export function resolveAgentMode(env: Record<string, string | undefined>): AgentMode {
   return env.PLUSMEDIK_LLM_CONVERSATION?.trim().toLowerCase() === "on" ? "live" : "off";
 }
@@ -27,9 +27,9 @@ export interface AgentTurnInput {
 export interface AgentDeps {
   model: AgentModel;
   tools: ToolRegistry;
-  // Ejecuta la derivación REGISTRADA a una persona (cola al CRM) cuando un acto HANDOFF pasó la verificación. Devuelve true solo si el caso quedó registrado. Sin él no existe el acto HANDOFF.
+  // Ejecuta la derivación REGISTRADA a una persona (cola al CRM) cuando el plan la pidió y el texto pasó la verificación. Devuelve true solo si el caso quedó registrado. Sin él no existe la derivación.
   handoff?: (reason: HandoffReason) => Promise<boolean>;
-  // true si el turno ya no puede producir efectos (venció el plazo del piloto y el productor de siempre tomó el relevo): antes de derivar se comprueba, para no registrar un caso tardío.
+  // true si el turno ya no puede producir efectos (venció el plazo y el modo esencial tomó el relevo): antes de derivar se comprueba, para no registrar un caso tardío.
   cancelled?: () => boolean;
 }
 
@@ -41,17 +41,19 @@ const addUsage = (total: ModelUsage, used: Partial<ModelUsage> | undefined): Mod
   calls: total.calls + 1
 });
 
-// Un error del modelo se describe SOLO con códigos de la lista blanca (sin mensaje, sin cuerpo). Una salida con forma inválida lleva un código propio.
-const modelFailure = (error: unknown): AgentDecision["modelError"] =>
-  error instanceof AgentOutputError ? { cause: "INVALID_OUTPUT", ...(error.stage ? { stage: error.stage } : {}), reason: error.reason, ...(error.detail ? { detail: error.detail } : {}) } : describeProviderError(error);
-
-// Una salida del modelo que no se puede usar. SOLO códigos: `reason` (qué falló), `detail` (campo del esquema y tipo de problema, p. ej. «acts.0.kind:invalid_value»; nunca valores) y `stage` (plan o respond).
+// Una salida del modelo que no se puede usar. SOLO códigos: `reason` (qué falló), `detail` (campo del esquema y tipo de problema, p. ej. «toolCalls.0.tool:invalid_value»; nunca valores) y `stage` (plan o respond).
 export class AgentOutputError extends Error {
   constructor(readonly reason: string, readonly detail?: string, public stage?: "plan" | "respond") {
     super(`agent_output_${reason}`);
     this.name = "AgentOutputError";
   }
 }
+
+// Un error del modelo se describe SOLO con códigos de la lista blanca (sin mensaje, sin cuerpo). Una salida vacía o ilegible lleva su motivo, su etapa y el detalle del campo.
+const modelFailure = (error: unknown): AgentDecision["modelError"] =>
+  error instanceof AgentOutputError ? { cause: "INVALID_OUTPUT", ...(error.stage ? { stage: error.stage } : {}), reason: error.reason, ...(error.detail ? { detail: error.detail } : {}) } : describeProviderError(error);
+
+const MAX_ATTEMPTS = 2;
 
 export async function runAgentTurn(deps: AgentDeps, input: AgentTurnInput): Promise<AgentDecision> {
   const now = input.now ?? new Date();
@@ -62,63 +64,55 @@ export async function runAgentTurn(deps: AgentDeps, input: AgentTurnInput): Prom
     ({ toolRuns: [], facts: [], violations: [], ...decision, usage });
   if (input.utterances.length === 0) return done({ status: "VERIFIED" });
 
-  let toolCalls;
-  let intents: IntentReading[] = [];
+  // 1. El modelo decide qué consultar. Una salida del plan que no se puede leer NO tumba el turno: se responde sin herramientas (y el motivo queda en el registro).
+  let plan;
   try {
-    const planned = await deps.model.plan({ utterances: input.utterances, recent, tools: deps.tools.list(), capabilities });
-    usage = addUsage(usage, planned.usage);
-    toolCalls = planned.toolCalls;
-    // Solo se aceptan lecturas de peticiones que existen (el modelo no puede inventar ids).
-    const known = new Set(input.utterances.map((utterance) => utterance.id));
-    intents = (planned.intents ?? []).filter((reading) => known.has(reading.utterance));
+    plan = await deps.model.plan({ utterances: input.utterances, recent, tools: deps.tools.list(), capabilities });
+    usage = addUsage(usage, plan.usage);
   } catch (error) {
     return done({ status: "MODEL_ERROR", modelError: modelFailure(error) });
   }
-  // La intención la decide el MODELO: lo que leyó de cada petición manda sobre la etiqueta de las reglas (que solo rige si el modelo no leyó esa petición).
-  const read = new Map(intents.map((reading) => [reading.utterance, reading.intent] as const));
+  const planInfo = plan.fallback ? { planFallback: plan.fallback } : {};
 
-  // SILENCIO ante lo CLARAMENTE ajeno al laboratorio. El modelo propone (OFF_TOPIC en CADA petición); el sistema exige además que las reglas tampoco vean nada del laboratorio (tema OTHER), que no haya nada
-  // pendiente de antes y que no haya una conversación en curso (ningún mensaje reciente del asistente ni de la recepción). Ante cualquier duda se responde como siempre.
-  if (input.utterances.every((utterance) => !utterance.carried && utterance.topic === "OTHER" && read.get(utterance.id) === "OFF_TOPIC") && !recent.some((entry) => entry.from !== "PATIENT")) {
-    return done({ status: "SILENT", intents });
-  }
+  // SILENCIO ante lo CLARAMENTE ajeno al laboratorio. El modelo propone; el sistema exige además que las reglas tampoco vean nada del laboratorio (tema OTHER en todo lo escrito) y que no haya conversación
+  // previa (ningún mensaje en las últimas horas). Ante cualquier duda se responde como siempre.
+  if (plan.silent === true && input.utterances.every((utterance) => utterance.topic === "OTHER") && recent.length === 0) return done({ status: "SILENT", ...planInfo });
 
-  const { runs, facts, blocks } = await runToolCalls(deps.tools, toolCalls, { now });
+  // 2. Herramientas de solo lectura. «Sin datos» pasa al modelo como una nota, no como un fallo.
+  const patientText = input.utterances.map((utterance) => utterance.text).join("\n");
+  const { runs, facts, blocks, notes } = await runToolCalls(deps.tools, plan.toolCalls, { now, patientText });
   const hasQuoteBlock = blocks.length > 0;
+  const quotePartial = facts.some((fact) => fact.source === "QUOTE_ENGINE" && /PARCIAL/.test(fact.text));
+  const handoff = plan.handoff !== undefined && capabilities.handoff && Boolean(deps.handoff) ? plan.handoff : undefined;
+  const base = { toolRuns: runs, facts, ...planInfo };
 
-  const patientText = input.utterances.map((utterance) => utterance.text ?? "").join("\n");
+  // 3. y 4. Redacción en texto libre y verificación. Hasta DOS intentos: si la verificación rechaza el primero, el modelo recibe solo los códigos de lo que falló. Nunca más (costo y tiempo acotados).
   let feedback: Violation[] | undefined;
   let firstViolations: Violation[] | undefined;
-  // Hasta DOS intentos: si la validación rechaza el primero, el modelo recibe solo los códigos de lo que falló y decide una vez más. Nunca más (costo y tiempo acotados).
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    let response;
+    let text: string;
     try {
-      response = await deps.model.respond({ utterances: input.utterances, recent, facts, hasQuoteBlock, capabilities, ...(intents.length > 0 ? { intents } : {}), ...(feedback ? { feedback } : {}) });
+      const response = await deps.model.respond({ utterances: input.utterances, recent, facts, notes, hasQuoteBlock, capabilities, handoff: handoff !== undefined, ...(feedback ? { feedback } : {}) });
       usage = addUsage(usage, response.usage);
+      // Métodos de pago: por ahora no se dice nada. Si el redactor los menciona, esas oraciones se IGNORAN (no se rechaza el mensaje): queda lo demás.
+      text = stripPaymentTalk(response.text, { split: "sentence" }).trim();
     } catch (error) {
-      return done({ status: "MODEL_ERROR", toolRuns: runs, facts, modelError: modelFailure(error), ...(intents.length > 0 ? { intents } : {}), ...(firstViolations ? { repairs: 1, firstViolations } : {}) });
+      return done({ status: "MODEL_ERROR", ...base, modelError: modelFailure(error), ...(firstViolations ? { repairs: 1, firstViolations } : {}) });
     }
-    // Métodos de pago: por ahora no se dice nada. Si el redactor los menciona, esas frases se IGNORAN (no se rechaza el mensaje): queda lo demás.
-    const text = stripPaymentTalk(response.text, { split: "sentence" });
-    // Primero los actos; el texto solo se verifica si los actos son válidos (el texto depende de qué actos pidió).
-    let problems = validateActs(response.acts, input.utterances, facts, { capabilities, hasQuoteBlock, read });
-    if (problems.length === 0) problems = verifyReply({ text, acts: response.acts, facts, patientText });
-    const repairInfo = { ...(intents.length > 0 ? { intents } : {}), ...(firstViolations ? { repairs: 1, firstViolations } : {}) };
+    const problems = verifyReply({ text, facts, patientText, handoff: handoff !== undefined });
+    const repairInfo = firstViolations ? { repairs: 1, firstViolations } : {};
     if (problems.length === 0) {
       // Pasar con una persona: el texto solo puede decirlo si el caso QUEDÓ registrado. Se ejecuta DESPUÉS de verificar y ANTES de entregar el mensaje; si no se registra, no hay mensaje.
-      const handoff = response.acts.find((act) => act.kind === "HANDOFF");
-      if (handoff && handoff.kind === "HANDOFF") {
-        const registered = deps.handoff && !deps.cancelled?.() ? await deps.handoff(handoff.reason).catch(() => false) : false;
-        if (!registered) return done({ status: "HANDOFF_FAILED", acts: response.acts, toolRuns: runs, facts, ...repairInfo });
+      if (handoff !== undefined) {
+        const registered = deps.handoff && !deps.cancelled?.() ? await deps.handoff(handoff).catch(() => false) : false;
+        if (!registered) return done({ status: "HANDOFF_FAILED", ...base, handoffRequested: true, ...repairInfo });
       }
-      // La cotización (precios del catálogo) la agrega el SISTEMA tal cual la armó el motor, solo si un acto la pidió.
-      const reply = [text.trim(), ...(response.acts.some((act) => act.kind === "QUOTE") ? blocks : [])].join("\n\n");
-      return done({ status: "VERIFIED", acts: response.acts, toolRuns: runs, facts, reply, ...(handoff ? { handoffRegistered: true } : {}), ...repairInfo });
+      // La cotización (precios del catálogo) la agrega el SISTEMA tal cual la armó el motor.
+      const reply = [text, ...blocks].join("\n\n");
+      return done({ status: "VERIFIED", ...base, reply, ...(hasQuoteBlock ? { quoted: true, ...(quotePartial ? { quotePartial: true } : {}) } : {}), ...(handoff !== undefined ? { handoffRequested: true, handoffRegistered: true } : {}), ...repairInfo });
     }
-    if (attempt === MAX_ATTEMPTS) return done({ status: "REJECTED", acts: response.acts, toolRuns: runs, facts, violations: problems, ...repairInfo });
+    if (attempt === MAX_ATTEMPTS) return done({ status: "REJECTED", ...base, violations: problems, ...repairInfo });
     feedback = firstViolations = problems;
   }
-  return done({ status: "REJECTED", toolRuns: runs, facts });
+  return done({ status: "REJECTED", ...base });
 }
-
-const MAX_ATTEMPTS = 2;

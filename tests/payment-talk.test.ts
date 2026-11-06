@@ -1,7 +1,4 @@
 import { describe, expect, it } from "vitest";
-import type { Act, AgentModel, Fact, PlanInput, RespondInput, Utterance } from "../src/agent/contracts.js";
-import { runAgentTurn } from "../src/agent/pipeline.js";
-import { createToolRegistry, labInfoTool } from "../src/agent/tools.js";
 import { isPaymentOnly, stripPaymentTalk } from "../src/payment-talk.js";
 import { answerFromKnowledge } from "../src/knowledge-answers.js";
 import { KnowledgeService } from "../src/knowledge/index.js";
@@ -43,28 +40,6 @@ describe("stripPaymentTalk / isPaymentOnly: el texto del paciente", () => {
   it("el texto que escribe el modelo se recorta por ORACIONES (no se parte una oración a medias)", () => {
     expect(stripPaymentTalk("Abrimos de 07:00 a 18:00. Y sí, puedes pagar con QR o tarjeta.", { split: "sentence" })).toBe("Abrimos de 07:00 a 18:00.");
     expect(stripPaymentTalk("Sí, puedes pagar con QR.", { split: "sentence" })).toBe("");
-  });
-});
-
-describe("el agente nuevo ignora los pagos", () => {
-  const HOURS: Fact = { id: "lab_info:1", source: "LAB_INFO", text: "Horario: lunes a viernes de 07:00 a 18:00.", refs: [] };
-  const u = (id: string, text: string): Utterance => ({ id, topic: "INFO_REQUEST", goal: "LAB_INFO", text });
-  const model = (text: string): AgentModel => ({
-    async plan(_input: PlanInput) { return { toolCalls: [{ tool: "lab_info", input: { question: "horario" } }] }; },
-    async respond(_input: RespondInput) { return { acts: [{ kind: "ANSWER", utterances: ["U1"], factIds: ["lab_info:1"] } as Act], text }; }
-  });
-  const tools = createToolRegistry([labInfoTool({ answer: async () => ({ status: "ANSWERED", body: HOURS.text, refs: [], topics: ["HOURS"], unavailable: [] }) as never })]);
-
-  it("si el modelo menciona los pagos, esas oraciones se ignoran: el mensaje sale igual, con lo demás", async () => {
-    const decision = await runAgentTurn({ model: model("Abrimos lunes a viernes de 07:00 a 18:00. Y sí, puedes pagar con QR."), tools }, { utterances: [u("U1", "horario y pago")] });
-    expect(decision.status).toBe("VERIFIED");
-    expect(decision.reply).toBe("Abrimos lunes a viernes de 07:00 a 18:00.");
-  });
-
-  it("si lo único que dijo eran pagos, no queda nada que enviar: se rechaza (responde el agente de siempre)", async () => {
-    const decision = await runAgentTurn({ model: model("Sí, puedes pagar con QR."), tools }, { utterances: [u("U1", "se puede pagar con qr")] });
-    expect(decision.status).toBe("REJECTED");
-    expect(decision.reply).toBeUndefined();
   });
 });
 

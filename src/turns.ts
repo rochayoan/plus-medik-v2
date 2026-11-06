@@ -656,7 +656,7 @@ async function processContactBatch(
           return { kind: "none" };
         }
         if (piloted.quotedStudyIds.length > 0) deps.turns?.convState?.artifact({ from, key: leadId, kind: "QUOTE", studyIds: piloted.quotedStudyIds });
-        return { kind: "reply", body: piloted.body, result: piloted.result, processingStatus: piloted.processingStatus, stale: piloted.stale, ...(piloted.signature ? { signature: piloted.signature } : {}), quality: piloted.quality, ...(piloted.closes.length > 0 ? { closes: piloted.closes } : {}), ...(piloted.cap ? { cap: piloted.cap } : {}) };
+        return { kind: "reply", body: piloted.body, result: piloted.result, processingStatus: piloted.processingStatus, stale: piloted.stale, ...(piloted.signature ? { signature: piloted.signature } : {}), quality: piloted.quality };
       };
     }
 

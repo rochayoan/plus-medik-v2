@@ -1,7 +1,7 @@
 import { auditErrorFields, createSupabaseRpc } from "../audit.js";
 import type { ObservedTurn } from "../conversation-state-store.js";
 import type { ReplyQuality } from "../conversation-state.js";
-import type { Act, AgentModel, Capabilities, HandoffReason, RecentEntry, Utterance } from "./contracts.js";
+import type { AgentModel, Capabilities, HandoffReason, RecentEntry } from "./contracts.js";
 import { runAgentTurn } from "./pipeline.js";
 import { prepareAgentTurn, summarizeDecision, type AgentContextOptions } from "./shadow.js";
 
@@ -96,12 +96,8 @@ export interface PilotReply {
   stale: "NEWER_TURN";
   signature?: string;
   quality: ReplyQuality;
-  // Tope diario propio del contacto del piloto (el tope global de 5 respuestas haría imposible probar una conversación).
-  cap?: { max: number; windowSeconds: number };
   // ids de estudios de la cotización (para la memoria): nunca precios.
   quotedStudyIds: string[];
-  // Ids de mensajes de peticiones pendientes de antes que esta respuesta atendió de verdad (un acto distinto de aplazar las cubre).
-  closes: string[];
   // true: no hay nada que enviar (mensaje claramente ajeno al laboratorio); los turnos cierran el lote sin respuesta.
   silent?: true;
 }
@@ -117,7 +113,6 @@ export interface AgentPilotOptions {
   context: AgentContextOptions;
   // Derivación humana: solo si está habilitada Y el turno trae un ejecutor registrado (cola al CRM). Hoy en producción no hay CRM, así que no está disponible.
   handoffEnabled?: boolean;
-  dailyCap?: { max: number; windowSeconds: number };
   deadlineMs?: number;
   log(event: string, data: Record<string, unknown>): void;
   now?: () => number;
@@ -170,22 +165,22 @@ export function createAgentPilot(options: AgentPilotOptions): AgentPilot {
         if (!(await options.switch.enabled())) return fallback("SWITCH_OFF");
         if (now() < openUntil) return fallback("BREAKER_OPEN");
         const run = (async (): Promise<PilotReply | undefined> => {
-          // 2. Peticiones, memoria, mensajes recientes y herramientas (lo mismo que la sombra).
+          // 2. Mensajes del lote, mensajes recientes y herramientas.
           const prepared = await prepareAgentTurn(options.context, from, turns);
           if (prepared.kind === "skip") return fallback(prepared.reason);
           const capabilities: Capabilities = { handoff: Boolean(options.handoffEnabled && handoff), quote: options.context.capabilities?.quote ?? true };
-          // 3. Decide (plan → herramientas → actos y texto → verificación por procedencia → derivación registrada si hace falta).
+          // 3. Decide (plan → herramientas → texto libre → verificación por procedencia → derivación registrada si hace falta).
           const decision = await runAgentTurn(
             { model: options.model, tools: prepared.tools, ...(capabilities.handoff && handoff ? { handoff } : {}), cancelled: () => cancelled },
             { utterances: prepared.utterances, recent: prepared.recent, capabilities, now: new Date(now()) }
           );
-          options.log("agent_pilot", { ...summarizeDecision(decision, { utterances: prepared.current, carried: prepared.carried, mediaSkipped: prepared.mediaSkipped, latencyMs: now() - started, model: options.modelName }), ...(decision.handoffRegistered ? { handoff: "REGISTERED" } : {}), ...(decision.intents ? { intents: decision.intents.map((reading) => reading.intent) } : {}) });
+          options.log("agent_pilot", { ...summarizeDecision(decision, { utterances: prepared.utterances.length, mediaSkipped: prepared.mediaSkipped, latencyMs: now() - started, model: options.modelName }), ...(decision.handoffRegistered ? { handoff: "REGISTERED" } : {}) });
           // El modelo «funcionó» si respondió (aunque el verificador lo rechazara); falló si hubo error del proveedor.
           noteOutcome(decision.status !== "MODEL_ERROR");
           // Claramente ajeno al laboratorio y nada pendiente: no se responde (el turno se cierra sin respuesta, sin caer al modo esencial).
-          if (decision.status === "SILENT" && !cancelled) return { body: "", result: "conversation", processingStatus: "COMPLETED", stale: "NEWER_TURN", quality: "ANSWER", quotedStudyIds: [], closes: [], silent: true };
+          if (decision.status === "SILENT" && !cancelled) return { body: "", result: "conversation", processingStatus: "COMPLETED", stale: "NEWER_TURN", quality: "ANSWER", quotedStudyIds: [], silent: true };
           if (decision.status !== "VERIFIED" || !decision.reply || cancelled) return undefined;
-          return replyOf(decision, options, prepared.utterances);
+          return replyOf(decision);
         })();
         const limit = new Promise<"TIMEOUT">((resolve) => { timer = setTimeout(() => resolve("TIMEOUT"), deadlineMs); timer.unref?.(); });
         const winner = await Promise.race([run, limit]);
@@ -201,34 +196,19 @@ export function createAgentPilot(options: AgentPilotOptions): AgentPilot {
   };
 }
 
-function replyOf(decision: Awaited<ReturnType<typeof runAgentTurn>>, options: AgentPilotOptions, utterances: readonly Utterance[]): PilotReply {
-  const acts = decision.acts ?? [];
-  const kinds = new Set(acts.map((act) => act.kind));
-  const quoted = kinds.has("QUOTE");
-  // Qué le pasa a lo que el paciente pidió, para la memoria: cotizado, aplazado (queda pendiente a la vista) o atendido. Un aplazo por salud o por «quiero una persona» queda como «sin derivación».
-  const deferred = acts.filter((act) => act.kind === "DEFER");
-  const humanOrMedical = new Set((decision.intents ?? []).filter((reading) => reading.intent === "MEDICAL" || reading.intent === "HUMAN").map((reading) => reading.utterance));
-  const blocked = deferred.some((act) => act.utterances.some((id) => humanOrMedical.has(id)));
-  // Una cotización acompañada de una pregunta de aclaración es parcial: lo que falta sigue pendiente a la vista.
-  const partial = quoted && kinds.has("CLARIFY");
-  const quality: ReplyQuality = quoted && deferred.length === 0 && !partial ? "QUOTE" : blocked ? "BLOCKED" : deferred.length > 0 || partial ? "UNRESOLVED" : quoted ? "QUOTE" : "ANSWER";
+function replyOf(decision: Awaited<ReturnType<typeof runAgentTurn>>): PilotReply {
+  const quoted = decision.quoted === true;
+  // Qué le pasa a lo que el paciente pidió, para la memoria: cotizado (completo o PARCIAL: lo que falta sigue a la vista) o atendido.
+  const quality: ReplyQuality = quoted ? (decision.quotePartial ? "UNRESOLVED" : "QUOTE") : "ANSWER";
   const quotedStudyIds = quoted ? [...new Set(decision.facts.filter((fact) => fact.source === "QUOTE_ENGINE").flatMap((fact) => fact.refs).filter((ref) => ref.startsWith("study:")).map((ref) => ref.slice(6)))] : [];
   return {
     body: decision.reply!,
     result: quoted ? "quoted" : "conversation",
     processingStatus: "COMPLETED",
     stale: "NEWER_TURN",
-    signature: `agent:${[...kinds].sort().join("+")}`,
-    closes: closesOf(acts, utterances),
+    // Firma de la respuesta (código cerrado para la guarda de repeticiones).
+    signature: `agent:${quoted ? "QUOTE" : decision.handoffRegistered ? "HANDOFF" : "ANSWER"}`,
     quality,
-    ...(options.dailyCap ? { cap: options.dailyCap } : {}),
     quotedStudyIds
   };
-}
-
-// Las peticiones pendientes (P#) que algún acto distinto de aplazar cubrió: el paciente ya fue atendido en eso. Un DEFER sobre ellas las deja pendientes a la vista.
-function closesOf(acts: readonly Act[], utterances: readonly Utterance[]): string[] {
-  const answered = new Set(acts.filter((act) => act.kind !== "DEFER").flatMap((act) => act.utterances));
-  const deferred = new Set(acts.filter((act) => act.kind === "DEFER").flatMap((act) => act.utterances));
-  return utterances.filter((utterance) => utterance.carried && utterance.ref && answered.has(utterance.id) && !deferred.has(utterance.id)).map((utterance) => utterance.ref!);
 }

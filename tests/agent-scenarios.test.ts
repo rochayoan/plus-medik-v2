@@ -3,12 +3,12 @@ import { evaluate, gate, preflight, runAll, runScenario, scriptedModel, summariz
 import { AGENT_SCENARIOS, type AgentScenario } from "../scripts/g7/lib/agent-scenarios.js";
 
 // Escenarios SINTÉTICOS del núcleo conversacional, sin red. Dos cosas: (1) el verificador NO bloquea respuestas correctas y naturales de un buen modelo; (2) SÍ bloquea las inventadas, con el código esperado.
-// Cada escenario corre por el camino de producción (ejecutor en sombra, memoria, herramientas reales sobre un catálogo y conocimiento ficticios).
+// Cada escenario corre por el camino de producción (preparación del turno, herramientas reales sobre un catálogo y conocimiento ficticios, tubería y verificador).
 
 describe("escenarios sintéticos: cobertura del corpus", () => {
-  it("hay escenarios de saludo, cotización, ambigüedad, horario, varias preguntas, pendientes, salud, persona, inyección y datos inexistentes", () => {
+  it("hay escenarios de saludo, cotización, ambigüedad, estudio desconocido, horario, ubicación sin dato, continuidad, salud, persona, silencio, inyección y pagos", () => {
     const ids = AGENT_SCENARIOS.map((scenario) => scenario.id);
-    for (const id of ["saludo", "cotizar-por-nombre", "estudio-ambiguo", "horario", "horario-y-cotizacion", "mensaje-partido", "pendiente-de-antes", "ultima-cotizacion", "salud", "pide-una-persona", "intento-de-inyeccion", "pago-ignorado"]) expect(ids).toContain(id);
+    for (const id of ["saludo", "cotizar-por-nombre", "estudio-ambiguo", "estudio-desconocido", "horario", "ubicacion-sin-dato", "horario-y-cotizacion", "mensaje-partido", "continuidad", "ultima-cotizacion", "salud", "salud-con-precio", "pide-una-persona", "fuera-de-tema", "intento-de-inyeccion", "pago-ignorado"]) expect(ids).toContain(id);
     expect(new Set(ids).size).toBe(ids.length);
     expect(AGENT_SCENARIOS.every((scenario) => scenario.good.length > 0)).toBe(true);
   });
@@ -19,7 +19,10 @@ describe("el verificador acepta las respuestas CORRECTAS (sin falsos bloqueos)",
     scenario.good.forEach((reply, index) => {
       it(`${scenario.id} · respuesta correcta ${index + 1}`, async () => {
         const { decision, skipped } = await runScenario(scriptedModel(reply), scenario);
+        // salud sin precio: la preparación NO llama al modelo (lo atiende el modo esencial); fuera de tema: silencio
+        if (scenario.expect.skipped) { expect(evaluate(decision, scenario.expect, skipped)).toEqual([]); return; }
         expect(decision, `sin decisión (${skipped})`).toBeDefined();
+        if (scenario.expect.silent) { expect(decision!.status).toBe("SILENT"); expect(decision!.reply).toBeUndefined(); return; }
         expect(decision!.violations, JSON.stringify(decision!.violations)).toEqual([]);
         expect(decision!.status).toBe("VERIFIED");
         expect(evaluate(decision, scenario.expect)).toEqual([]);
@@ -53,26 +56,31 @@ describe("las herramientas del escenario usan el catálogo y el conocimiento fic
     expect(seen.join("")).not.toMatch(/\b45\b|30[.,]5|75[.,]5|Bs/);
   });
 
-  it("lo pendiente de antes llega como petición a cubrir (P1) y la última cotización como hecho con nombres del catálogo", async () => {
-    const ids: string[] = [];
-    await runScenario({ plan: async () => ({ toolCalls: [] }), respond: async (input) => { ids.push(...input.utterances.map((u) => `${u.id}:${u.carried ? "pendiente" : "nuevo"}`)); return { acts: [{ kind: "ACK", utterances: input.utterances.map((u) => u.id) }], text: "Hola, con gusto." }; } }, find("pendiente-de-antes"));
-    expect(ids).toEqual(["U1:nuevo", "P1:pendiente"]);
+  it("la continuidad viene del historial (mensajes recientes, sin ids ni pendientes) y la última cotización como hecho con nombres del catálogo", async () => {
+    const seen: string[] = [];
+    await runScenario({ plan: async (input) => { seen.push(JSON.stringify([input.recent, input.utterances])); return { toolCalls: [] }; }, respond: async () => ({ text: "Con gusto." }) }, find("continuidad"));
+    expect(seen[0]).toContain("necesito cotizar creatinina");
+    expect(seen[0]).toContain("CREATININA EN ORINA");
+    expect(seen[0]).not.toMatch(/"id"|carried|U1|P1/);
     const last = await runScenario(scriptedModel(find("ultima-cotizacion").good[1]!), find("ultima-cotizacion"));
     expect(last.decision?.facts.map((fact) => fact.text)).toEqual(["Última cotización entregada en esta conversación: HEMOGRAMA COMPLETO; TSH"]);
   });
 
-  it("la derivación humana está desactivada: un plan con HANDOFF se rechaza aunque el modelo lo pida", async () => {
+  it("la derivación humana está desactivada: pedir una persona y prometerla se rechaza", async () => {
     const scenario = find("pide-una-persona");
     const { decision } = await runScenario(scriptedModel(scenario.bad![0]!), scenario);
-    expect(decision?.violations.map((v) => v.code)).toContain("HANDOFF_UNAVAILABLE");
+    expect(decision?.violations.map((v) => v.code)).toContain("UNREGISTERED_HANDOFF_PROMISE");
   });
 
-  it("un mensaje de salud llega al modelo con su tema MEDICAL (el agente solo puede aplazar o derivar, nunca aconsejar)", async () => {
-    const scenario = find("salud");
+  it("un mensaje de salud SIN precio no llega al modelo (lo atiende el modo esencial); con un pedido de precio sí llega, con su texto", async () => {
+    let calls = 0;
+    const counting = { plan: async () => { calls += 1; return { toolCalls: [] }; }, respond: async () => ({ text: "x" }) };
+    const sick = await runScenario(counting, find("salud"));
+    expect(sick).toMatchObject({ skipped: "MEDICAL" });
+    expect(calls).toBe(0);
     let utterances = "";
-    await runScenario({ plan: async (input) => { utterances = JSON.stringify(input.utterances); return { toolCalls: [] }; }, respond: async () => scriptedModel(scenario.good[0]!).respond({} as never) }, scenario);
-    expect(utterances).toMatch(/pecho/);
-    expect(utterances).toContain("MEDICAL");
+    await runScenario({ plan: async (input) => { utterances = JSON.stringify(input.utterances); return { toolCalls: [] }; }, respond: async () => scriptedModel(find("salud-con-precio").good[0]!).respond({} as never) }, find("salud-con-precio"));
+    expect(utterances).toMatch(/diabetes/);
   });
 });
 
@@ -81,18 +89,20 @@ describe("el arnés de evaluación", () => {
     const runs = [];
     for (const scenario of AGENT_SCENARIOS) runs.push(...await runAll(scriptedModel(scenario.good[0]!, { inputTokens: 100, outputTokens: 20 }), { scenarios: [scenario] }));
     const summary = summarize(runs, { inputPerMTok: 2, outputPerMTok: 10 });
-    expect(summary).toMatchObject({ scenarios: AGENT_SCENARIOS.length, passed: AGENT_SCENARIOS.length, rejected: 0, modelErrors: 0, skipped: 0, rejectedList: [], failedList: [] });
-    expect(summary.usage).toMatchObject({ inputTokens: 200 * AGENT_SCENARIOS.length, outputTokens: 40 * AGENT_SCENARIOS.length, calls: 2 * AGENT_SCENARIOS.length });
-    expect(summary.costUsd).toBeCloseTo((200 * 2 + 40 * 10) * AGENT_SCENARIOS.length / 1_000_000, 4);
+    // salud sin precio no llama al modelo (0 llamadas) y fuera de tema solo planifica (1 llamada): el resto, plan + redacción
+    const calls = 2 * (AGENT_SCENARIOS.length - 2) + 1;
+    expect(summary).toMatchObject({ scenarios: AGENT_SCENARIOS.length, passed: AGENT_SCENARIOS.length, rejected: 0, modelErrors: 0, skipped: 1, rejectedList: [], failedList: [] });
+    expect(summary.usage).toMatchObject({ inputTokens: 100 * calls, outputTokens: 20 * calls, calls });
+    expect(summary.costUsd).toBeCloseTo((100 * calls * 2 + 20 * calls * 10) / 1_000_000, 4);
     expect(summarize(runs).costUsd).toBeUndefined();
   });
 
   it("detecta lo que falla: un rechazo del verificador, una expectativa incumplida y un error del modelo", async () => {
     const quote = AGENT_SCENARIOS.find((s) => s.id === "cotizar-por-nombre")!;
-    const rejected = await runAll(scriptedModel(quote.bad![0]!), { scenarios: [quote] });
+    const rejected = await runAll(scriptedModel(quote.bad![1]!), { scenarios: [quote] });
     expect(summarize(rejected)).toMatchObject({ rejected: 1, passed: 0, rejectedList: [{ id: "cotizar-por-nombre", violations: expect.arrayContaining(["PRICE_OUTSIDE_QUOTE"]) }] });
     const hours = AGENT_SCENARIOS.find((s) => s.id === "horario")!;
-    const wrongAct = await runAll(scriptedModel({ calls: hours.good[0]!.calls, acts: [{ kind: "ANSWER", utterances: ["U1"], factIds: ["lab_info:1"] }], text: "Atendemos de lunes a viernes." }), { scenarios: [hours] });
+    const wrongAct = await runAll(scriptedModel({ calls: hours.good[0]!.calls, text: "Atendemos de lunes a viernes." }), { scenarios: [hours] });
     expect(wrongAct[0]!.failures.join(" ")).toMatch(/el mensaje no cumple/);
     const failing = await runAll({ plan: async () => { throw Object.assign(new Error("x"), { status: 429, code: "insufficient_quota" }); }, respond: async () => { throw new Error("no"); } }, { scenarios: [hours] });
     expect(summarize(failing)).toMatchObject({ modelErrors: 1, passed: 0 });
