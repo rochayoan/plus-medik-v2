@@ -14,7 +14,7 @@ export const PARAM_TYPES: Record<string, string> = {
   p_reason: "text", p_turn_kind: "text", p_stale_policy: "text", p_contact_key: "text", p_event_key: "text", p_occurred_at: "timestamptz", p_source: "text", p_actor: "text", p_detail: "jsonb", p_guard: "jsonb", p_cap: "jsonb",
   p_image_hash: "text", p_result: "jsonb", p_ttl_seconds: "integer", p_max_items: "integer", p_session_id: "uuid", p_outcome: "text", p_lines: "jsonb", p_total: "numeric", p_reasons: "text[]", p_catalog_fingerprint: "text",
   p_recent_seconds: "integer", p_fact_id: "uuid", p_lab_test_id: "uuid", p_max_age_seconds: "integer", p_operation_id: "text", p_action: "text",
-  p_origin_run_id: "uuid", p_kapso_message_id: "text", p_cipher: "text", p_hash: "text", p_evidence: "jsonb", p_outbox_id: "uuid", p_force: "boolean", p_http_status: "integer", p_duration_ms: "integer", p_event_ids: "text[]"
+  p_origin_run_id: "uuid", p_kapso_message_id: "text", p_cipher: "text", p_hash: "text", p_evidence: "jsonb", p_outbox_id: "uuid", p_force: "boolean", p_http_status: "integer", p_duration_ms: "integer", p_event_ids: "text[]", p_events: "jsonb", p_exclude: "text[]", p_enabled: "boolean"
 };
 
 const literal = (key: string, value: unknown): string => {
@@ -39,7 +39,7 @@ export const newNetwork = (): Network => ({ down: false, downFor: new Set(), cal
 export function postgrestOverPsql(db: PgDatabase, network: Network): typeof fetch {
   return (async (input: unknown, init?: RequestInit) => {
     const name = String(input).split("/rest/v1/rpc/")[1];
-    if (!name || !/^plusmedik_(audit|attention|turn|kb|reply_guard|quote|study|facts|crm|history)_[a-z_]+$/.test(name)) throw new Error("solo RPC de auditoría o atención");
+    if (!name || !/^plusmedik_(audit|attention|turn|kb|reply_guard|quote|study|facts|crm|history|conv|agent)_[a-z_]+$/.test(name)) throw new Error("solo RPC de auditoría o atención");
     network.calls.push(name);
     if (network.down || network.downFor.has(name)) throw new TypeError("fetch failed");
     const args = JSON.parse(String(init?.body)) as Record<string, unknown>;

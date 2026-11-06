@@ -52,7 +52,7 @@ describe("Fase 1: el token es exclusivo y se compara en tiempo constante", () =>
   });
   it("no se reutiliza la llave de servicio, la clave de la cola al CRM ni credenciales de Kapso: el único secreto ajeno que lee es la clave HMAC de contactos", () => {
     const envNames = [...module.matchAll(/env\.([A-Z_]+)/g)].map((match) => match[1]);
-    expect([...new Set(envNames)].sort()).toEqual(["KAPSO_PHONE_NUMBER_ID", "PLUSMEDIK_AGENT_CONTROL", "PLUSMEDIK_AGENT_CONTROL_PHONES", "PLUSMEDIK_AGENT_CONTROL_TOKEN", "PLUSMEDIK_CONTACT_HMAC_KEY", "PLUSMEDIK_HUMAN_CONTROL"]);
+    expect([...new Set(envNames)].sort()).toEqual(["KAPSO_PHONE_NUMBER_ID", "PLUSMEDIK_AGENT_CONTROL", "PLUSMEDIK_AGENT_CONTROL_PHONES", "PLUSMEDIK_AGENT_CONTROL_TOKEN", "PLUSMEDIK_CONTACT_HMAC_KEY", "PLUSMEDIK_CONV_STATE", "PLUSMEDIK_HUMAN_CONTROL"]);
     expect(module).not.toMatch(/SERVICE_ROLE|OUTBOX_KEY|CRM_REVIEW_TOKEN|KAPSO_API_KEY|WEBHOOK_SECRET|CRON_SECRET/);
   });
   it("las cabeceras impiden cacheo y se rechazan llamadas de navegador y HTTP plano (salvo localhost)", () => {
@@ -98,7 +98,7 @@ describe("Fase 1: la pausa manual es real, no un mensaje de WhatsApp simulado", 
 describe("Fase 1: la migración 15 es aditiva y de acceso restringido", () => {
   const sql = code(MIGRATION);
   it("es la decimoquinta, no borra ni vacía nada, no toca el esquema crm ni las tablas de otras capas", () => {
-    expect(readdirSync(join(root, "supabase/migrations")).filter((name) => name.endsWith(".sql")).sort().at(-9)).toBe("20261103000000_plusmedik_crm_attention_control.sql");
+    expect(readdirSync(join(root, "supabase/migrations")).filter((name) => name.endsWith(".sql")).sort().at(-11)).toBe("20261103000000_plusmedik_crm_attention_control.sql");
     expect(sql).not.toMatch(/\b(drop table|drop function|delete from|truncate|drop schema|alter table public\.plusmedik_audit_runs)\b/i);
     expect(sql).not.toMatch(/\bcrm\./i);
     expect(sql).not.toMatch(/\blab_tests\b/);
