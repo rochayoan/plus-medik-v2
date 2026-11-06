@@ -3,7 +3,6 @@ import type { AttentionConfig } from "./attention-filter.js";
 import type { AudioPipeline } from "./audio/service.js";
 import type { ConversationMemory } from "./conversation-memory.js";
 import type { AgentPilot } from "./agent/pilot.js";
-import type { AgentShadow } from "./agent/shadow.js";
 import type { ReplyQuality } from "./conversation-state.js";
 import type { ConversationRecorder } from "./conversation-state-store.js";
 import type { CrmHandoff } from "./crm-outbox/types.js";
@@ -54,11 +53,9 @@ export interface TurnsConfig {
   dailyCap?: { max: number; windowSeconds: number };
   // Memoria conversacional corta (apagada si falta; ver src/conversation-memory.ts): se guardan los mensajes de texto del paciente y las respuestas conversacionales confirmadas como enviadas.
   memory?: ConversationMemory;
-  // Memoria estructurada en SOMBRA (PLUSMEDIK_CONV_STATE=shadow; apagada si falta; ver src/conversation-state-store.ts): solo observa y registra; nunca cambia una respuesta, un lease ni un envío.
+  // Memoria estructurada en SOMBRA (la bandera del agente conversacional; apagada si falta; ver src/conversation-state-store.ts): solo observa y registra; nunca cambia una respuesta, un lease ni un envío.
   convState?: ConversationRecorder;
-  // Núcleo conversacional en SOMBRA (PLUSMEDIK_AGENT=shadow; apagado si falta; ver src/agent/shadow.ts): decide qué respondería, sin enviar nada ni tocar leases, pausa, tope ni precios.
-  agentShadow?: AgentShadow;
-  // PILOTO del nuevo agente (PLUSMEDIK_AGENT=pilot; apagado si falta; ver src/agent/pilot.ts): para los números de su lista y mientras el interruptor de la base esté encendido, decide la respuesta de un lote de
+  // AGENTE CONVERSACIONAL ÚNICO (apagado si falta; ver src/agent/pilot.ts): mientras el interruptor de emergencia de la base esté encendido, decide la respuesta de un lote de
   // texto; la ENVÍA esta misma máquina (lease, reserva, pausa humana, un envío por lote, tope). Si no puede o no debe responder, responde la ruta de siempre.
   agentPilot?: AgentPilot;
   // Métodos de pago IGNORADOS (ausente = como siempre): un mensaje que solo trata de cómo pagar no se atiende (ni se reclama), y en los demás se quitan las frases de pago antes de entenderlos. Ver src/payment-talk.ts.

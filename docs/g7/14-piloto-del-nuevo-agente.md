@@ -1,3 +1,5 @@
+> ⚠ **Nombres de variables y modos reemplazados por la arquitectura unificada: ver [19-arquitectura-unificada.md](19-arquitectura-unificada.md).**
+
 # G7 · Fase 4 — piloto del nuevo agente (un número autorizado)
 
 Estado: **implementado y probado; NO desplegado; las migraciones 24 y 25 NO están aplicadas a ningún Supabase; no hay commit.** Apagado por defecto en tres capas independientes (variable, lista de números e interruptor de la base).

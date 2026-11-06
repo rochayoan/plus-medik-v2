@@ -5,7 +5,7 @@ vi.mock("openai", () => ({ default: class { responses = { create }; } }));
 
 import { AgentOutputError } from "../src/agent/pipeline.js";
 import {
-  AGENT_LIMITS, createAgentModel, createOpenAiAgentClient, parseActs, parsePlan, planMessage, planSchema, PLAN_INSTRUCTIONS, resolveAgentSettings, respondMessage, RESPOND_INSTRUCTIONS, RESPOND_SCHEMA, type AgentClient
+  AGENT_LIMITS, createAgentModel, DEFAULT_REASONING, createOpenAiAgentClient, parseActs, parsePlan, planMessage, planSchema, PLAN_INSTRUCTIONS, resolveAgentSettings, respondMessage, RESPOND_INSTRUCTIONS, RESPOND_SCHEMA, type AgentClient
 } from "../src/agent/openai.js";
 import type { Fact, PlanInput, RespondInput, Utterance } from "../src/agent/contracts.js";
 
@@ -172,8 +172,8 @@ describe("el cliente de OpenAI (API Responses)", () => {
   });
 });
 
-describe("configuración: apagada por defecto", () => {
-  const FULL = { PLUSMEDIK_AGENT: "shadow", OPENAI_AGENT_MODEL: "modelo-x", OPENAI_API_KEY: "sk-test" };
+describe("configuración: apagada por defecto y UNA sola variable de modelo", () => {
+  const FULL = { PLUSMEDIK_LLM_CONVERSATION: "on", OPENAI_CONVERSATION_MODEL: "modelo-x", OPENAI_API_KEY: "sk-test" };
   const resolve = (env: Record<string, string | undefined>) => {
     const log = vi.fn();
     return { settings: resolveAgentSettings(env, log), log };
@@ -181,34 +181,31 @@ describe("configuración: apagada por defecto", () => {
 
   it("sin la bandera (o «off») no hace nada ni registra nada, aunque el resto esté completo", () => {
     create.mockClear();
-    for (const value of [undefined, "", "off", "OFF"]) {
-      const { settings, log } = resolve({ ...FULL, PLUSMEDIK_AGENT: value });
+    for (const value of [undefined, "", "off", "OFF", "shadow"]) {
+      const { settings, log } = resolve({ ...FULL, PLUSMEDIK_LLM_CONVERSATION: value });
       expect(settings).toBeUndefined();
       expect(log).not.toHaveBeenCalled();
     }
     expect(create).not.toHaveBeenCalled();
   });
 
-  it("con la bandera y TODA la configuración válida crea el modelo con los valores por omisión (30 s, 100 %)", () => {
+  it("con la bandera y TODA la configuración válida crea el modelo con razonamiento MEDIO por omisión; OPENAI_AGENT_MODEL ya no se lee", () => {
     const { settings, log } = resolve(FULL);
-    expect(settings).toMatchObject({ modelName: "modelo-x", sample: 100 });
+    expect(settings).toMatchObject({ modelName: "modelo-x" });
     expect(typeof settings!.model.plan).toBe("function");
     expect(log).not.toHaveBeenCalled();
+    expect(DEFAULT_REASONING).toBe("medium");
+    const old = resolve({ PLUSMEDIK_LLM_CONVERSATION: "on", OPENAI_AGENT_MODEL: "modelo-x", OPENAI_API_KEY: "sk-test" });
+    expect(old.settings).toBeUndefined();
+    expect(old.log).toHaveBeenCalledWith("agent_config_invalid", { error: "MISSING_MODEL" });
   });
 
   it("cada valor faltante o inválido lo deja apagado con UN código (nunca el valor)", () => {
     const cases: Array<[Record<string, string | undefined>, string]> = [
-      [{ ...FULL, PLUSMEDIK_AGENT: "on" }, "INVALID_VALUE"],
-      [{ ...FULL, OPENAI_AGENT_MODEL: undefined }, "MISSING_MODEL"],
-      [{ ...FULL, OPENAI_AGENT_MODEL: "con espacios; rm -rf" }, "INVALID_MODEL"],
+      [{ ...FULL, OPENAI_CONVERSATION_MODEL: undefined }, "MISSING_MODEL"],
+      [{ ...FULL, OPENAI_CONVERSATION_MODEL: "con espacios; rm -rf" }, "INVALID_MODEL"],
       [{ ...FULL, OPENAI_API_KEY: undefined }, "MISSING_API_KEY"],
-      [{ ...FULL, OPENAI_AGENT_REASONING: "ultra" }, "INVALID_REASONING"],
-      [{ ...FULL, PLUSMEDIK_AGENT_TIMEOUT_MS: "100" }, "INVALID_TIMEOUT"],
-      [{ ...FULL, PLUSMEDIK_AGENT_TIMEOUT_MS: "abc" }, "INVALID_TIMEOUT"],
-      [{ ...FULL, PLUSMEDIK_AGENT_TIMEOUT_MS: "99999" }, "INVALID_TIMEOUT"],
-      [{ ...FULL, PLUSMEDIK_AGENT_SAMPLE: "0" }, "INVALID_SAMPLE"],
-      [{ ...FULL, PLUSMEDIK_AGENT_SAMPLE: "101" }, "INVALID_SAMPLE"],
-      [{ ...FULL, PLUSMEDIK_AGENT_SAMPLE: "mucho" }, "INVALID_SAMPLE"]
+      [{ ...FULL, OPENAI_CONVERSATION_REASONING: "ultra" }, "INVALID_REASONING"]
     ];
     for (const [env, code] of cases) {
       const { settings, log } = resolve(env);
@@ -219,8 +216,8 @@ describe("configuración: apagada por defecto", () => {
     }
   });
 
-  it("los valores opcionales válidos se aceptan (razonamiento, tiempo, muestreo)", () => {
-    expect(resolve({ ...FULL, OPENAI_AGENT_REASONING: "HIGH", PLUSMEDIK_AGENT_TIMEOUT_MS: "45000", PLUSMEDIK_AGENT_SAMPLE: "25" }).settings).toMatchObject({ sample: 25 });
+  it("el razonamiento opcional válido se acepta", () => {
+    expect(resolve({ ...FULL, OPENAI_CONVERSATION_REASONING: "HIGH" }).settings).toMatchObject({ modelName: "modelo-x" });
   });
 });
 

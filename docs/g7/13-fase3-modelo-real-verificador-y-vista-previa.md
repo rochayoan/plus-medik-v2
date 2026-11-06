@@ -1,3 +1,5 @@
+> ⚠ **Nombres de variables y modos reemplazados por la arquitectura unificada: ver [19-arquitectura-unificada.md](19-arquitectura-unificada.md).**
+
 # G7 · Fase 3 — modelo real, verificador y activación en sombra en vista previa
 
 Estado: **todo lo que se puede probar sin una clave de OpenAI está probado; el modelo real NO se pudo llamar desde este entorno.** No hay `OPENAI_API_KEY` en el proceso, en las variables de usuario/máquina de Windows ni un `.env`; no la pedí ni la busqué en otro lado. Por eso **este documento no afirma que ningún modelo «funcione»**: deja un arnés listo para demostrarlo con una sola orden y dice qué evidencia falta. Sin commit, push ni deploy; nada de pacientes salió a ningún lado.

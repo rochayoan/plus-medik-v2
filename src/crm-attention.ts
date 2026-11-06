@@ -125,7 +125,7 @@ export interface CrmAttentionDeps {
   config: CrmControlConfig | undefined;
   // Se pide al primer uso real (así una base sin configurar no rompe al cargar el módulo).
   repository(): CrmAttentionRepository;
-  // Memoria estructurada en SOMBRA (PLUSMEDIK_CONV_STATE=shadow): anota que una persona reanudó al agente. Se carga solo si la bandera está encendida (apagada, esta ruta no importa nada nuevo). Mejor esfuerzo:
+  // Memoria estructurada en SOMBRA (la bandera del agente conversacional): anota que una persona reanudó al agente. Se carga solo si la bandera está encendida (apagada, esta ruta no importa nada nuevo). Mejor esfuerzo:
   // nunca cambia la respuesta al CRM ni el estado de atención.
   convState?: () => Promise<{ humanResume(input: { contactKey: string; operationId: string }): void; flush(timeoutMs?: number): Promise<void> } | undefined>;
   log(event: string, data: Record<string, unknown>): void;
@@ -256,7 +256,7 @@ export function createCrmAttentionRoute(route: "status" | "action", env: Record<
   const config = resolution.enabled && "config" in resolution ? resolution.config : undefined;
   let repository: CrmAttentionRepository | undefined;
   let recorder: Awaited<ReturnType<NonNullable<CrmAttentionDeps["convState"]>>> | undefined;
-  const shadow = env.PLUSMEDIK_CONV_STATE?.trim().toLowerCase() === "shadow";
+  const shadow = env.PLUSMEDIK_LLM_CONVERSATION?.trim().toLowerCase() === "on";
   const deps: CrmAttentionDeps = {
     config,
     ...(shadow ? { convState: async () => (recorder ??= (await import("./conversation-state-store.js")).resolveConversationState(env, log, {})) } : {}),

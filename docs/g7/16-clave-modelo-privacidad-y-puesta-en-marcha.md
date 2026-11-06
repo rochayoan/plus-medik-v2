@@ -1,3 +1,5 @@
+> ⚠ **Nombres de variables y modos reemplazados por la arquitectura unificada: ver [19-arquitectura-unificada.md](19-arquitectura-unificada.md).**
+
 # G7 · Fase 5b — clave de OpenAI, verificación del modelo y Vercel
 
 Decisiones confirmadas: modelo `gpt-6.1-sol` con razonamiento medio · alcance 100 % de los contactos elegibles, sin rollout · tope diario del agente nuevo: **6 respuestas** · memoria, herramientas, protecciones y agente anterior como respaldo.

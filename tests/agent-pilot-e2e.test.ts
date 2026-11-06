@@ -110,7 +110,7 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
     const history = createMessageHistory({ store: createSupabaseHistoryStore({ rpc: createSupabaseRpc(rpcOptions()) }), accountId: LAB, contactKeyFor, log });
     const store = createSupabaseConversationStore({ rpc: createSupabaseRpc(rpcOptions()) });
     const memory = options.memory ?? Boolean(options.pilot);
-    const convState: ConversationRecorder | undefined = memory ? resolveConversationState({ PLUSMEDIK_CONV_STATE: "shadow" }, log, { contactKeyFor, store }) : undefined;
+    const convState: ConversationRecorder | undefined = memory ? resolveConversationState({ PLUSMEDIK_LLM_CONVERSATION: "on" }, log, { contactKeyFor, store }) : undefined;
     const pilot: AgentPilot | undefined = options.pilot
       ? createAgentPilot({
           model: options.pilot.model, modelName: "modelo-x",
@@ -223,6 +223,26 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
       const state = (await stateOf(w, p.key))!;
       expect(state.artifacts.map((a) => `${a.kind}:${a.studyIds.length}`)).toEqual(["QUOTE:2"]);
       expect(pending(state, Date.now())).toEqual([]);
+    });
+
+    it("SILENCIO ante lo claramente ajeno al laboratorio: no se envía nada, no queda pendiente y el siguiente mensaje normal se atiende", async () => {
+      const p = patient();
+      const model = fakeAgentModel({ intents: [{ utterance: "U1", intent: "OFF_TOPIC" }], text: "RESPUESTA DEL AGENTE NUEVO" });
+      const w = setup({ pilot: { phones: [p.phone], model } });
+      await switchTo(true);
+      await say(w, p.phone, "jajaja mira el partido de anoche");
+      expect(w.sends).toEqual([]);
+      expect(model.responds).toEqual([]);
+      expect(pilotLogs(w).at(-1)).toMatchObject({ status: "SILENT" });
+      expect(await historyShape(p.key)).toBe("IN/PATIENT/TEXT/RECEIVED");
+      await w.settle();
+      const state = await stateOf(w, p.key);
+      expect(state ? pending(state, Date.now()) : []).toEqual([]);
+      // con una pregunta del laboratorio el modelo ya no la lee como ajena y sí se responde
+      const lab = fakeAgentModel({ intents: [{ utterance: "U1", intent: "INFO" }], text: "Atendemos de lunes a viernes." });
+      const w2 = setup({ pilot: { phones: [p.phone], model: lab } });
+      await say(w2, p.phone, "a que hora abren?");
+      expect(w2.sends).toHaveLength(1);
     });
 
     it("MÉTODOS DE PAGO IGNORADOS en un lote: «hola», «quiero cotizar…» y «voy a pagar por QR» → se cotiza y del QR no se dice nada; el modelo ni siquiera recibe el mensaje de pago", async () => {
@@ -545,7 +565,7 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
       expect(state.holder).toBe("HUMAN");
       expect(state.questions.at(-1)).toMatchObject({ status: "CARRIED", reason: "HUMAN_PAUSED" });
       // la recepción reanuda manualmente (la ruta del CRM escribe este evento): lo pospuesto por la pausa se reabre para el agente
-      const recorder = resolveConversationState({ PLUSMEDIK_CONV_STATE: "shadow" }, () => undefined, { contactKeyFor, store: w.store })!;
+      const recorder = resolveConversationState({ PLUSMEDIK_LLM_CONVERSATION: "on" }, () => undefined, { contactKeyFor, store: w.store })!;
       recorder.humanResume({ contactKey: p.key, operationId: `op-${counter}` });
       await recorder.flush();
       state = (await stateOf(w, p.key))!;

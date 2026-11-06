@@ -8,17 +8,13 @@ import { validateActs, verifyReply } from "./verify.js";
 // En esta fase solo produce una DECISIÓN para auditar (el mensaje propuesto NO se envía): `PLUSMEDIK_AGENT=shadow` la compara con lo que respondió el agente actual. Ante cualquier fallo del modelo, de una
 // herramienta o de la verificación devuelve un estado y sin mensaje; el sistema actual sigue respondiendo como siempre.
 
-// off = apagado; shadow = decide sin enviar; pilot = RESPONDE, solo a los números de la lista del piloto y solo con el interruptor de la base encendido (ver src/agent/pilot.ts).
-// live = responde a TODOS los contactos elegibles (menos los excluidos), con el mismo interruptor de la base y el mismo respaldo al agente de siempre.
-export type AgentMode = "off" | "shadow" | "pilot" | "live";
+// off = apagado; live = el agente conversacional ÚNICO atiende a todos los contactos elegibles, con el interruptor de emergencia de la base (src/agent/pilot.ts) y el MODO ESENCIAL (textos fijos, catálogo,
+// cotización y derivación deterministas) cuando el interruptor está apagado o el modelo no puede responder.
+export type AgentMode = "off" | "live";
 
-// PLUSMEDIK_AGENT: ausente, vacío u «off» = apagado; «shadow» = decide sin enviar; «pilot» = responde solo a la lista del piloto; «live» = responde a todos los contactos elegibles (sin porcentajes ni rollout); cualquier otro valor = apagado y un código (una errata nunca lo enciende). No existe «on»: el alcance global se pide con «live».
-export function resolveAgentMode(env: Record<string, string | undefined>, log: (event: string, data: Record<string, unknown>) => void): AgentMode {
-  const raw = env.PLUSMEDIK_AGENT?.trim().toLowerCase();
-  if (!raw || raw === "off") return "off";
-  if (raw === "shadow" || raw === "pilot" || raw === "live") return raw;
-  log("agent_config_invalid", { error: "INVALID_VALUE" });
-  return "off";
+// PLUSMEDIK_LLM_CONVERSATION=on (la misma bandera de siempre de la capa conversacional) enciende el agente; cualquier otro valor lo deja apagado (una errata nunca lo enciende).
+export function resolveAgentMode(env: Record<string, string | undefined>): AgentMode {
+  return env.PLUSMEDIK_LLM_CONVERSATION?.trim().toLowerCase() === "on" ? "live" : "off";
 }
 
 export interface AgentTurnInput {
@@ -78,6 +74,12 @@ export async function runAgentTurn(deps: AgentDeps, input: AgentTurnInput): Prom
   }
   // La intención la decide el MODELO: lo que leyó de cada petición manda sobre la etiqueta de las reglas (que solo rige si el modelo no leyó esa petición).
   const read = new Map(intents.map((reading) => [reading.utterance, reading.intent] as const));
+
+  // SILENCIO ante lo CLARAMENTE ajeno al laboratorio. El modelo propone (OFF_TOPIC en CADA petición); el sistema exige además que las reglas tampoco vean nada del laboratorio (tema OTHER), que no haya nada
+  // pendiente de antes y que no haya una conversación en curso (ningún mensaje reciente del asistente ni de la recepción). Ante cualquier duda se responde como siempre.
+  if (input.utterances.every((utterance) => !utterance.carried && utterance.topic === "OTHER" && read.get(utterance.id) === "OFF_TOPIC") && !recent.some((entry) => entry.from !== "PATIENT")) {
+    return done({ status: "SILENT", intents });
+  }
 
   const { runs, facts, blocks } = await runToolCalls(deps.tools, toolCalls, { now });
   const hasQuoteBlock = blocks.length > 0;

@@ -83,7 +83,7 @@ describe.skipIf(!bin)("memoria estructurada en sombra de extremo a extremo contr
     const history = createMessageHistory({ store: createSupabaseHistoryStore({ rpc: createSupabaseRpc(rpcOptions()) }), accountId: LAB, contactKeyFor, log });
     const store = createSupabaseConversationStore({ rpc: createSupabaseRpc(rpcOptions()) });
     // La misma ruta que usa producción: la bandera decide si hay grabador.
-    const convState: ConversationRecorder | undefined = resolveConversationState({ ...(options.shadow ? { PLUSMEDIK_CONV_STATE: "shadow" } : {}) }, log, { contactKeyFor, store });
+    const convState: ConversationRecorder | undefined = resolveConversationState({ ...(options.shadow ? { PLUSMEDIK_LLM_CONVERSATION: "on" } : {}) }, log, { contactKeyFor, store });
     const attention: AttentionConfig | undefined = options.attention === false ? undefined : { repeats: createRepeatTracker({ windowMs: 90_000 }), gate: createReplyGate(), settleMs: 0 };
     const sessions = options.sessions !== false;
     const quote: QuoteDeps = {

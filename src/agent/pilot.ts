@@ -102,6 +102,8 @@ export interface PilotReply {
   quotedStudyIds: string[];
   // Ids de mensajes de peticiones pendientes de antes que esta respuesta atendió de verdad (un acto distinto de aplazar las cubre).
   closes: string[];
+  // true: no hay nada que enviar (mensaje claramente ajeno al laboratorio); los turnos cierran el lote sin respuesta.
+  silent?: true;
 }
 
 export interface AgentPilotOptions {
@@ -180,6 +182,8 @@ export function createAgentPilot(options: AgentPilotOptions): AgentPilot {
           options.log("agent_pilot", { ...summarizeDecision(decision, { utterances: prepared.current, carried: prepared.carried, mediaSkipped: prepared.mediaSkipped, latencyMs: now() - started, model: options.modelName }), ...(decision.handoffRegistered ? { handoff: "REGISTERED" } : {}), ...(decision.intents ? { intents: decision.intents.map((reading) => reading.intent) } : {}) });
           // El modelo «funcionó» si respondió (aunque el verificador lo rechazara); falló si hubo error del proveedor.
           noteOutcome(decision.status !== "MODEL_ERROR");
+          // Claramente ajeno al laboratorio y nada pendiente: no se responde (el turno se cierra sin respuesta, sin caer al modo esencial).
+          if (decision.status === "SILENT" && !cancelled) return { body: "", result: "conversation", processingStatus: "COMPLETED", stale: "NEWER_TURN", quality: "ANSWER", quotedStudyIds: [], closes: [], silent: true };
           if (decision.status !== "VERIFIED" || !decision.reply || cancelled) return undefined;
           return replyOf(decision, options, prepared.utterances);
         })();
@@ -227,61 +231,4 @@ function closesOf(acts: readonly Act[], utterances: readonly Utterance[]): strin
   const answered = new Set(acts.filter((act) => act.kind !== "DEFER").flatMap((act) => act.utterances));
   const deferred = new Set(acts.filter((act) => act.kind === "DEFER").flatMap((act) => act.utterances));
   return utterances.filter((utterance) => utterance.carried && utterance.ref && answered.has(utterance.id) && !deferred.has(utterance.id)).map((utterance) => utterance.ref!);
-}
-
-// ───────────────────────────── configuración ─────────────────────────────
-
-export type AgentPilotConfigError =
-  | "MISSING_PILOT_PHONES" | "INVALID_PILOT_PHONES" | "INVALID_PILOT_DAILY_MAX" | "INVALID_PILOT_HANDOFF"
-  | "INVALID_EXCLUDE_PHONES" | "INVALID_DAILY_MAX" | "INVALID_DEADLINE";
-
-export interface AgentPilotSettings {
-  // PILOTO: la lista de números. Ausente en modo global.
-  phones?: ReadonlySet<string>;
-  // GLOBAL: los números excluidos (siguen con el agente de siempre). Ausente en modo piloto.
-  exclude?: ReadonlySet<string>;
-  // Tope diario propio de quien atiende el agente nuevo. En modo piloto siempre existe (40 por omisión); en modo global solo si se indica (si no, rige el tope global de siempre).
-  dailyMax?: number;
-  handoffEnabled: boolean;
-  deadlineMs?: number;
-}
-
-const phoneList = (raw: string | undefined, max: number): string[] | undefined => {
-  const phones = (raw ?? "").split(",").map((value) => value.trim()).filter(Boolean);
-  return phones.length <= max && phones.every((phone) => /^\d{8,15}$/.test(phone)) ? phones : undefined;
-};
-
-// Modo «pilot»: PLUSMEDIK_AGENT_PILOT_PHONES (obligatoria: de 1 a 5 teléfonos de solo dígitos), PLUSMEDIK_AGENT_PILOT_DAILY_MAX (5–200, por omisión 40).
-// Modo «live» (TODOS los contactos elegibles, sin porcentajes): PLUSMEDIK_AGENT_EXCLUDE_PHONES (opcional, hasta 20 números que siempre siguen con el agente de siempre) y PLUSMEDIK_AGENT_DAILY_MAX (opcional, 5–200;
-// sin él rige el tope global de siempre).
-// Ambos: PLUSMEDIK_AGENT_HANDOFF (on|off, por omisión off) y PLUSMEDIK_AGENT_DEADLINE_MS (5000–60000, por omisión 40000).
-// Cualquier valor inválido deja el agente APAGADO con un código (nunca el valor: son teléfonos).
-export function resolveAgentPilotSettings(env: Record<string, string | undefined>, log: (event: string, data: Record<string, unknown>) => void, mode: "pilot" | "live" = "pilot"): AgentPilotSettings | undefined {
-  const fail = (error: AgentPilotConfigError): undefined => { log("agent_config_invalid", { error }); return undefined; };
-  const integer = (raw: string | undefined, min: number, max: number): number | undefined | "INVALID" => {
-    const value = raw?.trim();
-    if (!value) return undefined;
-    return /^\d{1,5}$/.test(value) && Number(value) >= min && Number(value) <= max ? Number(value) : "INVALID";
-  };
-  const handoffRaw = env.PLUSMEDIK_AGENT_HANDOFF?.trim().toLowerCase();
-  if (handoffRaw && handoffRaw !== "on" && handoffRaw !== "off") return fail("INVALID_PILOT_HANDOFF");
-  const deadline = integer(env.PLUSMEDIK_AGENT_DEADLINE_MS, 5000, 60_000);
-  if (deadline === "INVALID") return fail("INVALID_DEADLINE");
-  const common = { handoffEnabled: handoffRaw === "on", ...(deadline !== undefined ? { deadlineMs: deadline } : {}) };
-
-  if (mode === "live") {
-    const exclude = phoneList(env.PLUSMEDIK_AGENT_EXCLUDE_PHONES, PILOT_LIMITS.maxExcluded);
-    if (!exclude) return fail("INVALID_EXCLUDE_PHONES");
-    const dailyMax = integer(env.PLUSMEDIK_AGENT_DAILY_MAX, 5, 200);
-    if (dailyMax === "INVALID") return fail("INVALID_DAILY_MAX");
-    return { exclude: new Set(exclude), ...(dailyMax !== undefined ? { dailyMax } : {}), ...common };
-  }
-
-  const raw = env.PLUSMEDIK_AGENT_PILOT_PHONES?.trim();
-  if (!raw) return fail("MISSING_PILOT_PHONES");
-  const phones = phoneList(raw, PILOT_LIMITS.maxPhones);
-  if (!phones || phones.length === 0) return fail("INVALID_PILOT_PHONES");
-  const dailyMax = integer(env.PLUSMEDIK_AGENT_PILOT_DAILY_MAX, 5, 200);
-  if (dailyMax === "INVALID") return fail("INVALID_PILOT_DAILY_MAX");
-  return { phones: new Set(phones), dailyMax: dailyMax ?? PILOT_LIMITS.dailyMax, ...common };
 }

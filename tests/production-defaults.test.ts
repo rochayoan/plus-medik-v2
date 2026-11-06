@@ -44,7 +44,7 @@ describe("valores por defecto de producción", () => {
     }
     // y no hay ninguna variable que habilite la derivación a una persona: está bloqueada en código
     // G5.0: la derivación al CRM tiene UNA bandera, en blanco (apagada); el resto son credenciales vacías. Nada la enciende por defecto.
-    expect([...example.matchAll(/^([A-Z_]*HANDOFF[A-Z_]*)=(.*)$/gm)].map((match) => [match[1], match[2]!.trim()])).toEqual([["PLUSMEDIK_CRM_HANDOFF", ""], ["PLUSMEDIK_AGENT_HANDOFF", ""]]);
+    expect([...example.matchAll(/^([A-Z_]*HANDOFF[A-Z_]*)=(.*)$/gm)].map((match) => [match[1], match[2]!.trim()])).toEqual([["PLUSMEDIK_CRM_HANDOFF", ""]]);
     for (const name of ["PLUSMEDIK_CRM_REVIEW_URL", "PLUSMEDIK_CRM_REVIEW_TOKEN", "PLUSMEDIK_OUTBOX_KEY"]) expect(example, name).toMatch(new RegExp(`^${name}=\\r?$`, "m"));
   });
 

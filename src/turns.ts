@@ -386,19 +386,16 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
 
   for (const [from, skipped] of yielded) if (skipped > 0) deps.log("turn_batch_yield", { phone: maskPhone(from), skipped });
 
-  // Memoria estructurada en SOMBRA (PLUSMEDIK_CONV_STATE): por contacto, las peticiones de los mensajes que ESTA ejecución reclamó y, aparte, las de los que esperan por la pausa humana. Solo observa: no espera,
+  // Memoria estructurada en SOMBRA (memoria del agente): por contacto, las peticiones de los mensajes que ESTA ejecución reclamó y, aparte, las de los que esperan por la pausa humana. Solo observa: no espera,
   // no toma leases y no cambia nada de lo que sigue. El texto solo se usa para clasificar y no se guarda.
   const convState = deps.turns?.convState;
-  // Núcleo conversacional en SOMBRA (PLUSMEDIK_AGENT=shadow): decide en segundo plano qué respondería a los mensajes reclamados, SIN enviar nada. Ver src/agent/shadow.ts.
-  const agentShadow = deps.turns?.agentShadow;
-  if (convState || agentShadow) {
+  if (convState) {
     for (const [from, indices] of perContact) {
       const observe = (selected: number[]) => selected.map((index) => ({ messageId: turns[index]!.messageId, kind: turns[index]!.kind === "AUDIO" || turns[index]!.kind === "IMAGE" || turns[index]!.kind === "OTHER" ? turns[index]!.kind as "AUDIO" | "IMAGE" | "OTHER" : "TEXT" as const, ...(turns[index]!.text !== undefined ? { text: turns[index]!.text } : {}), ...(turns[index]!.timestamp !== undefined ? { timestamp: turns[index]!.timestamp } : {}) }));
       const claimed = indices.filter((index) => claims.has(index));
       const waiting = indices.filter((index) => pausedIndices.has(index));
       if (claimed.length > 0) convState?.patientBatch({ from, turns: observe(claimed) });
       if (waiting.length > 0) convState?.patientBatch({ from, turns: observe(waiting), paused: true });
-      if (claimed.length > 0) agentShadow?.observe({ from, turns: observe(claimed) });
     }
   }
 
@@ -435,7 +432,6 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
   await Promise.all(work);
   // Las escrituras de la memoria en sombra terminan (acotadas, nunca lanzan) antes de que la función termine.
   await convState?.flush();
-  await agentShadow?.flush();
   return reports;
 }
 
@@ -654,6 +650,11 @@ async function processContactBatch(
         if (!piloted) return routine(ctx);
         await Promise.all(drafts.map((draft) => draft.claimed.skip().catch(() => undefined)));
         included = runnable.map(() => true);
+        // Silencio ante lo claramente ajeno al laboratorio: no se envía nada; la memoria da por atendida la petición para que no quede como pendiente.
+        if (piloted.silent) {
+          deps.turns?.convState?.agentReply({ from, messageId: `silent:${leadId}`, replyTo: leadId, reply: { body: "", result: "silent", quality: "ANSWER" } });
+          return { kind: "none" };
+        }
         if (piloted.quotedStudyIds.length > 0) deps.turns?.convState?.artifact({ from, key: leadId, kind: "QUOTE", studyIds: piloted.quotedStudyIds });
         return { kind: "reply", body: piloted.body, result: piloted.result, processingStatus: piloted.processingStatus, stale: piloted.stale, ...(piloted.signature ? { signature: piloted.signature } : {}), quality: piloted.quality, ...(piloted.closes.length > 0 ? { closes: piloted.closes } : {}), ...(piloted.cap ? { cap: piloted.cap } : {}) };
       };

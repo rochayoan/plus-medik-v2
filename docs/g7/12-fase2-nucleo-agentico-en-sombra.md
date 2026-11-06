@@ -1,3 +1,5 @@
+> ⚠ **Nombres de variables y modos reemplazados por la arquitectura unificada: ver [19-arquitectura-unificada.md](19-arquitectura-unificada.md).**
+
 # G7 · Fase 2 — núcleo agéntico en sombra
 
 Estado: **implementado y probado con modelos simulados; APAGADO por defecto; sin commit, push ni deploy; nunca se llamó a OpenAI de verdad.** Con `PLUSMEDIK_AGENT=shadow` decide en segundo plano qué respondería a cada lote, **sin enviar nada** ni cambiar ninguna respuesta, lease, pausa humana, tope diario ni precio.

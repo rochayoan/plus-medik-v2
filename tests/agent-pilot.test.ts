@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { Act, AgentModel, HandoffReason, IntentReading, RespondInput } from "../src/agent/contracts.js";
-import { createAgentPilot, createPilotSwitch, createRecentProvider, PILOT_LIMITS, resolveAgentPilotSettings, type PilotSwitch } from "../src/agent/pilot.js";
+import { createAgentPilot, createPilotSwitch, createRecentProvider, PILOT_LIMITS, type PilotSwitch } from "../src/agent/pilot.js";
 import { AGENT_SCENARIOS } from "../scripts/g7/lib/agent-scenarios.js";
 import { CONTACT_KEY, FIXTURE_CATALOG, fixtureAnswer, NOW, PHONE } from "../scripts/g7/lib/agent-scenarios.js";
 import type { ObservedTurn } from "../src/conversation-state-store.js";
@@ -260,34 +260,6 @@ describe("mensajes recientes del historial", () => {
   });
 });
 
-describe("configuración del piloto", () => {
-  const log = vi.fn();
-  const resolve = (env: Record<string, string | undefined>) => resolveAgentPilotSettings(env, log);
-
-  it("una lista de 1 a 5 teléfonos de solo dígitos; por omisión tope propio de 40 y derivación apagada", () => {
-    expect(resolve({ PLUSMEDIK_AGENT_PILOT_PHONES: " 59170000001 , 59170000002 " })).toEqual({ phones: new Set(["59170000001", "59170000002"]), dailyMax: 40, handoffEnabled: false });
-    expect(resolve({ PLUSMEDIK_AGENT_PILOT_PHONES: "59170000001", PLUSMEDIK_AGENT_PILOT_DAILY_MAX: "12", PLUSMEDIK_AGENT_HANDOFF: "ON" })).toMatchObject({ dailyMax: 12, handoffEnabled: true });
-  });
-
-  it("cada valor faltante o inválido deja el piloto apagado con UN código y SIN mostrar los teléfonos", () => {
-    const cases: Array<[Record<string, string | undefined>, string]> = [
-      [{}, "MISSING_PILOT_PHONES"], [{ PLUSMEDIK_AGENT_PILOT_PHONES: "  " }, "MISSING_PILOT_PHONES"],
-      [{ PLUSMEDIK_AGENT_PILOT_PHONES: "+59170000001" }, "INVALID_PILOT_PHONES"], [{ PLUSMEDIK_AGENT_PILOT_PHONES: "5917000" }, "INVALID_PILOT_PHONES"],
-      [{ PLUSMEDIK_AGENT_PILOT_PHONES: "59170000001,abc" }, "INVALID_PILOT_PHONES"], [{ PLUSMEDIK_AGENT_PILOT_PHONES: "1,2,3,4,5,6".split(",").map((n) => `5917000000${n}`).join(",") }, "INVALID_PILOT_PHONES"],
-      [{ PLUSMEDIK_AGENT_PILOT_PHONES: "59170000001", PLUSMEDIK_AGENT_PILOT_DAILY_MAX: "1" }, "INVALID_PILOT_DAILY_MAX"], [{ PLUSMEDIK_AGENT_PILOT_PHONES: "59170000001", PLUSMEDIK_AGENT_PILOT_DAILY_MAX: "999" }, "INVALID_PILOT_DAILY_MAX"],
-      [{ PLUSMEDIK_AGENT_PILOT_PHONES: "59170000001", PLUSMEDIK_AGENT_HANDOFF: "maybe" }, "INVALID_PILOT_HANDOFF"]
-    ];
-    for (const [env, code] of cases) {
-      log.mockClear();
-      expect(resolve(env), code).toBeUndefined();
-      expect(log).toHaveBeenCalledWith("agent_config_invalid", { error: code });
-      expect(JSON.stringify(log.mock.calls)).not.toMatch(/5917000/);
-    }
-  });
-});
-
-// ───────────────────────────── alcance global (PLUSMEDIK_AGENT=live): todos los contactos elegibles ─────────────────────────────
-
 describe("alcance global: todos los contactos elegibles, exclusiones y corta-circuito", () => {
   const keyOf = (phone: string): string => createHash("sha256").update(`clave-de-prueba:${phone.replace(/\D/g, "")}`).digest("hex");
   const live = (options: { exclude?: string[]; clock?: { now: number }; script?: ModelScript; keyFor?: (phone: string) => string | undefined } = {}) => {
@@ -370,29 +342,5 @@ describe("alcance global: todos los contactos elegibles, exclusiones y corta-cir
     for (let i = 0; i < 6; i++) await rejecting.pilot.produce({ from, turns: [turn(`r${i}`, "hola")] });
     expect(rejecting.logs.filter(([event]) => event === "agent_pilot_breaker")).toEqual([]);
     expect(rejecting.model.plans).toBe(6);
-  });
-});
-
-describe("configuración del alcance global", () => {
-  const log = vi.fn();
-  const resolve = (env: Record<string, string | undefined>) => resolveAgentPilotSettings(env, log, "live");
-
-  it("no hace falta NINGUNA variable de alcance: todos los contactos elegibles; exclusiones, tope propio y plazo son opcionales; la lista del piloto y cualquier porcentaje se ignoran", () => {
-    expect(resolve({})).toEqual({ exclude: new Set(), handoffEnabled: false });
-    expect(resolve({ PLUSMEDIK_AGENT_EXCLUDE_PHONES: "59170000009, 59170000010", PLUSMEDIK_AGENT_DAILY_MAX: "30", PLUSMEDIK_AGENT_DEADLINE_MS: "30000", PLUSMEDIK_AGENT_PILOT_PHONES: "no-se-usa", PLUSMEDIK_AGENT_ROLLOUT: "5" })).toEqual({ exclude: new Set(["59170000009", "59170000010"]), dailyMax: 30, handoffEnabled: false, deadlineMs: 30000 });
-    expect(log).not.toHaveBeenCalled();
-  });
-
-  it("cada valor inválido lo deja apagado con UN código y sin mostrar teléfonos", () => {
-    const cases: Array<[Record<string, string | undefined>, string]> = [
-      [{ PLUSMEDIK_AGENT_EXCLUDE_PHONES: "+59170000009" }, "INVALID_EXCLUDE_PHONES"], [{ PLUSMEDIK_AGENT_EXCLUDE_PHONES: Array.from({ length: 21 }, (_, i) => `591700000${String(10 + i)}`).join(",") }, "INVALID_EXCLUDE_PHONES"],
-      [{ PLUSMEDIK_AGENT_DAILY_MAX: "2" }, "INVALID_DAILY_MAX"], [{ PLUSMEDIK_AGENT_DEADLINE_MS: "100" }, "INVALID_DEADLINE"], [{ PLUSMEDIK_AGENT_HANDOFF: "quizá" }, "INVALID_PILOT_HANDOFF"]
-    ];
-    for (const [env, code] of cases) {
-      log.mockClear();
-      expect(resolve(env), code).toBeUndefined();
-      expect(log).toHaveBeenCalledWith("agent_config_invalid", { error: code });
-      expect(JSON.stringify(log.mock.calls)).not.toMatch(/5917000/);
-    }
   });
 });

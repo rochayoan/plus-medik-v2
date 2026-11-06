@@ -52,7 +52,7 @@ describe("Fase 1: el token es exclusivo y se compara en tiempo constante", () =>
   });
   it("no se reutiliza la llave de servicio, la clave de la cola al CRM ni credenciales de Kapso: el único secreto ajeno que lee es la clave HMAC de contactos", () => {
     const envNames = [...module.matchAll(/env\.([A-Z_]+)/g)].map((match) => match[1]);
-    expect([...new Set(envNames)].sort()).toEqual(["KAPSO_PHONE_NUMBER_ID", "PLUSMEDIK_AGENT_CONTROL", "PLUSMEDIK_AGENT_CONTROL_PHONES", "PLUSMEDIK_AGENT_CONTROL_TOKEN", "PLUSMEDIK_CONTACT_HMAC_KEY", "PLUSMEDIK_CONV_STATE", "PLUSMEDIK_HUMAN_CONTROL"]);
+    expect([...new Set(envNames)].sort()).toEqual(["KAPSO_PHONE_NUMBER_ID", "PLUSMEDIK_AGENT_CONTROL", "PLUSMEDIK_AGENT_CONTROL_PHONES", "PLUSMEDIK_AGENT_CONTROL_TOKEN", "PLUSMEDIK_CONTACT_HMAC_KEY", "PLUSMEDIK_HUMAN_CONTROL", "PLUSMEDIK_LLM_CONVERSATION"]);
     expect(module).not.toMatch(/SERVICE_ROLE|OUTBOX_KEY|CRM_REVIEW_TOKEN|KAPSO_API_KEY|WEBHOOK_SECRET|CRON_SECRET/);
   });
   it("las cabeceras impiden cacheo y se rechazan llamadas de navegador y HTTP plano (salvo localhost)", () => {

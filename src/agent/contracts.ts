@@ -142,7 +142,8 @@ export interface Violation { code: ViolationCode; detail?: string }
 export interface ToolRun { tool: string; ok: boolean; error?: ToolErrorCode; factIds: string[] }
 
 // HANDOFF_FAILED: el plan pedía pasar con una persona y la derivación registrada no se pudo completar; no hay mensaje (quien responde usa su ruta de siempre).
-export type AgentStatus = "VERIFIED" | "REJECTED" | "MODEL_ERROR" | "HANDOFF_FAILED";
+// SILENT: el mensaje es CLARAMENTE ajeno al laboratorio y no hay nada pendiente: no se responde (el turno se cierra sin respuesta).
+export type AgentStatus = "VERIFIED" | "REJECTED" | "MODEL_ERROR" | "HANDOFF_FAILED" | "SILENT";
 
 export interface AgentDecision {
   status: AgentStatus;

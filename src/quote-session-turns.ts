@@ -138,7 +138,7 @@ export function sessionImageProducer(image: IncomingImage, deps: QuoteDeps, conf
       evidenceAttempted = true;
       await ctx.persist("evidence", (audit, runId, lease) => audit.recordEvidence(runId, { analysis, aiCalls, catalog: catalogFingerprint(catalog) }, lease));
       const item = itemFromAnalysis(analysis);
-      // Memoria en sombra (PLUSMEDIK_CONV_STATE): la receta leída por ids; nunca precios ni texto.
+      // Memoria en sombra (memoria del agente): la receta leída por ids; nunca precios ni texto.
       deps.turns?.convState?.artifact({ from: image.from, key: image.messageId, kind: "RECIPE", studyIds: item.studyIds, unrecognized: analysis.internal?.pending.length ?? 0 });
       await withSession(ctx, "quote_finish", (audit, runId, lease) => needs(audit, "quoteFinish")(runId, lease, item));
       if (item.status === "UNREADABLE") return withPhoto(plain(texts.unreadable_image), { status: "UNREADABLE", studyIds: [] });

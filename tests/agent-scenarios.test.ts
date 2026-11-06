@@ -100,71 +100,35 @@ describe("el arnés de evaluación", () => {
   });
 });
 
-describe("verificación previa de la configuración de la vista previa", () => {
-  const FULL = { PLUSMEDIK_AGENT: "shadow", OPENAI_AGENT_MODEL: "modelo-x", OPENAI_API_KEY: "sk-secreto-no-mostrar", PLUSMEDIK_TURNS: "on", PLUSMEDIK_CONV_STATE: "shadow", PLUSMEDIK_AGENT_SAMPLE: "10", PLUSMEDIK_KNOWLEDGE_ANSWERS: "on" };
+describe("verificación previa de la configuración del agente conversacional único", () => {
+  const FULL = { PLUSMEDIK_LLM_CONVERSATION: "on", OPENAI_CONVERSATION_MODEL: "modelo-x", OPENAI_API_KEY: "sk-secreto-no-mostrar", PLUSMEDIK_TURNS: "on", PLUSMEDIK_TEXT_HANDLER: "on", PLUSMEDIK_KNOWLEDGE_ANSWERS: "on" };
   const levels = (env: Record<string, string | undefined>) => preflight(env).map((line) => `${line.level}:${line.item}`);
+  const find = (lines: ReturnType<typeof preflight>, item: string) => lines.find((line) => line.item === item);
 
-  it("con todo configurado no hay bloqueos ni avisos, y la derivación humana figura desactivada; nunca muestra la clave", () => {
+  it("completo: sin bloqueos; solo recuerda el interruptor de emergencia; razonamiento medio y tope de 6 cada 24 h por defecto; nunca muestra la clave", () => {
     const lines = preflight(FULL);
-    expect(lines.filter((line) => line.level !== "OK")).toEqual([]);
-    expect(lines.at(-1)).toMatchObject({ item: "derivación humana del agente", detail: expect.stringContaining("DESACTIVADA") });
+    expect(lines.filter((line) => line.level === "BLOCK")).toEqual([]);
+    expect(lines.filter((line) => line.level === "WARN").map((line) => line.item)).toEqual(["memoria persistente (migración 24)", "interruptor de emergencia (migración 25)"]);
+    expect(find(lines, "configuración del modelo")?.detail).toContain("razonamiento medium");
+    expect(find(lines, "tope diario")?.detail).toContain("6 respuestas por contacto cada 24 h");
+    expect(find(lines, "derivación humana del agente")).toMatchObject({ level: "OK", detail: expect.stringContaining("NO disponible") });
     expect(JSON.stringify(lines)).not.toContain("sk-secreto");
   });
 
-  it("bloquea lo que impide el funcionamiento y avisa de lo recomendable", () => {
-    expect(levels({})).toEqual(expect.arrayContaining(["BLOCK:PLUSMEDIK_AGENT", "BLOCK:configuración del modelo", "BLOCK:OPENAI_API_KEY", "BLOCK:PLUSMEDIK_TURNS", "WARN:PLUSMEDIK_CONV_STATE", "WARN:PLUSMEDIK_KNOWLEDGE_ANSWERS"]));
-    expect(levels({ ...FULL, OPENAI_AGENT_MODEL: undefined })).toContain("BLOCK:configuración del modelo");
-    expect(levels({ ...FULL, PLUSMEDIK_AGENT_SAMPLE: "100" })).toContain("WARN:PLUSMEDIK_AGENT_SAMPLE");
-    expect(levels({ ...FULL, PLUSMEDIK_AGENT_SAMPLE: "0" })).toContain("BLOCK:configuración del modelo");
-  });
-});
-
-describe("verificación previa del PILOTO", () => {
-  const PILOT = { PLUSMEDIK_AGENT: "pilot", OPENAI_AGENT_MODEL: "modelo-x", OPENAI_API_KEY: "sk-secreto-no-mostrar", PLUSMEDIK_TURNS: "on", PLUSMEDIK_CONV_STATE: "shadow", PLUSMEDIK_KNOWLEDGE_ANSWERS: "on", PLUSMEDIK_AGENT_PILOT_PHONES: "59170000001" };
-  const find = (lines: ReturnType<typeof preflight>, item: string) => lines.find((line) => line.item === item);
-
-  it("completo: sin bloqueos; recuerda que el interruptor nace apagado; no muestra ni la clave ni el teléfono; la derivación figura desactivada", () => {
-    const lines = preflight(PILOT);
-    expect(lines.filter((line) => line.level === "BLOCK")).toEqual([]);
-    expect(find(lines, "PLUSMEDIK_AGENT_PILOT_PHONES")).toMatchObject({ level: "OK", detail: expect.stringContaining("1 número") });
-    expect(find(lines, "interruptor de la base (migración 25)")!.detail).toMatch(/NACE APAGADO[\s\S]*\(false, 'motivo'\)/);
-    expect(find(lines, "derivación humana del agente")).toMatchObject({ level: "OK", detail: expect.stringContaining("DESACTIVADA") });
-    expect(JSON.stringify(lines)).not.toMatch(/sk-secreto|59170000001/);
+  it("bloquea lo que impide el funcionamiento y avisa de lo recomendable; el modelo se elige SOLO con OPENAI_CONVERSATION_MODEL", () => {
+    expect(levels({})).toEqual(expect.arrayContaining(["BLOCK:PLUSMEDIK_LLM_CONVERSATION", "BLOCK:configuración del modelo", "BLOCK:OPENAI_API_KEY", "BLOCK:PLUSMEDIK_TURNS", "BLOCK:PLUSMEDIK_TEXT_HANDLER", "WARN:PLUSMEDIK_KNOWLEDGE_ANSWERS"]));
+    expect(levels({ ...FULL, OPENAI_CONVERSATION_MODEL: undefined })).toContain("BLOCK:configuración del modelo");
+    expect(levels({ ...FULL, OPENAI_CONVERSATION_MODEL: undefined, OPENAI_AGENT_MODEL: "modelo-x" })).toContain("BLOCK:configuración del modelo");
+    expect(levels({ ...FULL, OPENAI_CONVERSATION_REASONING: "ultra" })).toContain("BLOCK:configuración del modelo");
   });
 
-  it("bloquea lo que el piloto exige: lista de números válida, memoria y modo turnos; avisa si se habilita la derivación sin cola al CRM", () => {
-    const blocked = (env: Record<string, string | undefined>) => preflight(env).filter((line) => line.level === "BLOCK").map((line) => line.item);
-    expect(blocked({ ...PILOT, PLUSMEDIK_AGENT_PILOT_PHONES: undefined })).toContain("PLUSMEDIK_AGENT_PILOT_PHONES");
-    expect(blocked({ ...PILOT, PLUSMEDIK_AGENT_PILOT_PHONES: "+59170000001" })).toContain("PLUSMEDIK_AGENT_PILOT_PHONES");
-    // la memoria estructurada es opcional: sin ella (y con historial) no bloquea; sin historial NI memoria sí
-    expect(blocked({ ...PILOT, PLUSMEDIK_CONV_STATE: undefined })).not.toContain("PLUSMEDIK_CONV_STATE");
-    expect(blocked({ ...PILOT, PLUSMEDIK_CONV_STATE: undefined, PLUSMEDIK_HISTORY: "off" })).toContain("PLUSMEDIK_CONV_STATE");
-    expect(blocked({ ...PILOT, PLUSMEDIK_TURNS: undefined })).toContain("PLUSMEDIK_TURNS");
-    expect(find(preflight({ ...PILOT, PLUSMEDIK_AGENT_HANDOFF: "on" }), "derivación humana del agente")).toMatchObject({ level: "WARN" });
-  });
-});
-
-describe("verificación previa del alcance GLOBAL", () => {
-  const LIVE = { PLUSMEDIK_AGENT: "live", OPENAI_AGENT_MODEL: "modelo-x", OPENAI_API_KEY: "sk-secreto-no-mostrar", PLUSMEDIK_TURNS: "on", PLUSMEDIK_CONV_STATE: "shadow", PLUSMEDIK_KNOWLEDGE_ANSWERS: "on", PLUSMEDIK_AGENT_DAILY_MAX: "40", PLUSMEDIK_AGENT_EXCLUDE_PHONES: "59170000009" };
-  const find = (lines: ReturnType<typeof preflight>, item: string) => lines.find((line) => line.item === item);
-
-  it("completo: sin bloqueos; el alcance es TODOS sin porcentajes y no pide ninguna variable de alcance; solo recuerda el interruptor; no muestra ni la clave ni los teléfonos", () => {
-    const lines = preflight(LIVE);
-    expect(lines.filter((line) => line.level === "BLOCK")).toEqual([]);
-    expect(lines.filter((line) => line.level === "WARN").map((line) => line.item)).toEqual(["interruptor de la base (migración 25)"]);
-    expect(find(lines, "alcance del agente nuevo")).toMatchObject({ level: "OK", detail: expect.stringContaining("TODOS los contactos elegibles, sin porcentajes") });
-    expect(find(preflight({ ...LIVE, PLUSMEDIK_AGENT_EXCLUDE_PHONES: undefined }), "alcance del agente nuevo")).toMatchObject({ level: "OK" });
-    expect(JSON.stringify(lines)).not.toMatch(/sk-secreto|59170000009|ROLLOUT/);
-  });
-
-  it("un tope sin definir avisa (rige el global de 5 respuestas); la memoria y los turnos son obligatorios; el historial apagado avisa; una exclusión inválida bloquea", () => {
-    const level = (env: Record<string, string | undefined>, item: string) => find(preflight(env), item)?.level;
-    expect(find(preflight({ ...LIVE, PLUSMEDIK_AGENT_DAILY_MAX: undefined }), "PLUSMEDIK_AGENT_DAILY_MAX")).toMatchObject({ level: "WARN", detail: expect.stringContaining("5 respuestas") });
-    expect(level({ ...LIVE, PLUSMEDIK_CONV_STATE: undefined }, "PLUSMEDIK_CONV_STATE")).toBe("WARN");
-    expect(level({ ...LIVE, PLUSMEDIK_TURNS: undefined }, "PLUSMEDIK_TURNS")).toBe("BLOCK");
-    expect(level({ ...LIVE, PLUSMEDIK_HISTORY: "off" }, "PLUSMEDIK_HISTORY")).toBe("WARN");
-    expect(level({ ...LIVE, PLUSMEDIK_AGENT_EXCLUDE_PHONES: "+5917" }, "alcance del agente nuevo")).toBe("BLOCK");
-    expect(level({ ...LIVE, OPENAI_AGENT_MODEL: undefined }, "configuración del modelo")).toBe("BLOCK");
+  it("la memoria persistente es parte normal del agente (recuerda la migración 24, sin variable propia); el historial apagado avisa; el tope se puede apagar (avisa) y la derivación depende de la cola al CRM", () => {
+    expect(levels(FULL)).toContain("WARN:memoria persistente (migración 24)");
+    expect(levels({ ...FULL, PLUSMEDIK_CONV_STATE: "off" })).not.toContain("PLUSMEDIK_CONV_STATE");
+    expect(levels({ ...FULL, PLUSMEDIK_HISTORY: "off" })).toContain("WARN:PLUSMEDIK_HISTORY");
+    expect(levels({ ...FULL, PLUSMEDIK_DAILY_REPLY_CAP: "off" })).toContain("WARN:tope diario");
+    expect(find(preflight({ ...FULL, PLUSMEDIK_DAILY_REPLY_CAP_MAX: "8" }), "tope diario")?.detail).toContain("8 respuestas");
+    expect(find(preflight({ ...FULL, PLUSMEDIK_CRM_HANDOFF: "on" }), "derivación humana del agente")).toMatchObject({ level: "WARN" });
   });
 });
 

@@ -22,9 +22,15 @@ describe("resolveDailyReplyCap", () => {
     for (const value of [undefined, "", "off", "true", "1", "5"]) expect(resolveDailyReplyCap({ PLUSMEDIK_DAILY_REPLY_CAP: value }, record, { turnsActive: true })).toBeUndefined();
   });
 
-  it("con «on» son 5 respuestas cada 24 horas", () => {
-    expect(resolveDailyReplyCap({ PLUSMEDIK_DAILY_REPLY_CAP: "on" }, record, { turnsActive: true })).toEqual({ max: 5, windowSeconds: 86_400 });
-    expect(DAILY_REPLY_CAP_DEFAULTS).toEqual({ max: 5, windowSeconds: 86_400 });
+  it("con «on» son 6 respuestas cada 24 horas", () => {
+    expect(resolveDailyReplyCap({ PLUSMEDIK_DAILY_REPLY_CAP: "on" }, record, { turnsActive: true })).toEqual({ max: 6, windowSeconds: 86_400 });
+    expect(DAILY_REPLY_CAP_DEFAULTS).toEqual({ max: 6, windowSeconds: 86_400 });
+  });
+
+  it("con el agente conversacional encendido el tope está ENCENDIDO por defecto (6 cada 24 h) y «off» lo apaga", () => {
+    expect(resolveDailyReplyCap({}, record, { turnsActive: true, conversationActive: true })).toEqual({ max: 6, windowSeconds: 86_400 });
+    expect(resolveDailyReplyCap({ PLUSMEDIK_DAILY_REPLY_CAP: "off" }, record, { turnsActive: true, conversationActive: true })).toBeUndefined();
+    expect(resolveDailyReplyCap({ PLUSMEDIK_DAILY_REPLY_CAP_MAX: "8" }, record, { turnsActive: true, conversationActive: true })).toEqual({ max: 8, windowSeconds: 86_400 });
   });
 
   it("acepta máximo y horas propios", () => {
@@ -145,7 +151,7 @@ describe("fronteras (análisis estático)", () => {
 
   it("el webhook lee el tope solo de la bandera y lo entrega a los turnos (no a la ruta anterior de fotos)", () => {
     const webhook = code("api/kapso/webhook.ts");
-    expect(webhook).toMatch(/const dailyReplyCap = resolveDailyReplyCap\(process\.env, logLine, \{ turnsActive: turnsEnabled \}\);/);
+    expect(webhook).toMatch(/const dailyReplyCap = resolveDailyReplyCap\(process\.env, logLine, \{ turnsActive: turnsEnabled, conversationActive: agentActive \}\);/);
     expect(webhook).toMatch(/dailyCap: dailyReplyCap/);
   });
 });
