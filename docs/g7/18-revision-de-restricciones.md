@@ -1,3 +1,5 @@
+> ⚠ **Nombres de variables y modos reemplazados por la arquitectura unificada: ver [19-arquitectura-unificada.md](19-arquitectura-unificada.md).**
+
 # G7 · Fase 5d — revisión de restricciones del agente nuevo
 
 Criterio del dueño: **conservar** memoria, gestor de objetivos, herramientas, cotizaciones verificadas, coordinación y protecciones existentes; **revisar** restricciones nuevas que impiden cotizar, límites que bloquean conversaciones y decisiones que debería tomar el modelo; **eliminar o simplificar** complejidad sin necesidad demostrada.

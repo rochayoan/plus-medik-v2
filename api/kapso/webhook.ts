@@ -13,12 +13,9 @@ import { contactKeyOf, createAttentionRepository, type AttentionRepository } fro
 import { handleKapsoWebhook } from "../../src/kapso-webhook.js";
 import { createSupabaseKnowledgeStore, KnowledgeService } from "../../src/knowledge/index.js";
 import { ANSWER_TEXTS, answerFromKnowledge, detectTopics, lazyKnowledge, ttlCache } from "../../src/knowledge-answers.js";
-import { resolveConversationModel } from "../../src/conversation-openai.js";
-import { resolveConversationMemory } from "../../src/conversation-memory.js";
 import { resolveAgentSettings } from "../../src/agent/openai.js";
-import { createAgentPilot, createPilotSwitch, createRecentProvider, resolveAgentPilotSettings } from "../../src/agent/pilot.js";
+import { createAgentPilot, createPilotSwitch, createRecentProvider } from "../../src/agent/pilot.js";
 import { resolveAgentMode } from "../../src/agent/pipeline.js";
-import { createAgentShadow } from "../../src/agent/shadow.js";
 import { createConversationReader, createSupabaseConversationStore, resolveConversationState } from "../../src/conversation-state-store.js";
 import { resolveDailyReplyCap } from "../../src/daily-reply-cap.js";
 import { resolveMessageHistory } from "../../src/message-history.js";
@@ -30,7 +27,7 @@ import { appendApprovedQuotePreparations } from "../../src/quote-preparation.js"
 import { appendApprovedQuoteStudyDetails } from "../../src/quote-study-details.js";
 import { createSupabaseStudyFactsStore, StudyFactsService } from "../../src/study-facts/index.js";
 import { resolveQuoteSessionsConfig } from "../../src/quote-session-turns.js";
-import { looksAutomated, resolveReplyGuard } from "../../src/reply-guard.js";
+import { resolveReplyGuard } from "../../src/reply-guard.js";
 import { BLOCKED_HANDOFF, createTextHandler, DRAFT_TEXTS } from "../../src/text-handler.js";
 import type { IncomingImage, QuoteDeps } from "../../src/whatsapp-quote.js";
 
@@ -88,13 +85,10 @@ const studyFacts = () => (studyFactsService ??= new StudyFactsService({ store: c
 const logLine = (event: string, data: Record<string, unknown>) => console.log(JSON.stringify({ app: "plusmedik", event, ...data }));
 const crmOutbox = turnsEnabled && textHandlerEnabled ? resolveCrmOutbox(process.env, logLine) : undefined;
 if (replyGuard.enabled && "error" in replyGuard) logLine("reply_guard_config_invalid", { error: replyGuard.error });
-// Conversación natural con OpenAI (G5.3, APAGADA por defecto): PLUSMEDIK_LLM_CONVERSATION=on solo tiene efecto con PLUSMEDIK_TURNS=on, PLUSMEDIK_TEXT_HANDLER=on y PLUSMEDIK_REPLY_GUARD=on (válida), con
-// OPENAI_API_KEY y OPENAI_CONVERSATION_MODEL (obligatorio; sin valor por defecto). El modelo solo conversa y clasifica: precios, preparación, resultados y datos del laboratorio siguen saliendo SOLO del
-// catálogo y del conocimiento aprobado, y lo médico, la derivación a una persona y la información nunca dependen de él. Cualquier configuración incompleta la deja apagada (y se registra un código).
-const conversationModel = turnsEnabled && textHandlerEnabled ? resolveConversationModel(process.env, logLine, { responseGuardActive: replyGuard.enabled && !("error" in replyGuard) }) : undefined;
-// Memoria conversacional corta (APAGADA por defecto; ver .env.example y src/conversation-memory.ts): para todos los pacientes que atienda el agente, sin listas de teléfonos.
+// Capa conversacional ÚNICA: el agente de src/agent (abajo). La antigua capa «conversación con modelo» (G5.3), su memoria corta y sus variables PLUSMEDIK_LLM_* ya no se conectan.
+const agentActive = resolveAgentMode(process.env) === "live";
 // Tope de respuestas del agente por contacto (APAGADO por defecto; ver .env.example y src/daily-reply-cap.ts): 5 cada 24 horas, aplicado por la base al reservar el envío.
-const dailyReplyCap = resolveDailyReplyCap(process.env, logLine, { turnsActive: turnsEnabled });
+const dailyReplyCap = resolveDailyReplyCap(process.env, logLine, { turnsActive: turnsEnabled, conversationActive: agentActive });
 // Motor global de lotes (APAGADO por defecto; ver docs/g6/03-conexion-del-motor-de-lotes.md): PLUSMEDIK_BATCH_ENGINE=shadow compara en los registros la decisión del motor nuevo con la ruta de siempre SIN cambiar
 // ninguna respuesta ni escribir nada propio; =on hace que el motor nuevo atienda el texto de los lotes de Kapso (varios mensajes de un contacto) con la ruta de siempre de respaldo. Solo tiene efecto con las sesiones de
 // cotización activas. Cualquier otro valor lo deja apagado (y se registra un código).
@@ -107,7 +101,6 @@ const allContactsOnTurns = turnsEnabled && !textPilotGate.enabled;
 logLine("agent_scope", { turns: turnsEnabled, textHandler: textHandlerEnabled, pilotGate: textPilotGate.enabled, allContactsOnTurns, allowedPhonesRestricted: Boolean(process.env.ALLOWED_PHONES?.trim()), dailyCap: dailyReplyCap !== undefined, instantPhotoQuotes: instantPhotoQuotesEnabled, humanControl: humanControlEnabled, batchEngine: batchEngineMode ?? "off" });
 // Con la puerta del piloto encendida, los demás contactos siguen por la ruta anterior de fotos, que no pasa por los turnos y por tanto NO tiene el tope: el tope no cubre a todos.
 if (dailyReplyCap && textPilotGate.enabled) logLine("daily_cap_partial_scope", { reason: "PILOT_GATE_ON" });
-const conversationMemory = resolveConversationMemory(process.env, logLine, { conversationActive: conversationModel !== undefined, isAutomated: looksAutomated });
 // Intérprete de estudios escritos (APAGADO por defecto; ver .env.example y src/study-interpreter.ts): errores de ortografía, abreviaturas y pedidos en lenguaje natural; el backend valida todo contra el catálogo.
 const studyInterpreter = resolveStudyInterpreter(process.env, logLine, { textQuotesActive: quoteSessionsEnabled && !replyGuardInvalid });
 // Atención selectiva (G6.0, APAGADA por defecto): PLUSMEDIK_ATTENTION_FILTER=on solo tiene efecto con PLUSMEDIK_TURNS=on y PLUSMEDIK_TEXT_HANDLER=on. NO ignora lo médico, pedir a una persona ni nada que pueda ser una
@@ -126,9 +119,7 @@ const contactKeyFor = (phone: string) => contactKeyOf({ hmacKey: process.env.PLU
 // KAPSO_PHONE_NUMBER_ID. PLUSMEDIK_HISTORY=off lo apaga; PLUSMEDIK_HISTORY_KEY (opcional) lo guarda cifrado. Es independiente de la memoria conversacional y del resto del agente.
 const messageHistory = resolveMessageHistory(process.env, logLine, { contactKeyFor });
 logLine("history_scope", { enabled: messageHistory !== undefined, encrypted: Boolean(process.env.PLUSMEDIK_HISTORY_KEY?.trim()) });
-// Memoria estructurada de la conversación en SOMBRA (APAGADA por defecto; ver docs/g7/10 y src/conversation-state-store.ts): PLUSMEDIK_CONV_STATE=shadow registra peticiones, respuestas, mensajes humanos y recetas por ids para
-// calcular lo pendiente, SIN cambiar ninguna respuesta, lease, envío ni la pausa humana. Exige la migración 24 (sin ella las escrituras fallan sin afectar al agente) y PLUSMEDIK_CONTACT_HMAC_KEY + KAPSO_PHONE_NUMBER_ID.
-// Apagada no escribe ni una línea nueva en el registro.
+// Memoria persistente de la conversación: parte NORMAL del agente (se enciende con PLUSMEDIK_LLM_CONVERSATION=on, sin variables propias; migración 24). Registra peticiones, respuestas, mensajes humanos y recetas por ids para calcular lo pendiente; no cambia ninguna respuesta, lease, envío ni la pausa humana.
 const convState = resolveConversationState(process.env, logLine, { contactKeyFor });
 if (convState) logLine("conv_state_scope", { mode: convState.mode });
 
@@ -194,45 +185,22 @@ const knowledgeOptions = knowledgeAnswersEnabled
   ? { skipPayment: true, service: lazyKnowledge(() => new KnowledgeService({ store: createSupabaseKnowledgeStore({ requestTimeoutMs: 3000, retryDelayMs: 200 }) })), loadCatalog: ttlCache(() => loadActiveCatalog(), 5 * 60_000), studyFacts: studyInfoEnabled ? { getSample: (...args: Parameters<ReturnType<typeof studyFacts>["getSample"]>) => studyFacts().getSample(...args), getTurnaround: (...args: Parameters<ReturnType<typeof studyFacts>["getTurnaround"]>) => studyFacts().getTurnaround(...args) } : undefined }
   : undefined;
 
-// Núcleo conversacional EN SOMBRA (APAGADO por defecto; ver docs/g7/12 y src/agent/): PLUSMEDIK_AGENT=shadow + OPENAI_AGENT_MODEL (obligatorio) decide en segundo plano qué respondería a cada lote reclamado, SIN
-// ENVIAR NADA ni cambiar ninguna respuesta, lease, pausa, tope ni precio. Exige el modo turnos. Usa la memoria de la Fase 1 si PLUSMEDIK_CONV_STATE=shadow. Apagado no escribe ni una línea nueva en el registro.
+// AGENTE CONVERSACIONAL ÚNICO (ver docs/g7/19 y src/agent/): PLUSMEDIK_LLM_CONVERSATION=on + OPENAI_CONVERSATION_MODEL (la única variable del modelo) + OPENAI_API_KEY; razonamiento medio por defecto
+// (OPENAI_CONVERSATION_REASONING lo cambia). Atiende a TODOS los contactos elegibles por la MISMA máquina de envío de siempre (lease, reserva, pausa humana, un solo envío por lote, idempotencia y tope de 6
+// respuestas cada 24 h). Contexto: los mensajes recientes del historial (24 h) y la memoria persistente (pendientes y última cotización; migración 24). Herramientas: catálogo, cotización, recetas (las fotos las
+// lee el motor de siempre), conocimiento aprobado y derivación al CRM (solo si la cola al CRM está configurada y encendida).
+// INTERRUPTOR DE EMERGENCIA: select plusmedik_agent_pilot_set(false, 'motivo') (migración 25) lo apaga en segundos sin redesplegar; nace apagado y falla cerrado. Apagado, o si el modelo no puede responder, atiende el
+// MODO ESENCIAL (textos fijos, catálogo, cotización y derivación deterministas): el funcionamiento básico no se pierde.
 const agentSettings = resolveAgentSettings(process.env, logLine);
-const agentMode = resolveAgentMode(process.env, () => undefined);
-if (agentSettings && !turnsEnabled) logLine("agent_config_invalid", { error: "TURNS_REQUIRED" });
-const agentShadow = agentSettings && agentMode === "shadow" && turnsEnabled
-  ? createAgentShadow({
-      model: agentSettings.model,
-      modelName: agentSettings.modelName,
-      sample: agentSettings.sample,
-      loadCatalog: ttlCache(() => loadActiveCatalog(), 60_000),
-      ...(knowledgeOptions ? { answer: (question: string) => answerFromKnowledge(question, knowledgeOptions) } : {}),
-      ...(convState ? { reader: createConversationReader({ store: createSupabaseConversationStore() }) } : {}),
-      contactKeyFor,
-      // La derivación humana del agente está DESACTIVADA hasta validar la integración con el CRM: la capacidad es fija y NINGUNA bandera la enciende (ni siquiera la de la cola al CRM). Solo cotizar está disponible.
-      capabilities: { handoff: false, quote: true },
-      ...(conversationMemory ? { recent: async ({ messageId, contactKey }: { messageId: string; contactKey: string }) => conversationMemory.history({ contactKey, currentMessageId: messageId }) } : {}),
-      log: logLine
-    })
-  : undefined;
-if (agentShadow) logLine("agent_scope", { mode: agentShadow.mode, model: agentSettings!.modelName, sample: agentSettings!.sample });
-
-// PILOTO del nuevo agente (APAGADO por defecto; ver docs/g7/14 y src/agent/pilot.ts): PLUSMEDIK_AGENT=pilot + OPENAI_AGENT_MODEL + PLUSMEDIK_AGENT_PILOT_PHONES (1 a 5 números) hace que el núcleo conversacional RESPONDA,
-// por la misma máquina de envío de siempre, SOLO a esos números y SOLO mientras el interruptor de la base (migración 25; nace apagado) diga «encendido». Los demás contactos siguen con el agente actual, sin
-// llamadas nuevas. Exige el modo turnos; la memoria de la fase 1 (PLUSMEDIK_CONV_STATE=shadow) es opcional. Cualquier configuración incompleta lo deja apagado con un código.
-// PLUSMEDIK_AGENT=live: el mismo núcleo para TODOS los contactos elegibles (menos PLUSMEDIK_AGENT_EXCLUDE_PHONES), con el mismo interruptor de la base (apaga a todos al instante), el mismo respaldo al agente
-// de siempre y un corta-circuito si el modelo falla seguido. Ver docs/g7/15.
-const pilotSettings = agentSettings && (agentMode === "pilot" || agentMode === "live") ? resolveAgentPilotSettings(process.env, logLine, agentMode) : undefined;
-// La memoria estructurada (PLUSMEDIK_CONV_STATE, migración 24) es OPCIONAL: sin ella el agente decide con los mensajes recientes del historial (últimas 24 h) y las herramientas.
-const agentPilot = agentSettings && pilotSettings && turnsEnabled
+if (agentSettings && !(turnsEnabled && textHandlerEnabled)) logLine("agent_config_invalid", { error: "TURNS_AND_TEXT_HANDLER_REQUIRED" });
+const agentPilot = agentSettings && turnsEnabled && textHandlerEnabled
   ? createAgentPilot({
       model: agentSettings.model,
       modelName: agentSettings.modelName,
-      ...(pilotSettings.phones ? { phones: pilotSettings.phones } : {}),
-      ...(pilotSettings.exclude ? { everyone: { exclude: pilotSettings.exclude, contactKeyFor } } : {}),
+      everyone: { exclude: new Set<string>(), contactKeyFor },
       switch: createPilotSwitch({ log: logLine }),
-      handoffEnabled: pilotSettings.handoffEnabled,
-      ...(pilotSettings.dailyMax !== undefined ? { dailyCap: { max: pilotSettings.dailyMax, windowSeconds: 86_400 } } : {}),
-      ...(pilotSettings.deadlineMs !== undefined ? { deadlineMs: pilotSettings.deadlineMs } : {}),
+      // La derivación a una persona usa la cola al CRM de siempre: solo existe si esa cola está configurada y encendida (PLUSMEDIK_CRM_HANDOFF).
+      handoffEnabled: crmOutbox !== undefined,
       context: {
         loadCatalog: ttlCache(() => loadActiveCatalog(), 60_000),
         ...(knowledgeOptions ? { answer: (question: string) => answerFromKnowledge(question, knowledgeOptions) } : {}),
@@ -244,7 +212,7 @@ const agentPilot = agentSettings && pilotSettings && turnsEnabled
       log: logLine
     })
   : undefined;
-if (agentPilot) logLine("agent_scope", { mode: agentPilot.mode, model: agentSettings!.modelName, ...(pilotSettings!.phones ? { phones: pilotSettings!.phones.size } : { everyone: true, excluded: pilotSettings!.exclude!.size }), handoff: pilotSettings!.handoffEnabled, ...(pilotSettings!.dailyMax !== undefined ? { dailyMax: pilotSettings!.dailyMax } : {}) });
+if (agentPilot) logLine("agent_scope", { mode: agentPilot.mode, model: agentSettings!.modelName, everyone: true, handoff: crmOutbox !== undefined, memory: convState !== undefined });
 
 const realDeps: QuoteDeps = {
   async downloadImage(image: IncomingImage) {
@@ -320,7 +288,7 @@ const realDeps: QuoteDeps = {
   requireAuditGuard: humanControlEnabled || turnsEnabled || on("REQUIRE_AUDIT_GUARD"),
   humanControl: humanControlEnabled ? { contactKeyFor } : undefined,
   scopedControl: scopedContactControl ? { contactKeyFor, covers: scopedContactControl.covers } : undefined,
-  turns: turnsEnabled ? { contactKeyFor, replyGuard: replyGuardConfig, attention: attentionConfig, instantPhotoQuotes: instantPhotoQuotesEnabled, dailyCap: dailyReplyCap, memory: conversationMemory, ...(convState ? { convState } : {}), ...(agentShadow ? { agentShadow } : {}), ...(agentPilot ? { agentPilot } : {}),
+  turns: turnsEnabled ? { contactKeyFor, replyGuard: replyGuardConfig, attention: attentionConfig, instantPhotoQuotes: instantPhotoQuotesEnabled, dailyCap: dailyReplyCap, ...(convState ? { convState } : {}), ...(agentPilot ? { agentPilot } : {}),
     crmHandoff: crmOutbox,
     // Métodos de pago ignorados hasta que se implementen (decisión del dueño): ni agente de siempre ni agente nuevo dicen nada de pagos; el resto del mensaje se atiende.
     ignorePayment: true,
@@ -334,12 +302,6 @@ const realDeps: QuoteDeps = {
     log: logLine,
     loopProtection: replyGuard.enabled,
     attention: attentionConfig !== undefined,
-    conversation: conversationModel,
-    // Los últimos mensajes del MISMO contacto y línea (la clave del contacto incluye la línea). Sin clave de contacto no hay historial.
-    history: conversationMemory ? async (turn) => {
-      const contactKey = contactKeyFor(turn.from);
-      return contactKey ? conversationMemory.history({ contactKey, currentMessageId: turn.messageId }) : [];
-    } : undefined,
     knowledge: knowledgeOptions
   }) } : undefined } : undefined
 };

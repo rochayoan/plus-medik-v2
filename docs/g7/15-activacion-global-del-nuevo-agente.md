@@ -1,3 +1,5 @@
+> ⚠ **Nombres de variables y modos reemplazados por la arquitectura unificada: ver [19-arquitectura-unificada.md](19-arquitectura-unificada.md).**
+
 # G7 · Fase 5 — activación global del nuevo agente al 100 % (preparada; PENDIENTE DE AUTORIZACIÓN FINAL)
 
 Estado: **código, migraciones y configuración preparados y probados; NADA desplegado ni activado; las migraciones 24 y 25 no están aplicadas; no hay commit.** Este documento es el procedimiento que se ejecutará solo con su autorización final.

@@ -22,7 +22,7 @@ describe("G5.3: dónde puede aparecer la conversación con modelo", () => {
   });
 
   it("solo la propia capa, el manejador de texto (como TIPO) y el cableado de Vercel la nombran", () => {
-    const allowed = new Set(["src/conversation-model.ts", "src/conversation-openai.ts", "src/conversation-facts.ts", "src/system-prompt.ts", "src/text-handler.ts", "src/conversation-memory.ts", "src/study-interpreter.ts", "src/agent/verify.ts", "src/agent/openai.ts", "src/agent/shadow.ts", "src/agent/pilot.ts", "api/kapso/webhook.ts"]);
+    const allowed = new Set(["src/conversation-model.ts", "src/conversation-openai.ts", "src/conversation-facts.ts", "src/system-prompt.ts", "src/text-handler.ts", "src/conversation-memory.ts", "src/study-interpreter.ts", "src/agent/verify.ts", "src/agent/openai.ts", "src/agent/shadow.ts", "src/agent/pilot.ts", "src/agent/pipeline.ts", "api/kapso/webhook.ts"]);
     for (const path of files) {
       if (allowed.has(rel(path))) continue;
       expect(source(path), rel(path)).not.toMatch(MENTION);
@@ -81,10 +81,9 @@ describe("G5.3: privacidad y registro", () => {
 });
 
 describe("G5.3: apagada por defecto y cableado", () => {
-  it("el cableado exige turnos Y manejador de texto, la guarda de respuestas válida, y no cambia las banderas del motor de recetas", () => {
+  it("el cableado YA NO conecta esta capa (la sustituye el agente conversacional único de src/agent) y no cambia las banderas del motor de recetas", () => {
     const api = source(join(root, "api/kapso/webhook.ts"));
-    expect(api).toMatch(/const conversationModel = turnsEnabled && textHandlerEnabled \? resolveConversationModel\(process\.env, logLine, \{ responseGuardActive: replyGuard\.enabled && !\("error" in replyGuard\) \}\) : undefined;/);
-    expect(api).toMatch(/conversation: conversationModel,/);
+    expect(api).not.toMatch(/resolveConversationModel|resolveConversationMemory|conversation: conversationModel/);
     expect(api).toContain('const ENGINE_FLAGS = { semanticPrimary: true, semanticAuto: true, partialAuto: true, handwrittenAuto: "on" } as const;');
   });
 
@@ -98,11 +97,12 @@ describe("G5.3: apagada por defecto y cableado", () => {
     expect(config).toMatch(/log\("llm_conversation_config_invalid", \{ error \}\);/);
   });
 
-  it(".env.example define las variables nuevas y todas están en blanco (apagadas)", () => {
+  it(".env.example: la bandera y el modelo del agente único siguen en blanco (apagados); las variables de esta capa duplicada ya no existen", () => {
     const example = source(join(root, ".env.example"));
-    for (const name of ["PLUSMEDIK_LLM_CONVERSATION", "PLUSMEDIK_LLM_BUSINESS_INFO", "OPENAI_CONVERSATION_MODEL", "OPENAI_CONVERSATION_REASONING", "PLUSMEDIK_LLM_CATEGORIES", "PLUSMEDIK_LLM_TIMEOUT_MS", "PLUSMEDIK_LLM_MAX_OUTPUT_TOKENS", "PLUSMEDIK_LLM_MAX_INPUT_CHARS"]) {
+    for (const name of ["PLUSMEDIK_LLM_CONVERSATION", "OPENAI_CONVERSATION_MODEL", "OPENAI_CONVERSATION_REASONING"]) {
       expect([...example.matchAll(new RegExp(`^${name}=(.*)$`, "gm"))].map((match) => match[1]!.trim()), name).toEqual([""]);
     }
+    for (const name of ["PLUSMEDIK_LLM_BUSINESS_INFO", "PLUSMEDIK_LLM_SILENCE_OFF_TOPIC", "PLUSMEDIK_LLM_CATEGORIES", "PLUSMEDIK_LLM_TIMEOUT_MS", "PLUSMEDIK_LLM_MAX_OUTPUT_TOKENS", "PLUSMEDIK_LLM_MAX_INPUT_CHARS"]) expect(example, name).not.toMatch(new RegExp(`^${name}=`, "m"));
   });
 
   it("el prompt es una constante de código (src/system-prompt.ts): no existe módulo generado, archivo Markdown ni paso de generación", () => {

@@ -39,7 +39,7 @@ export interface KapsoWebhookDeps {
   };
   // Historial de mensajes para auditoría (apagado si falta; ver src/message-history.ts). Solo OBSERVA: se registra en segundo plano, nunca retrasa ni cambia la respuesta del webhook.
   history?: MessageHistory;
-  // Memoria estructurada en SOMBRA (PLUSMEDIK_CONV_STATE=shadow): registra que una persona escribió. Solo observa; no retrasa ni cambia la respuesta del webhook (se espera con `schedule`).
+  // Memoria estructurada en SOMBRA (PLUSMEDIK_LLM_CONVERSATION=on): registra que una persona escribió. Solo observa; no retrasa ni cambia la respuesta del webhook (se espera con `schedule`).
   convState?: ConversationRecorder;
   log(event: string, data: Record<string, unknown>): void;
 }

@@ -1,3 +1,5 @@
+> ⚠ **Nombres de variables y modos reemplazados por la arquitectura unificada: ver [19-arquitectura-unificada.md](19-arquitectura-unificada.md).**
+
 # G7 · Fase 5c — comprobaciones antes de aplicar cambios en producción
 
 Decisiones vigentes: `gpt-6.1-sol` (razonamiento medio) · 100 % de los contactos elegibles, sin rollout · tope diario del agente nuevo 6 · memoria, herramientas, protecciones y agente anterior como respaldo · **el agente NO se enciende para pacientes** hasta autorización expresa.

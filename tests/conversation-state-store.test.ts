@@ -342,38 +342,29 @@ describe("el lector: estado y pendientes de un contacto", () => {
   });
 });
 
-describe("configuración: PLUSMEDIK_CONV_STATE", () => {
+describe("configuración: la memoria es parte normal del agente (sin variables propias)", () => {
   const store = memoryStore();
   const resolve = (env: Record<string, string | undefined>) => {
     const log = vi.fn();
     return { recorder: resolveConversationState(env, log, { store, contactKeyFor: () => KEY }), log };
   };
 
-  it("ausente, vacío u «off» = apagado y sin registro nuevo", () => {
-    for (const value of [undefined, "", "  ", "off", "OFF"]) {
-      const { recorder, log } = resolve({ PLUSMEDIK_CONV_STATE: value });
-      expect(recorder, String(value)).toBeUndefined();
-      expect(log).not.toHaveBeenCalled();
-    }
+  it("se enciende con la bandera del agente conversacional (PLUSMEDIK_LLM_CONVERSATION=on) y con nada más; no registra nada al resolverse", () => {
+    expect(resolve({ PLUSMEDIK_LLM_CONVERSATION: " ON " }).recorder?.mode).toBe("shadow");
+    const { log } = resolve({ PLUSMEDIK_LLM_CONVERSATION: "on" });
+    expect(log).not.toHaveBeenCalled();
   });
 
-  it("«shadow» (con mayúsculas o espacios) lo enciende; cualquier otro valor lo deja apagado con un código (una errata no lo enciende)", () => {
-    expect(resolve({ PLUSMEDIK_CONV_STATE: " Shadow " }).recorder?.mode).toBe("shadow");
-    for (const value of ["on", "true", "1", "shadw", "active"]) {
-      const { recorder, log } = resolve({ PLUSMEDIK_CONV_STATE: value });
-      expect(recorder, value).toBeUndefined();
-      expect(log).toHaveBeenCalledWith("conv_state_config_invalid", { error: "INVALID_VALUE" });
-    }
+  it("apagada con el agente apagado; las variables antiguas (PLUSMEDIK_CONV_STATE y su retención) ya no encienden ni cambian nada", () => {
+    for (const value of [undefined, "", "off", "true", "1"]) expect(resolve({ PLUSMEDIK_LLM_CONVERSATION: value }).recorder, String(value)).toBeUndefined();
+    expect(resolve({ PLUSMEDIK_CONV_STATE: "shadow" }).recorder).toBeUndefined();
   });
 
-  it("la retención válida (1–365) se usa; una inválida se ignora y rige la de siempre", async () => {
-    for (const [value, expected] of [["7", 7], ["365", 365], ["0", undefined], ["366", undefined], ["abc", undefined], ["", undefined], ["2.5", undefined]] as const) {
-      const append = vi.fn(async (_key: string, _rows: readonly unknown[], _days?: number) => ({ recorded: 1, duplicate: 0 }));
-      const log = vi.fn();
-      const recorder = resolveConversationState({ PLUSMEDIK_CONV_STATE: "shadow", PLUSMEDIK_CONV_STATE_RETENTION_DAYS: value }, log, { store: { append, read: async () => [], contactsSince: async () => [] }, contactKeyFor: () => KEY })!;
-      recorder.humanResume({ contactKey: KEY, operationId: "op" });
-      await recorder.flush();
-      expect(append.mock.calls[0]![2], value).toBe(expected);
-    }
+  it("la retención es la de siempre (30 días): no hay variable para cambiarla", async () => {
+    const append = vi.fn(async (_key: string, _rows: readonly unknown[], _days?: number) => ({ recorded: 1, duplicate: 0 }));
+    const recorder = resolveConversationState({ PLUSMEDIK_LLM_CONVERSATION: "on", PLUSMEDIK_CONV_STATE_RETENTION_DAYS: "7" }, vi.fn(), { store: { append, read: async () => [], contactsSince: async () => [] }, contactKeyFor: () => KEY })!;
+    recorder.humanResume({ contactKey: KEY, operationId: "op" });
+    await recorder.flush();
+    expect(append.mock.calls[0]![2]).toBeUndefined();
   });
 });

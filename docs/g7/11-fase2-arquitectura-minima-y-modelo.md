@@ -1,3 +1,5 @@
+> ⚠ **Nombres de variables y modos reemplazados por la arquitectura unificada: ver [19-arquitectura-unificada.md](19-arquitectura-unificada.md).**
+
 # G7 · Fase 2 — núcleo conversacional: arquitectura mínima y modelo recomendado
 
 Estado: **contratos, herramientas de solo lectura, verificador por procedencia y tubería fija implementados y probados con un modelo SIMULADO. No están conectados a ninguna respuesta real.** El modelo de producción no cambia. Sin commit, push ni deploy.

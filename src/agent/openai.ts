@@ -6,14 +6,12 @@ import { INTENTS, type Act, type AgentModel, type ClarifyCode, type DeferReason,
 import { AgentOutputError, resolveAgentMode } from "./pipeline.js";
 
 // Adaptador de OpenAI (API Responses, salida JSON estricta, sin estado en el proveedor: `store: false`) del núcleo conversacional, y lectura de su configuración. APAGADO por defecto: no se crea ningún cliente
-// ni se hace ninguna llamada si PLUSMEDIK_AGENT no es «shadow» y TODA la configuración está completa.
+// ni se hace ninguna llamada si PLUSMEDIK_LLM_CONVERSATION no es «on» y TODA la configuración está completa.
 //
-//   PLUSMEDIK_AGENT=shadow                  el agente decide en SOMBRA (no envía nada); cualquier otro valor lo deja apagado
-//   OPENAI_API_KEY                          la misma clave del resto del agente
-//   OPENAI_AGENT_MODEL                      modelo; OBLIGATORIO (sin valor por defecto: elegirlo es decisión del dueño). Debe admitir salida JSON estricta
-//   OPENAI_AGENT_REASONING                  opcional: low | medium | high | xhigh | max (solo para modelos que lo admiten)
-//   PLUSMEDIK_AGENT_TIMEOUT_MS              opcional, 3000–60000 (por defecto 30000): tiempo de CADA llamada al modelo
-//   PLUSMEDIK_AGENT_SAMPLE                  opcional, 1–100 (por defecto 100): porcentaje de turnos que se deciden en sombra (control de costo)
+//   PLUSMEDIK_LLM_CONVERSATION=on           enciende el agente conversacional ÚNICO; cualquier otro valor lo deja apagado
+//   OPENAI_API_KEY                          la misma clave del resto del sistema
+//   OPENAI_CONVERSATION_MODEL               modelo; ÚNICA variable para elegirlo; OBLIGATORIA (sin valor por defecto). Debe admitir salida JSON estricta
+//   OPENAI_CONVERSATION_REASONING           opcional: low | medium | high | xhigh | max (por defecto medium)
 // Cualquier valor inválido o faltante deja el agente APAGADO y se registra solo un código (nunca el valor).
 
 type Effort = "low" | "medium" | "high" | "xhigh" | "max";
@@ -69,7 +67,7 @@ Herramientas (solo las que aparezcan en la lista):
 
 Reglas: máximo 4 llamadas. No llames herramientas para saludos, agradecimientos ni consultas de salud (síntomas, medicamentos, resultados); si además piden el precio de estudios con nombre, cotízalos igual. Si una petición no necesita datos, no llames nada. Las peticiones marcadas como pendientes de antes también cuentan. Pon null en los campos que no uses.
 
-Además, en "intents" di QUÉ ENTENDISTE de CADA petición (por su id, incluidas las pendientes): QUOTE (pide precio o cotización), INFO (pregunta algo del laboratorio), GREETING, THANKS, MEDICAL (síntomas, medicamentos, interpretar resultados o cualquier consulta de salud), HUMAN (pide hablar con una persona), OFF_TOPIC, FOLLOW_UP (se refiere a algo de antes: «y ese», «el último», «sí», «el segundo») u OTHER. La etiqueta entre corchetes junto a cada petición es solo una PISTA automática y puede estar equivocada: decide tú, leyendo el mensaje completo y los mensajes anteriores. Si el paciente cambió de tema, la intención es la del tema NUEVO.`;
+Además, en "intents" di QUÉ ENTENDISTE de CADA petición (por su id, incluidas las pendientes): QUOTE (pide precio o cotización), INFO (pregunta algo del laboratorio), GREETING, THANKS, MEDICAL (síntomas, medicamentos, interpretar resultados o cualquier consulta de salud), HUMAN (pide hablar con una persona), OFF_TOPIC (CLARAMENTE ajeno al laboratorio: deportes, política, cadenas, spam, publicidad, charla personal sin relación; si hay la menor duda de que tenga que ver con el laboratorio, NO uses OFF_TOPIC), FOLLOW_UP (se refiere a algo de antes: «y ese», «el último», «sí», «el segundo») u OTHER. La etiqueta entre corchetes junto a cada petición es solo una PISTA automática y puede estar equivocada: decide tú, leyendo el mensaje completo y los mensajes anteriores. Si el paciente cambió de tema, la intención es la del tema NUEVO.`;
 
 export const RESPOND_INSTRUCTIONS = `Eres el asistente de WhatsApp de un laboratorio clínico en Bolivia. Decides cómo atender cada petición del paciente y escribes UN solo mensaje, natural y cálido, en español de Bolivia, breve (idealmente menos de 5 líneas), sin sonar a plantilla. Saluda solo si el paciente saluda.
 
@@ -275,40 +273,31 @@ export function createAgentModel(options: { client: AgentClient; timeoutMs?: num
 
 // ───────────────────────────── configuración ─────────────────────────────
 
-export type AgentConfigError = "MISSING_API_KEY" | "MISSING_MODEL" | "INVALID_MODEL" | "INVALID_REASONING" | "INVALID_TIMEOUT" | "INVALID_SAMPLE";
+export type AgentConfigError = "MISSING_API_KEY" | "MISSING_MODEL" | "INVALID_MODEL" | "INVALID_REASONING";
 
 export interface AgentSettings {
   model: AgentModel;
   modelName: string;
-  sample: number;
 }
 
-// Devuelve el modelo SOLO si PLUSMEDIK_AGENT=shadow y TODA la configuración es válida; si no, undefined (y un código en el registro si estaba habilitado). `client` permite inyectar uno simulado en pruebas.
+// Razonamiento por defecto del agente conversacional.
+export const DEFAULT_REASONING: Effort = "medium";
+
+// Devuelve el modelo SOLO si PLUSMEDIK_LLM_CONVERSATION=on y TODA la configuración es válida; si no, undefined (y un código en el registro si estaba encendido). El modelo se elige con la ÚNICA variable
+// OPENAI_CONVERSATION_MODEL; el razonamiento es «medium» salvo que OPENAI_CONVERSATION_REASONING diga otro. `client` permite inyectar uno simulado en pruebas.
 export function resolveAgentSettings(env: Record<string, string | undefined>, log: (event: string, data: Record<string, unknown>) => void, options: { client?: AgentClient } = {}): AgentSettings | undefined {
-  if (resolveAgentMode(env, log) === "off") return undefined;
+  if (resolveAgentMode(env) === "off") return undefined;
   const fail = (error: AgentConfigError): undefined => {
     log("agent_config_invalid", { error });
     return undefined;
   };
-  const modelName = env.OPENAI_AGENT_MODEL?.trim();
+  const modelName = env.OPENAI_CONVERSATION_MODEL?.trim();
   if (!modelName) return fail("MISSING_MODEL");
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/.test(modelName)) return fail("INVALID_MODEL");
   const apiKey = env.OPENAI_API_KEY?.trim();
   if (!options.client && !apiKey) return fail("MISSING_API_KEY");
-  const effortRaw = env.OPENAI_AGENT_REASONING?.trim().toLowerCase();
-  if (effortRaw && !(EFFORTS as readonly string[]).includes(effortRaw)) return fail("INVALID_REASONING");
-  let timeoutMs: number = AGENT_LIMITS.timeoutMs;
-  const timeoutRaw = env.PLUSMEDIK_AGENT_TIMEOUT_MS?.trim();
-  if (timeoutRaw) {
-    if (!/^\d{4,5}$/.test(timeoutRaw) || Number(timeoutRaw) < 3000 || Number(timeoutRaw) > 60_000) return fail("INVALID_TIMEOUT");
-    timeoutMs = Number(timeoutRaw);
-  }
-  let sample = 100;
-  const sampleRaw = env.PLUSMEDIK_AGENT_SAMPLE?.trim();
-  if (sampleRaw) {
-    if (!/^\d{1,3}$/.test(sampleRaw) || Number(sampleRaw) < 1 || Number(sampleRaw) > 100) return fail("INVALID_SAMPLE");
-    sample = Number(sampleRaw);
-  }
-  const client = options.client ?? createOpenAiAgentClient({ apiKey: apiKey!, model: modelName, ...(effortRaw ? { reasoningEffort: effortRaw as Effort } : {}) });
-  return { model: createAgentModel({ client, timeoutMs }), modelName, sample };
+  const effortRaw = env.OPENAI_CONVERSATION_REASONING?.trim().toLowerCase() || DEFAULT_REASONING;
+  if (!(EFFORTS as readonly string[]).includes(effortRaw)) return fail("INVALID_REASONING");
+  const client = options.client ?? createOpenAiAgentClient({ apiKey: apiKey!, model: modelName, reasoningEffort: effortRaw as Effort });
+  return { model: createAgentModel({ client, timeoutMs: AGENT_LIMITS.timeoutMs }), modelName };
 }

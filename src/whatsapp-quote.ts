@@ -267,7 +267,7 @@ export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProduc
         // Todas las evidencias del análisis se confirman juntas o ninguna (una transacción en la base). Si falla, el envío al paciente sigue igual.
         evidenceAttempted = true;
         await ctx.persist("evidence", (audit, runId, lease) => audit.recordEvidence(runId, { analysis, aiCalls, catalog: catalogFingerprint(catalog) }, lease));
-        // Memoria en sombra (PLUSMEDIK_CONV_STATE): la receta leída, solo con ids de estudios y cuántos puntos quedaron pendientes (nunca precios ni texto). Mejor esfuerzo: no espera ni lanza.
+        // Memoria en sombra (memoria del agente): la receta leída, solo con ids de estudios y cuántos puntos quedaron pendientes (nunca precios ni texto). Mejor esfuerzo: no espera ni lanza.
         const readIds = (analysis.internal?.quoted.lines ?? analysis.quote?.lines ?? []).map((line) => line.id);
         deps.turns?.convState?.artifact({ from: image.from, key: image.messageId, kind: "RECIPE", studyIds: readIds, unrecognized: analysis.internal?.pending.length ?? 0 });
         if (analysis.publicQuote && analysis.outcome !== "HUMAN_REVIEW") {

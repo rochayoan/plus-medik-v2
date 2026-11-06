@@ -360,15 +360,55 @@ describe("runAgentTurn: tubería fija con un modelo simulado", () => {
   });
 });
 
-describe("PLUSMEDIK_AGENT", () => {
-  it("ausente, vacío u «off» = apagado; «shadow» = decide sin enviar; cualquier otro valor = apagado con un código (no existe un modo «on» en esta fase)", () => {
-    const log = vi.fn();
-    for (const value of [undefined, "", " ", "off", "OFF"]) expect(resolveAgentMode({ PLUSMEDIK_AGENT: value }, log)).toBe("off");
-    expect(log).not.toHaveBeenCalled();
-    expect(resolveAgentMode({ PLUSMEDIK_AGENT: " Shadow " }, log)).toBe("shadow");
-    for (const value of ["on", "true", "all", "shadw"]) expect(resolveAgentMode({ PLUSMEDIK_AGENT: value }, log)).toBe("off");
-    expect(log).toHaveBeenCalledTimes(4);
-    expect(log).toHaveBeenCalledWith("agent_config_invalid", { error: "INVALID_VALUE" });
+describe("PLUSMEDIK_LLM_CONVERSATION (un solo agente)", () => {
+  it("solo «on» enciende el agente conversacional; ausente, vacío o cualquier otro valor lo deja apagado (una errata nunca lo enciende)", () => {
+    for (const value of ["on", " ON ", "On"]) expect(resolveAgentMode({ PLUSMEDIK_LLM_CONVERSATION: value })).toBe("live");
+    for (const value of [undefined, "", " ", "off", "true", "1", "live", "shadow", "pilot"]) expect(resolveAgentMode({ PLUSMEDIK_LLM_CONVERSATION: value })).toBe("off");
+    // las variables del agente antiguo ya no encienden nada
+    expect(resolveAgentMode({ PLUSMEDIK_AGENT: "live" })).toBe("off");
+  });
+});
+
+describe("silencio ante lo claramente ajeno al laboratorio (dentro del núcleo)", () => {
+  const tools = createToolRegistry([]);
+  const off = [{ utterance: "U1", intent: "OFF_TOPIC" as const }];
+  const make = () => {
+    const seen = { responds: 0 };
+    const model: AgentModel = {
+      async plan() { return { toolCalls: [], intents: off }; },
+      async respond() { seen.responds += 1; return { acts: [{ kind: "ACK", utterances: ["U1"] }], text: "Hola" }; }
+    };
+    return { model, seen };
+  };
+  const other = u("U1", "OTHER", "OTHER", "mira el partido de anoche");
+
+  it("el modelo lo lee OFF_TOPIC, las reglas no ven nada del laboratorio, no hay pendientes ni conversación en curso → SILENT, sin segunda llamada ni mensaje", async () => {
+    const { model, seen } = make();
+    const decision = await runAgentTurn({ model, tools }, { utterances: [other], recent: [{ from: "PATIENT", text: "hola" }] });
+    expect(decision.status).toBe("SILENT");
+    expect(decision.reply).toBeUndefined();
+    expect(decision.usage?.calls).toBe(1);
+    expect(seen.responds).toBe(0);
+  });
+
+  it("ante CUALQUIER duda se responde como siempre: el modelo no lo lee OFF_TOPIC, las reglas ven algo, hay un pendiente o ya se está conversando con el laboratorio", async () => {
+    const respond = async (utterances: Utterance[], recent: Array<{ from: "PATIENT" | "ASSISTANT" | "STAFF"; text: string }>, intents: Array<{ utterance: string; intent: "OFF_TOPIC" | "OTHER" }> = off) => {
+      const model: AgentModel = { async plan() { return { toolCalls: [], intents }; }, async respond() { return { acts: [{ kind: "ACK", utterances: utterances.map((x) => x.id) }], text: "Hola, ¿en qué te ayudo?" }; } };
+      return (await runAgentTurn({ model, tools }, { utterances, recent })).status;
+    };
+    expect(await respond([other], [], [{ utterance: "U1", intent: "OTHER" }])).toBe("VERIFIED");
+    expect(await respond([other], [], [])).toBe("VERIFIED");
+    expect(await respond([u("U1", "INFO_REQUEST", "LAB_INFO", "a que hora abren")], [])).toBe("VERIFIED");
+    expect(await respond([u("U1", "OTHER_LAB", "OTHER", "tengo turno con el dentista")], [])).toBe("VERIFIED");
+    expect(await respond([other, { ...u("P1", "OTHER", "OTHER"), carried: true }], [], [...off, { utterance: "P1", intent: "OFF_TOPIC" }])).toBe("VERIFIED");
+    expect(await respond([other], [{ from: "ASSISTANT", text: "¿Eso es todo?" }])).toBe("VERIFIED");
+    expect(await respond([other], [{ from: "STAFF", text: "Ya te atiendo" }])).toBe("VERIFIED");
+  });
+
+  it("todas las peticiones del turno deben ser ajenas: si una es del laboratorio, se responde", async () => {
+    const model: AgentModel = { async plan() { return { toolCalls: [], intents: [{ utterance: "U1", intent: "OFF_TOPIC" }, { utterance: "U2", intent: "QUOTE" }] }; }, async respond() { return { acts: [{ kind: "ACK", utterances: ["U1", "U2"] }], text: "Hola" }; } };
+    const decision = await runAgentTurn({ model, tools }, { utterances: [other, u("U2", "RECIPE_OR_QUOTE", "QUOTE", "cotiza hemograma")], recent: [] });
+    expect(decision.status).toBe("VERIFIED");
   });
 });
 
@@ -419,16 +459,5 @@ describe("reparación acotada: un segundo intento con los códigos de lo rechaza
     const decision = await runAgentTurn({ model: sequence([{ acts: answer, text: "Abrimos de 07:00 a 18:00." }], seen), tools }, { utterances, capabilities: CAPS });
     expect(seen).toHaveLength(1);
     expect(decision.repairs).toBeUndefined();
-  });
-});
-
-describe("PLUSMEDIK_AGENT=pilot", () => {
-  it("«pilot» (lista de números) y «live» (todos, con porcentaje) son modos válidos; sigue sin existir un «on» ambiguo", () => {
-    const log = vi.fn();
-    expect(resolveAgentMode({ PLUSMEDIK_AGENT: " Pilot " }, log)).toBe("pilot");
-    expect(resolveAgentMode({ PLUSMEDIK_AGENT: "LIVE" }, log)).toBe("live");
-    expect(log).not.toHaveBeenCalled();
-    for (const value of ["on", "all", "pilots", "global"]) expect(resolveAgentMode({ PLUSMEDIK_AGENT: value }, log)).toBe("off");
-    expect(log).toHaveBeenCalledTimes(4);
   });
 });
