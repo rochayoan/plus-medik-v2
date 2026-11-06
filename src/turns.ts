@@ -1,10 +1,11 @@
 import { repeatCandidate } from "./attention-filter.js";
 import { audioFailureProducer, resolveAudioTurns } from "./audio-turns.js";
 import type { AudioFailureCode } from "./audio/types.js";
-import { engineCanDecide, engineReply, photoOutcomeOf, shadowAfter, shadowBefore } from "./batch-engine.js";
+import { engineCanDecide, engineReply, instantPhotoReply, photoOutcomeOf, shadowAfter, shadowBefore } from "./batch-engine.js";
 import { AuditWriteError, processingFailureCode, type KnowledgeRefRecord } from "./audit.js";
 import { beginTurn, type ClaimedTurn, type Produced, type StalePolicy, type TurnContext, type TurnKind, type TurnOutcome, type TurnProducer, type TurnRef } from "./guarded-turn.js";
 import type { CaseOutcome } from "./crm-outbox/types.js";
+import { isPaymentOnly, stripPaymentTalk } from "./payment-talk.js";
 import { parseSessionCommand, parseSessionReply, summarizeSession } from "./quote-session.js";
 import { sessionImageProducer, sessionTextProducer } from "./quote-session-turns.js";
 import { classifyText, DRAFT_TEXTS } from "./text-handler.js";
@@ -316,6 +317,17 @@ export const hasProcessableTurns = (turns: IncomingTurn[], deps: QuoteDeps): boo
 export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Promise<TurnReport[]> {
   // Copia local: los audios se sustituyen en su lugar por su transcripción (o su aviso) sin tocar lo que recibió quien llama.
   const turns = input.map((turn) => ({ ...turn }));
+  // Métodos de pago IGNORADOS (no bloqueados): del texto se quitan las frases que tratan de cómo pagar y se atiende lo demás; un mensaje que es solo de pagos no se atiende (como una repetición, ni se reclama).
+  // «hola» + «quiero cotizar hemograma» + «voy a pagar por QR» → se cotiza el hemograma y del QR no se dice nada. Una frase de salud o de pedir a una persona se conserva aunque nombre un pago.
+  const paymentOnly = new Set<number>();
+  if (deps.turns?.ignorePayment) {
+    const options = { keep: (clause: string) => { const category = classifyText(clause); return category === "MEDICAL" || category === "HUMAN_REQUEST"; } };
+    for (const [index, turn] of turns.entries()) {
+      if (turn.kind !== "TEXT" || typeof turn.text !== "string") continue;
+      if (isPaymentOnly(turn.text, options)) paymentOnly.add(index);
+      else turn.text = stripPaymentTalk(turn.text, options);
+    }
+  }
   const audio = deps.turns?.audio;
   const resolveFor = async (indices: readonly number[]): Promise<void> => {
     if (audio) await resolveAudioTurns({ indices, turns, claims, audio, deps });
@@ -324,6 +336,10 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
   const live: number[] = [];
   for (const [index, turn] of turns.entries()) {
     if (!producerFor(turn, deps)) continue;
+    if (paymentOnly.has(index)) {
+      deps.log("payment_ignored", {});
+      continue;
+    }
     if (isRepeatedMessage(turn, deps)) {
       // Ni se reclama ni se responde: es el mismo mensaje que ya se está atendiendo. Solo un código en el registro.
       deps.log("attention_filter", { action: "IGNORE", reason: "REPEAT" });
@@ -336,9 +352,14 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
     const from = turns[index]!.from;
     perContact.set(from, [...(perContact.get(from) ?? []), index]);
   }
-  const batched = new Set([...perContact.entries()].filter(([, indices]) => indices.length > 1).map(([from]) => from));
+  // Un contacto del PILOTO (solo mensajes de texto o audio) también se atiende como lote, aunque traiga un solo mensaje: así su respuesta sale por la misma ruta de un solo envío por lote.
+  const pilot = deps.turns?.agentPilot;
+  const isPilotBatch = (from: string, indices: readonly number[]) => Boolean(pilot?.isPilot(from)) && indices.every((index) => turns[index]!.kind === "TEXT" || turns[index]!.kind === "AUDIO");
+  const batched = new Set([...perContact.entries()].filter(([from, indices]) => indices.length > 1 || isPilotBatch(from, indices)).map(([from]) => from));
 
   const claims = new Map<number, ClaimedTurn>();
+  // Mensajes que no se reclamaron porque una persona tiene la palabra (pausa humana): no se atienden solos, pero la memoria en sombra los registra como pendientes.
+  const pausedIndices = new Set<number>();
   // Exclusión del MISMO lote entregado a la vez (reintento de Kapso, doble entrega): las ejecuciones reclaman en el mismo orden, así que solo UNA gana el primer mensaje de un contacto. La que
   // encuentra un mensaje ya EN CURSO en otra ejecución (no uno terminado) cede el resto de ese contacto: la otra lo atiende todo y responde una sola vez. Sin esto, cada una se llevaría una parte de
   // los mensajes y el paciente recibiría dos respuestas. Un mensaje ya terminado (duplicado de una entrega anterior) NO cede el grupo: los nuevos del mismo lote se siguen atendiendo.
@@ -355,6 +376,7 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
       if ("ended" in begun) {
         reports[index] = { messageId: turn.messageId, result: begun.ended };
         if (begun.inFlight) yielded.set(turn.from, 0);
+        if (begun.paused) pausedIndices.add(index);
       } else claims.set(index, begun.claimed);
     } catch {
       deps.log("turn_failed", { stage: "claim", kind: turn.kind });
@@ -363,6 +385,22 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
   }
 
   for (const [from, skipped] of yielded) if (skipped > 0) deps.log("turn_batch_yield", { phone: maskPhone(from), skipped });
+
+  // Memoria estructurada en SOMBRA (PLUSMEDIK_CONV_STATE): por contacto, las peticiones de los mensajes que ESTA ejecución reclamó y, aparte, las de los que esperan por la pausa humana. Solo observa: no espera,
+  // no toma leases y no cambia nada de lo que sigue. El texto solo se usa para clasificar y no se guarda.
+  const convState = deps.turns?.convState;
+  // Núcleo conversacional en SOMBRA (PLUSMEDIK_AGENT=shadow): decide en segundo plano qué respondería a los mensajes reclamados, SIN enviar nada. Ver src/agent/shadow.ts.
+  const agentShadow = deps.turns?.agentShadow;
+  if (convState || agentShadow) {
+    for (const [from, indices] of perContact) {
+      const observe = (selected: number[]) => selected.map((index) => ({ messageId: turns[index]!.messageId, kind: turns[index]!.kind === "AUDIO" || turns[index]!.kind === "IMAGE" || turns[index]!.kind === "OTHER" ? turns[index]!.kind as "AUDIO" | "IMAGE" | "OTHER" : "TEXT" as const, ...(turns[index]!.text !== undefined ? { text: turns[index]!.text } : {}), ...(turns[index]!.timestamp !== undefined ? { timestamp: turns[index]!.timestamp } : {}) }));
+      const claimed = indices.filter((index) => claims.has(index));
+      const waiting = indices.filter((index) => pausedIndices.has(index));
+      if (claimed.length > 0) convState?.patientBatch({ from, turns: observe(claimed) });
+      if (waiting.length > 0) convState?.patientBatch({ from, turns: observe(waiting), paused: true });
+      if (claimed.length > 0) agentShadow?.observe({ from, turns: observe(claimed) });
+    }
+  }
 
   const forget = (source: IncomingTurn) => {
     if (deps.turns?.attention && source.kind === "TEXT" && source.text) deps.turns.attention.repeats.forget(source.from, source.text);
@@ -395,6 +433,9 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
     })());
   }
   await Promise.all(work);
+  // Las escrituras de la memoria en sombra terminan (acotadas, nunca lanzan) antes de que la función termine.
+  await convState?.flush();
+  await agentShadow?.flush();
   return reports;
 }
 
@@ -516,6 +557,7 @@ async function processContactBatch(
       const textTurns = contactTurns.filter((turn) => turn.kind === "TEXT" && typeof turn.text === "string");
       const textItems = runnable.filter(isText);
       const hasPhotos = runnable.some((item) => item.unit.turn.kind === "IMAGE");
+      const instantPhotos = deps.turns?.instantPhotoQuotes === true;
       const technicalFailure: Produced = { kind: "reply", body: TECHNICAL_ISSUE_MESSAGE, result: "technical_issue", processingStatus: "FAILED", stale: "NEWER_TURN" };
       produce = async (ctx) => {
         // 0. Respaldo: si el motor ni siquiera puede entender y decidir este lote (catálogo, comprensión o política), el lote sigue COMPLETO por la ruta de siempre, que todavía no ha tocado nada.
@@ -578,11 +620,42 @@ async function processContactBatch(
 
         // 4. Lo que dejaron las fotos ya está en la sesión y en los avisos del motor; los otros tipos de mensaje (audios, documentos...) se integran con su aviso de siempre.
         const rest = runnable.map((item, position) => ({ item, position })).filter(({ item }) => item.unit.turn.kind === "OTHER");
-        const merged = mergeProduced([...rest.map(({ item }) => results.get(item)!), engineProduced]);
+        // D1: con las fotos instantáneas, la respuesta de cada foto (cotización o aviso de que no se pudo cotizar) también va en el mensaje del lote, antes de la respuesta al texto. Se unen con la misma
+        //     regla de siempre (mergeProduced: una cotización jamás se recorta ni se descarta por obsoleta). El «¿en qué puedo ayudarte? / envía tu receta» genérico del texto se descarta si hay algo concreto.
+        const photoReplies = runnable
+          .filter((item) => item.unit.turn.kind === "IMAGE")
+          .flatMap((item) => { const reply = instantPhotoReply(results.get(item), instantPhotos); return reply ? [reply] : []; });
+        const engineMessage: Produced = engineProduced.kind === "reply" && GENERIC_PROMPTS.has(engineProduced.body) ? { ...engineProduced, generic: true } : engineProduced;
+        const merged = mergeProduced([...rest.map(({ item }) => results.get(item)!), ...photoReplies, engineMessage]);
         included = runnable.map((item) => item.unit.turn.kind !== "OTHER");
         rest.forEach(({ position }, index) => { if (merged.included[index]) included[position] = true; });
         if (merged.produced.kind === "none") await own.flush();
         return merged.produced;
+      };
+    }
+
+    // PILOTO del nuevo agente: solo para un contacto de su lista y un lote de TEXTO. Intenta producir la respuesta con el núcleo conversacional; si no puede o no debe (interruptor apagado o ilegible, modelo caído,
+    // verificación fallida, derivación no completada, plazo vencido), el lote sigue COMPLETO por la ruta de siempre, que todavía no ha tocado nada. Si responde, los demás mensajes del lote se cierran sin
+    // respuesta y el envío lo hace la misma reserva de siempre (un solo envío por lote).
+    const pilot = deps.turns?.agentPilot;
+    if (pilot?.isPilot(from) && contactTurns.length > 0 && contactTurns.every((turn) => turn.kind === "TEXT" && typeof turn.text === "string")) {
+      // Respaldo EXACTO de siempre: un contacto con UN solo mensaje seguía la ruta individual (no la del lote ni la del motor de lotes); con varios, la del lote, que es la que ya seguía.
+      const routine = contactTurns.length === 1 && drafts.length === 0 ? responder.produce : produce;
+      const crm = deps.turns?.crmHandoff;
+      const leadId = responder.unit.turn.messageId;
+      const REASONS = { HUMAN_REQUEST: "HUMAN_REQUEST", MEDICAL: "MEDICAL_QUERY", OUT_OF_SCOPE: "NO_APPROVED_ANSWER" } as const;
+      produce = async (ctx) => {
+        const piloted = await pilot.produce({
+          from,
+          turns: contactTurns.map((turn) => ({ messageId: turn.messageId, kind: "TEXT" as const, text: turn.text!, ...(turn.timestamp !== undefined ? { timestamp: turn.timestamp } : {}) })),
+          // La derivación REAL: el caso entra a la cola del CRM con el lease de ESTA ejecución; solo cuenta si el CRM ya lo registró.
+          ...(crm ? { handoff: async (reason: keyof typeof REASONS) => (await crm.submit(ctx, [{ kapsoMessageId: leadId, contactPhone: from, kind: "CONVERSATION", reasons: [REASONS[reason]] }]))[0]?.state === "REGISTERED" } : {})
+        });
+        if (!piloted) return routine(ctx);
+        await Promise.all(drafts.map((draft) => draft.claimed.skip().catch(() => undefined)));
+        included = runnable.map(() => true);
+        if (piloted.quotedStudyIds.length > 0) deps.turns?.convState?.artifact({ from, key: leadId, kind: "QUOTE", studyIds: piloted.quotedStudyIds });
+        return { kind: "reply", body: piloted.body, result: piloted.result, processingStatus: piloted.processingStatus, stale: piloted.stale, ...(piloted.signature ? { signature: piloted.signature } : {}), quality: piloted.quality, ...(piloted.closes.length > 0 ? { closes: piloted.closes } : {}), ...(piloted.cap ? { cap: piloted.cap } : {}) };
       };
     }
 

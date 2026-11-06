@@ -1,4 +1,5 @@
 import { assertModelCallsAllowed } from "../offline.js";
+import { describeHttpFailure, describeProviderError } from "../provider-error.js";
 import { formatInfo } from "./media.js";
 import { AudioFailure, type AudioFormat } from "./types.js";
 
@@ -54,16 +55,17 @@ export function createOpenAiTranscriber(options: OpenAiTranscriberOptions): Tran
         body: form,
         signal: AbortSignal.timeout(options.timeoutMs)
       });
-    } catch {
+    } catch (error) {
       // Tiempo agotado o red caída: se puede repetir.
-      throw new AudioFailure("UNAVAILABLE", true);
+      throw new AudioFailure("UNAVAILABLE", true, describeProviderError(error));
     }
     if (!response.ok) {
-      // Nunca se lee ni se propaga el cuerpo del error (podría eco del contenido).
-      if (response.status === 413) throw new AudioFailure("TOO_LARGE");
-      if (response.status === 400 || response.status === 415 || response.status === 422) throw new AudioFailure("INVALID_AUDIO");
-      if (response.status === 401 || response.status === 403 || response.status === 404) throw new AudioFailure("UNAVAILABLE");
-      throw new AudioFailure("UNAVAILABLE", true);
+      // El cuerpo del error NUNCA se propaga (podría traer eco del contenido): de él solo se extrae `error.code`/`error.type` con un patrón estricto (src/provider-error.ts) para saber si fue cuota o tasa.
+      const cause = describeHttpFailure({ status: response.status, header: (name) => response.headers?.get?.(name), bodyText: await response.text().catch(() => undefined) });
+      if (response.status === 413) throw new AudioFailure("TOO_LARGE", false, cause);
+      if (response.status === 400 || response.status === 415 || response.status === 422) throw new AudioFailure("INVALID_AUDIO", false, cause);
+      if (response.status === 401 || response.status === 403 || response.status === 404) throw new AudioFailure("UNAVAILABLE", false, cause);
+      throw new AudioFailure("UNAVAILABLE", true, cause);
     }
     const body = (await response.json().catch(() => undefined)) as { text?: unknown } | undefined;
     return validateTranscript(body?.text);

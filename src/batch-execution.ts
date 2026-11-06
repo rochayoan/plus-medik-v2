@@ -396,6 +396,7 @@ async function closeAndRender(args: { ctx: TurnContext; deps: QuoteDeps; config:
   if (closed.status === "not_open") return { override: { body: texts.empty, result: "no_quote" }, actual: "EMPTY", mismatch };
 
   if (evaluation.kind === "QUOTE") {
+    deps.turns?.convState?.artifact({ from: args.from, key: read.sessionId, kind: "QUOTE", studyIds: evaluation.lines.map((line) => line.studyId) });
     let body = formatSessionQuote(evaluation.lines, evaluation.duplicates, texts);
     if (deps.quotePreparations) {
       try {

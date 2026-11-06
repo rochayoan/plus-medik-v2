@@ -1,3 +1,5 @@
+import type { ProviderErrorInfo } from "../provider-error.js";
+
 // Tipos y códigos cerrados del procesamiento de audios (notas de voz de WhatsApp). Nada aquí lleva texto del paciente: solo códigos.
 
 // Por qué un audio no se pudo usar. Son códigos cerrados (se registran): nunca el texto de un error.
@@ -16,7 +18,8 @@ export type AudioFailureCode = (typeof AUDIO_FAILURE_CODES)[number];
 
 // Un error del procesamiento de un audio. `retryable`: repetir el mismo intento puede funcionar (red, 5xx, límite de tasa); lo demás es definitivo.
 export class AudioFailure extends Error {
-  constructor(readonly code: AudioFailureCode, readonly retryable = false) {
+  // `cause`: causa del fallo del proveedor con códigos de lista blanca (cuota vs. tasa, estado HTTP, retry-after…); ver src/provider-error.ts. Nunca texto del error ni del contenido.
+  constructor(readonly code: AudioFailureCode, readonly retryable = false, readonly cause?: ProviderErrorInfo) {
     super(`audio_${code.toLowerCase()}`);
     this.name = "AudioFailure";
   }

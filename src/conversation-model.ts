@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { NO_DATA_BLOCK, renderFacts, ungroundedTokens, type DataSection, type DataSectionId, type FactsContext } from "./conversation-facts.js";
+import { describeProviderError } from "./provider-error.js";
 import { fold } from "./text-normalize.js";
 
 // Capa conversacional con un modelo de lenguaje (G5.3 / G5.6, APAGADA por defecto). NO sustituye al motor de cotizaciones ni al manejador determinista: es un complemento acotado.
@@ -327,7 +328,8 @@ export function createConversationModel(options: ConversationModelOptions): Conv
         completion = await options.client.complete({ instructions: instructionsFor(options.prompt, view?.block ?? NO_DATA_BLOCK), message, schemaName: OUTPUT_SCHEMA_NAME, schema: OUTPUT_JSON_SCHEMA, maxOutputTokens, timeoutMs });
       } catch (error) {
         // Nunca el texto del error: puede traer el contenido del mensaje.
-        return fail(failureKind(error));
+        // Solo códigos de lista blanca (cuota vs. tasa, retry-after, límites restantes): ver src/provider-error.ts.
+        return fail(failureKind(error), describeProviderError(error));
       }
       const usage = { inputTokens: completion.usage?.inputTokens, outputTokens: completion.usage?.outputTokens, reasoningTokens: completion.usage?.reasoningTokens };
 

@@ -1,7 +1,11 @@
-import { AuditWriteError, type AuditLease, type AuditRepository, type SendableResult, type SendConfirmation, type SendReservation, type StalePolicy, type TurnKind } from "./audit.js";
+import { AuditWriteError, auditErrorFields, type AuditLease, type AuditRepository, type SendableResult, type SendConfirmation, type SendReservation, type StalePolicy, type TurnKind } from "./audit.js";
 import type { AttentionConfig } from "./attention-filter.js";
 import type { AudioPipeline } from "./audio/service.js";
 import type { ConversationMemory } from "./conversation-memory.js";
+import type { AgentPilot } from "./agent/pilot.js";
+import type { AgentShadow } from "./agent/shadow.js";
+import type { ReplyQuality } from "./conversation-state.js";
+import type { ConversationRecorder } from "./conversation-state-store.js";
 import type { CrmHandoff } from "./crm-outbox/types.js";
 import type { QuoteSessionsConfig } from "./quote-session.js";
 import type { ReplyGuardConfig } from "./reply-guard.js";
@@ -50,6 +54,15 @@ export interface TurnsConfig {
   dailyCap?: { max: number; windowSeconds: number };
   // Memoria conversacional corta (apagada si falta; ver src/conversation-memory.ts): se guardan los mensajes de texto del paciente y las respuestas conversacionales confirmadas como enviadas.
   memory?: ConversationMemory;
+  // Memoria estructurada en SOMBRA (PLUSMEDIK_CONV_STATE=shadow; apagada si falta; ver src/conversation-state-store.ts): solo observa y registra; nunca cambia una respuesta, un lease ni un envío.
+  convState?: ConversationRecorder;
+  // Núcleo conversacional en SOMBRA (PLUSMEDIK_AGENT=shadow; apagado si falta; ver src/agent/shadow.ts): decide qué respondería, sin enviar nada ni tocar leases, pausa, tope ni precios.
+  agentShadow?: AgentShadow;
+  // PILOTO del nuevo agente (PLUSMEDIK_AGENT=pilot; apagado si falta; ver src/agent/pilot.ts): para los números de su lista y mientras el interruptor de la base esté encendido, decide la respuesta de un lote de
+  // texto; la ENVÍA esta misma máquina (lease, reserva, pausa humana, un envío por lote, tope). Si no puede o no debe responder, responde la ruta de siempre.
+  agentPilot?: AgentPilot;
+  // Métodos de pago IGNORADOS (ausente = como siempre): un mensaje que solo trata de cómo pagar no se atiende (ni se reclama), y en los demás se quitan las frases de pago antes de entenderlos. Ver src/payment-talk.ts.
+  ignorePayment?: boolean;
   // Quién responde a los mensajes que no son imágenes. Sin manejador, ese tipo de mensaje ni se reclama ni se responde.
   handlers?: TurnHandlers;
   // Motor global de lotes (apagado si falta; ver src/batch-engine.ts). Solo actúa en un lote de Kapso (varios mensajes de un contacto) y exige las sesiones de cotización y el manejador de texto.
@@ -73,7 +86,7 @@ export interface TurnRef {
 // Lo que el trabajo de un turno decide: nada que enviar (el trabajo ya cerró la corrida si hacía falta) o una respuesta.
 export type Produced =
   | { kind: "none" }
-  | { kind: "reply"; body: string; result: SendableResult; processingStatus: "COMPLETED" | "FAILED"; stale?: StalePolicy; signature?: string; generic?: true; photo?: PhotoReport };
+  | { kind: "reply"; body: string; result: SendableResult; processingStatus: "COMPLETED" | "FAILED"; stale?: StalePolicy; signature?: string; generic?: true; photo?: PhotoReport; quality?: ReplyQuality; closes?: string[]; cap?: { max: number; windowSeconds: number } };
 
 // Lo que dejó el análisis de UNA foto en la solicitud (solo estado e ids de lab_tests; nunca precios ni texto). Lo informa el productor de las fotos para que el motor de lotes sepa qué aportó cada una sin
 // tener que leerlo de la base: una foto con un número de turno posterior al del texto que anota el lote no es visible para él. No altera ningún envío.
@@ -106,13 +119,14 @@ export interface ClaimedTurn {
   skip(): Promise<void>;
 }
 
-const writeErrorKind = (error: unknown) => (error instanceof AuditWriteError ? { kind: error.kind } : {});
+// Tipo, estado HTTP y código del servidor del fallo de auditoría (sin texto del servidor ni contenido): ver auditErrorFields.
+const writeErrorKind = (error: unknown) => auditErrorFields(error);
 const realSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 // Fase 1: el claim. En un lote se llama UNO por UNO, en el orden de los mensajes, para que la numeración del contacto respete ese orden; el trabajo (fase 2) puede
 // luego correr en paralelo. Si el turno no debe procesarse (duplicado, pausa humana, sin clave de contacto, base caída con la guarda obligatoria) devuelve ended.
 // inFlight: el mensaje ya lo está atendiendo OTRA ejecución (lease vigente o envío en curso). Lo usa processTurns para no repartirse con ella los demás mensajes del mismo lote.
-export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claimed: ClaimedTurn } | { ended: "ignored"; inFlight?: true }> {
+export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claimed: ClaimedTurn } | { ended: "ignored"; inFlight?: true; paused?: true }> {
   // Atención humana / turnos: sin una clave estable del contacto, o sin la auditoría que concede los leases y las reservas, no hay forma de comprobar la pausa -> no se responde.
   // Control acotado: solo los contactos de la lista explícita se tratan como con control humano; los demás siguen el flujo de siempre (ni clave de contacto ni guarda obligatoria).
   const scoped = !deps.humanControl && !deps.turns && deps.scopedControl?.covers(ref.from) ? deps.scopedControl : undefined;
@@ -135,7 +149,8 @@ export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claime
       const claim = deps.turns ? await deps.audit.claim(claimRef, { contactKey: contactKey!, turnKind: ref.kind }) : contactKey ? await deps.audit.claim(claimRef, { contactKey }) : await deps.audit.claim(claimRef);
       if (claim.kind === "duplicate") {
         deps.log("duplicate_ignored", { processingStatus: claim.processingStatus, ...(claim.reason ? { reason: claim.reason } : {}) });
-        return { ended: "ignored", ...(claim.reason === "BUSY" || claim.reason === "IN_DOUBT" ? { inFlight: true as const } : {}) };
+        // `paused`: una persona tiene la palabra; el mensaje no se atiende solo pero la memoria en sombra lo registra como pendiente.
+        return { ended: "ignored", ...(claim.reason === "BUSY" || claim.reason === "IN_DOUBT" ? { inFlight: true as const } : {}), ...(claim.reason === "HUMAN_PAUSED" ? { paused: true as const } : {}) };
       }
       auditRunId = claim.runId;
       lease = claim.lease;
@@ -197,7 +212,7 @@ export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claime
         try {
           // La guarda (G3.2) solo acompaña a lo conversacional; la base lo vuelve a comprobar (una imagen o una cotización nunca se limitan).
           const guard = deps.turns?.replyGuard && ref.kind !== "IMAGE" && (result === "conversation" || result === "technical_issue") ? { config: deps.turns.replyGuard, ...(produced.signature ? { signature: produced.signature } : {}) } : undefined;
-          reservation = deps.turns ? await deps.audit!.reserveSend(auditRunId!, result, lease!, { stale, ...(guard ? { guard } : {}), ...(deps.turns.dailyCap ? { cap: deps.turns.dailyCap } : {}) }) : await deps.audit!.reserveSend(auditRunId!, result, lease!);
+          reservation = deps.turns ? await deps.audit!.reserveSend(auditRunId!, result, lease!, { stale, ...(guard ? { guard } : {}), ...(produced.cap ? { cap: produced.cap } : deps.turns.dailyCap ? { cap: deps.turns.dailyCap } : {}) }) : await deps.audit!.reserveSend(auditRunId!, result, lease!);
         } catch (error) {
           reservation = "unavailable";
           deps.log("audit_unavailable", { stage: "reserve", ...writeErrorKind(error) });
@@ -267,6 +282,8 @@ export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claime
         ...(auditRunId ? { auditRunId } : {})
       });
     }
+    // Memoria en sombra: solo una respuesta que Kapso ACEPTÓ (nunca un envío incierto o retenido). Mejor esfuerzo: no espera ni lanza.
+    if (delivered) deps.turns?.convState?.agentReply({ from: ref.from, messageId: delivered.providerMessageId ?? `reply:${ref.messageId}`, replyTo: ref.messageId, reply: { body: reply, result, ...(produced.generic ? { generic: true } : {}), ...(produced.quality ? { quality: produced.quality } : {}), ...(produced.closes ? { closes: produced.closes } : {}) } });
     return result;
   }
 

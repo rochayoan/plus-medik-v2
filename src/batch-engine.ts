@@ -56,6 +56,16 @@ export function photoOutcomeOf(produced: Produced, texts: Pick<QuoteTexts, "unre
   return { status: "RESOLVED", studyIds: [] };
 }
 
+// Fotos con cotización instantánea (PLUSMEDIK_INSTANT_PHOTO_QUOTES) dentro de un lote atendido por el motor. En ese modo la respuesta propia de CADA foto —la cotización con precios del catálogo o el aviso
+// de que no se pudo cotizar— no pasa por la sesión: viaja en el `body` de su `Produced` (`imageProducer`). El motor solo conoce de cada foto un `PhotoOutcome` (sin ids de estudios en este modo), de modo que si
+// esa respuesta no se incorpora al mensaje del lote, el paciente recibe solo la respuesta al TEXTO (p. ej. «envíame una foto de tu receta») aunque su foto ya se haya cotizado (defecto D1).
+//   · Se incorporan solo `quoted` y `no_quote`. El fallo técnico de una foto ya lo comunica el motor con su aviso (TECHNICAL_ERROR) y no debe duplicarse.
+//   · Sin el modo instantáneo no se incorpora nada: con sesiones, las respuestas de las fotos son acuses que el motor sustituye por su resumen de la solicitud.
+export function instantPhotoReply(produced: Produced | undefined, instant: boolean): Extract<Produced, { kind: "reply" }> | undefined {
+  if (!instant || !produced || produced.kind !== "reply") return undefined;
+  return produced.result === "quoted" || produced.result === "no_quote" ? produced : undefined;
+}
+
 // ───────────────────────────── motor nuevo («on») ─────────────────────────────
 
 export interface EngineInput {
