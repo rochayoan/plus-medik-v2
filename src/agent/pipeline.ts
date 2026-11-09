@@ -2,6 +2,7 @@ import { stripPaymentTalk } from "../payment-talk.js";
 import { describeProviderError } from "../provider-error.js";
 import type { AgentDecision, AgentModel, Capabilities, HandoffReason, ModelUsage, RecentEntry, Utterance, Violation } from "./contracts.js";
 import { runToolCalls, type ToolRegistry } from "./tools.js";
+import { filterAdministrativeQuoteCalls } from "./intent-guard.js";
 import { verifyReply } from "./verify.js";
 
 // Tubería FIJA y corta del agente conversacional (no un bucle libre del modelo): 1) el modelo decide qué consultar (a veces nada: saludos, agradecimientos, charla) → 2) herramientas de solo lectura →
@@ -71,6 +72,13 @@ export async function runAgentTurn(deps: AgentDeps, input: AgentTurnInput): Prom
     usage = addUsage(usage, plan.usage);
   } catch (error) {
     return done({ status: "MODEL_ERROR", modelError: modelFailure(error) });
+  }
+  // No cotizar por un error del planificador si el paciente está pidiendo
+  // exclusivamente sus resultados, su enlace o un comprobante. Mantener
+  // íntegra la cotización por texto y la continuidad de estudios.
+  const guarded = filterAdministrativeQuoteCalls(plan.toolCalls, input.utterances);
+  if (guarded.suppressed) {
+    plan = { ...plan, toolCalls: guarded.calls, fallback: plan.fallback ?? "administrative_quote_suppressed" };
   }
   const planInfo = plan.fallback ? { planFallback: plan.fallback } : {};
 

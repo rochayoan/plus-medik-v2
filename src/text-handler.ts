@@ -75,7 +75,7 @@ export const DRAFT_TEXTS: ConversationTexts = {
   send_recipe: "Con gusto te ayudo a cotizar. Puedes escribir los nombres de tus estudios o enviar una foto clara y completa de tu receta.",
   fallback: "Con gusto te oriento. ¿Sobre qué te gustaría saber más? También puedes escribir tus estudios o enviar una foto de tu receta para cotizar.",
   handoff_confirmed: "Recibimos tu solicitud. Una persona del equipo la revisará y te escribirá por este chat.",
-  handoff_unavailable: "Recibimos tu mensaje, pero por ahora no puedo derivarlo a una persona desde este chat. Si quieres una cotización, envíame una foto clara y completa de tu receta.",
+  handoff_unavailable: "Recibimos tu consulta. Por ahora no puedo conectarte directamente con recepción desde este chat ni confirmar información que no tenga verificada. Si estás en el laboratorio, consulta con el personal de atención.",
   medical_unavailable: "Recibimos tu mensaje. No puedo darte orientación médica por este chat. Si es una urgencia, comunícate con los servicios de emergencia de tu localidad.",
   medical_handoff_confirmed: "Recibimos tu mensaje. No puedo darte orientación médica por este chat. Si es una urgencia, comunícate con los servicios de emergencia de tu localidad. Una persona del equipo revisará tu mensaje y te escribirá por este chat."
 };
