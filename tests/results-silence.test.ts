@@ -27,7 +27,10 @@ describe("resultados: silencio determinista sin IA ni mensajes", () => {
     "Estoy hospitalizado, necesito resultados urgente",
     "Quiero hablar con una persona por mis resultados",
     "El enlace de mis resultados no funciona",
-    "¿Cuánto cuesta la prueba para mis resultados?"
+    "¿Cuánto cuesta la prueba para mis resultados?",
+    "hemograma listo",
+    "¿Cuánto demora el resultado de glucosa?",
+    "¿Cuánto tiempo tardan los resultados?"
   ])("no silencia una petición adicional, sensible o ambigua: %s", (message) => {
     expect(isResultsOnlyRequest(message)).toBe(false);
   });
