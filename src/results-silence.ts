@@ -4,7 +4,6 @@ import { plain } from "./text-normalize.js";
 // disponibilidad, enlace, descarga o entrega de resultados ya realizados.
 // Aplicar a un LOTE COMPLETO (no al mensaje aislado) para no silenciar una
 const SUBJECT = /\b(hemograma|glucosa|analisis|estudio\w*)\b/;
-const SUBJECT = /\b(hemograma|glucosa|analisis|estudio\w*)\b/;
 const RESULTS = /\b(resultado\w*|informe\w*)\b/;
 const REQUEST = /\b(ya|esta|estan|estara|estaran|listo\w*|salio|salieron|entrega\w*|entregar\w*|enviar\w*|envia\w*|mandar\w*|manda\w*|pasar\w*|pasen|recibir\w*|recoger\w*|retirar\w*|descarg\w*|obtener\w*|consultar\w*|link\w*|enlace\w*|acceso|clave|contrasena|disponible\w*|cuando|cuanto (tarda|demora))\b/;
 const EXCLUDE = /\b(cotiz\w*|precio\w*|cuesta\w*|costo\w*|presupuesto\w*|pagar\w*|pago\w*|cobran|cuanto (sale|cuesta|cuestan|vale|valen)|ayuno\w*|preparaci\w*|muestra\w*|direccion\w*|ubicacion\w*|horario\w*|atienden|abren|cierra\w*|turno\w*|cita\w*|interpreta\w*|interpretar\w*|significa\w*|significado|explica\w*|valores|normal|alto\w*|bajo\w*|positivo\w*|negativo\w*|diagnostic\w*|tratamiento\w*|medicamento\w*|dolor\w*|fiebre|urgente\w*|urgencia\w*|emergencia|hospital\w*|internad\w*|hospitalizad\w*|doctor\w*|medico\w*|persona|asesor\w*|recepcion|humano|hablar|reclamo\w*|queja\w*|problema\w*|no puedo|no funciona|error\w*|cuanto tiempo|cuanto demora|cuanto tardan|demora\w*|tarda\w*|plazo\w*|tiempo de entrega)\b/;
