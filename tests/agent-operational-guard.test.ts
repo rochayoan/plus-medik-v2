@@ -22,7 +22,7 @@ describe("auditoría noviembre: prioridad a las solicitudes reales del paciente"
       const result = await runAgentTurn({ model, tools }, { utterances: [u(msg)] });
       expect(result.status).toBe("VERIFIED");
       expect(result.quoted).toBeUndefined();
-      expect(result.usage.calls).toBe(1);
+      expect(result.usage?.calls).toBe(1);
     }
     expect(plan).not.toHaveBeenCalled();
     expect(query).toHaveBeenCalledTimes(3);
