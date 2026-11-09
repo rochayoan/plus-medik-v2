@@ -12,7 +12,7 @@ import { prepareAgentTurn, summarizeDecision, type AgentContextOptions } from ".
 // (guarded-turn: claim con lease, reserva de envío, comprobación de pausa humana, un solo envío por lote, idempotencia, guarda de respuestas, tope diario). Si el piloto no puede o no debe responder (interruptor
 // apagado o ilegible, modelo caído, verificación fallida, derivación no completada, plazo vencido, lote con fotos), devuelve `undefined` y responde la ruta de siempre COMO SI EL PILOTO NO EXISTIERA.
 
-export const PILOT_LIMITS = { maxPhones: 5, maxExcluded: 20, switchTtlMs: 5000, switchTimeoutMs: 2000, deadlineMs: 40_000, dailyMax: 40, recentLimit: 7, recentWindowMs: 24 * 3600 * 1000, breakerFailures: 3, breakerOpenMs: 60_000, quotaBreakerOpenMs: 15 * 60_000 } as const;
+export const PILOT_LIMITS = { maxPhones: 5, maxExcluded: 20, switchTtlMs: 5000, switchTimeoutMs: 2000, deadlineMs: 40_000, dailyMax: 40, recentLimit: 7, recentWindowMs: 24 * 3600 * 1000, breakerFailures: 3, breakerOpenMs: 60_000 } as const;
 
 // ───────────────────────────── interruptor (desactivación inmediata) ─────────────────────────────
 
@@ -142,13 +142,7 @@ export function createAgentPilot(options: AgentPilotOptions): AgentPilot {
   // Corta-circuito (por instancia): si el modelo falla seguido (cuota, caída, plazo), durante un minuto NO se le espera: todos responden por la ruta de siempre al instante. Así una caída de OpenAI no retrasa a nadie.
   let failures = 0;
   let openUntil = 0;
-  const noteOutcome = (modelWorked: boolean, billingExhausted = false): void => {
-    if (billingExhausted) {
-      failures = 0;
-      openUntil = now() + PILOT_LIMITS.quotaBreakerOpenMs;
-      options.log("agent_pilot_breaker", { open: true, reason: "QUOTA_OR_BILLING", forMs: PILOT_LIMITS.quotaBreakerOpenMs });
-      return;
-    }
+  const noteOutcome = (modelWorked: boolean): void => {
     if (modelWorked) { failures = 0; return; }
     failures += 1;
     if (failures >= PILOT_LIMITS.breakerFailures) {
@@ -182,7 +176,7 @@ export function createAgentPilot(options: AgentPilotOptions): AgentPilot {
           );
           options.log("agent_pilot", { ...summarizeDecision(decision, { utterances: prepared.utterances.length, mediaSkipped: prepared.mediaSkipped, latencyMs: now() - started, model: options.modelName }), ...(decision.handoffRegistered ? { handoff: "REGISTERED" } : {}) });
           // El modelo «funcionó» si respondió (aunque el verificador lo rechazara); falló si hubo error del proveedor.
-          noteOutcome(decision.status !== "MODEL_ERROR", decision.status === "MODEL_ERROR" && decision.modelError?.cause === "QUOTA_OR_BILLING");
+          noteOutcome(decision.status !== "MODEL_ERROR");
           // Claramente ajeno al laboratorio y nada pendiente: no se responde (el turno se cierra sin respuesta, sin caer al modo esencial).
           if (decision.status === "SILENT" && !cancelled) return { body: "", result: "conversation", processingStatus: "COMPLETED", stale: "NEWER_TURN", quality: "ANSWER", quotedStudyIds: [], silent: true };
           if (decision.status !== "VERIFIED" || !decision.reply || cancelled) return undefined;

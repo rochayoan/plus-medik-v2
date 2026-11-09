@@ -1,64 +1,54 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { groundedQuoteCalls, operationalPlan } from "../src/agent/intent-guard.js";
+import { filterAdministrativeQuoteCalls } from "../src/agent/intent-guard.js";
 import { runAgentTurn } from "../src/agent/pipeline.js";
 import { createToolRegistry } from "../src/agent/tools.js";
 import type { AgentModel, Utterance } from "../src/agent/contracts.js";
 
-const u = (text: string): Utterance => ({ text, topic: "OTHER_LAB" });
-const caps = { handoff: false, quote: true };
+const u = (text: string): Utterance => ({ text, topic: "INFO_REQUEST" });
 
-describe("auditoría noviembre: prioridad a las solicitudes reales del paciente", () => {
-  it("los horarios y la disponibilidad administrativa se consultan sin planificador generativo", async () => {
-    const plan = vi.fn(async () => ({ toolCalls: [] }));
-    const respond = vi.fn(async () => ({ text: "No tengo ese horario confirmado." }));
-    const query = vi.fn(async () => ({ noData: "NO_APPROVED_DATA" }));
-    const model: AgentModel = { plan, respond };
-    const tools = createToolRegistry([{
-      name: "lab_info", description: "conocimiento aprobado", readOnly: true,
-      input: z.object({ question: z.string().min(2).max(300) }).strict(), run: query
-    }]);
-    for (const msg of ["¿A qué hora abren?", "¿Cuándo estarán mis resultados?", "¿Me pasan el enlace de mis resultados?"]) {
-      const result = await runAgentTurn({ model, tools }, { utterances: [u(msg)] });
-      expect(result.status).toBe("VERIFIED");
-      expect(result.quoted).toBeUndefined();
-      expect(result.usage?.calls).toBe(1);
-    }
-    expect(plan).not.toHaveBeenCalled();
-    expect(query).toHaveBeenCalledTimes(3);
+describe("Plusmedik: resultados administrativos no son cotizaciones", () => {
+  it("bloquea quote_studies erróneo cuando solo solicitan un enlace de resultados", async () => {
+    const wronglyQuoted = vi.fn(async () => ({ facts: [{ source: "QUOTE_ENGINE" as const, text: "cotizado", refs: [] }], blocks: ["COTIZACIÓN INCORRECTA"] }));
+    const knowledge = vi.fn(async () => ({ noData: "NO_APPROVED_DATA" }));
+    const model: AgentModel = {
+      plan: vi.fn(async () => ({ toolCalls: [
+        { tool: "quote_studies", input: { studies: ["hemograma"] } },
+        { tool: "lab_info", input: { question: "¿Dónde veo mis resultados?" } }
+      ] })),
+      respond: vi.fn(async () => ({ text: "No tengo ese enlace de resultados confirmado." }))
+    };
+    const tools = createToolRegistry([
+      { name: "quote_studies", description: "precios", readOnly: true, input: z.object({ studies: z.array(z.string()) }).strict(), run: wronglyQuoted },
+      { name: "lab_info", description: "conocimiento aprobado", readOnly: true, input: z.object({ question: z.string() }).strict(), run: knowledge }
+    ]);
+    const result = await runAgentTurn({ model, tools }, { utterances: [u("¿Me pasan el enlace de mis resultados?")] });
+    expect(result.status).toBe("VERIFIED");
+    expect(result.quoted).toBeUndefined();
+    expect(result.reply).not.toContain("COTIZACIÓN INCORRECTA");
+    expect(result.planFallback).toBe("administrative_quote_suppressed");
+    expect(wronglyQuoted).not.toHaveBeenCalled();
+    expect(knowledge).toHaveBeenCalledTimes(1);
+    expect(result.usage?.calls).toBe(2);
   });
 
-  it("una consulta de resultados no puede convertirse en cotización por un plan equivocado", () => {
-    const plan = operationalPlan([u("Quisiera el enlace para mis resultados, adjunto comprobante")], [{ name: "lab_info" }, { name: "quote_studies" }], caps);
-    expect(plan?.toolCalls).toEqual([{ tool: "lab_info", input: { question: "Quisiera el enlace para mis resultados, adjunto comprobante" } }]);
-    expect(plan?.handoff).toBeUndefined();
+  it("permite cotizar si el paciente pide un precio incluso con la palabra resultados", () => {
+    const calls = [{ tool: "quote_studies", input: { studies: ["hemograma"] } }];
+    expect(filterAdministrativeQuoteCalls(calls, [u("¿Cuánto cuesta un hemograma y cuándo están los resultados?")])).toEqual({ calls, suppressed: false });
   });
 
-  it("puerta cerrada: derivación solo con capacidad registrada; nunca dispara cotización", () => {
-    const input = [u("Estoy afuera del laboratorio y la puerta está cerrada")];
-    expect(operationalPlan(input, [{ name: "lab_info" }], { handoff: true, quote: true }))
-      .toMatchObject({ handoff: "OUT_OF_SCOPE", toolCalls: [{ tool: "lab_info" }] });
-    expect(operationalPlan(input, [{ name: "lab_info" }], caps)?.handoff).toBeUndefined();
+  it("preserva la continuidad de la última cotización y los aliases del catálogo", () => {
+    const calls = [{ tool: "quote_studies", input: { studies: ["creatinina en orina"] } }];
+    expect(filterAdministrativeQuoteCalls(calls, [u("Sí, lo mismo de la última cotización")])).toEqual({ calls, suppressed: false });
   });
 
-  it("una solicitud explícita de precio con horarios sigue por el motor de cotización", () => {
-    expect(operationalPlan([u("Cuánto cuesta un hemograma y cuáles son los horarios?")], [{ name: "lab_info" }], caps)).toBeUndefined();
+  it("no altera estudios nombrados en un nuevo pedido", () => {
+    const calls = [{ tool: "quote_studies", input: { studies: ["hemograma"] } }];
+    expect(filterAdministrativeQuoteCalls(calls, [u("Necesito hemograma completo")])).toEqual({ calls, suppressed: false });
   });
 
-  it("descarta TODOS los estudios sugeridos si alguno no apareció en el contexto del paciente", () => {
-    const calls = [{ tool: "quote_studies", input: { studies: ["hemograma", "ácido úrico"] } }];
-    expect(groundedQuoteCalls(calls, [u("Cotiza hemograma completo")], [])).toEqual({ calls: [], rejected: true });
-    expect(groundedQuoteCalls([{ tool: "quote_studies", input: { studies: ["hemograma"] } }], [u("Cotiza hemograma completo")], []))
-      .toMatchObject({ rejected: false });
-  });
-
-  it("permite estudios de mensajes previos del paciente, nunca de otra persona", () => {
+  it("un comprobante para resultados no activa el motor de recetas", () => {
     const calls = [{ tool: "quote_studies", input: { studies: ["glucosa"] } }];
-    expect(groundedQuoteCalls(calls, [u("Sí, cotiza el último")], [{ from: "PATIENT", text: "Glucosa" }]).rejected).toBe(false);
-    expect(groundedQuoteCalls(calls, [u("Sí, cotiza el último")], [{ from: "STAFF", text: "Glucosa" }]).rejected).toBe(true);
-  });
-
-  it("saludos no cambian de flujo y siguen usando planificación actual", () => {
-    expect(operationalPlan([u("Hola buenas tardes")], [{ name: "lab_info" }], caps)).toBeUndefined();
+    expect(filterAdministrativeQuoteCalls(calls, [u("Adjunto comprobante para descargar mis resultados")])).toEqual({ calls: [], suppressed: true });
   });
 });

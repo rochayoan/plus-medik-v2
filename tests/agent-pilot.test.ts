@@ -192,22 +192,6 @@ describe("ante cualquier problema responde el modo esencial (undefined)", () => 
     expect(await price.pilot.produce({ from: PHONE, turns: [turn("w1", "cuanto cuesta un hemograma")] })).toBeUndefined();
   });
 
-  it("un 429 de cuota abre un circuito local prolongado antes de reintentar el proveedor", async () => {
-    let time = NOW;
-    const quota = Object.assign(new Error("no credit"), { name: "RateLimitError", status: 429, code: "insufficient_quota" });
-    const failed = make({ now: () => time }, { failPlan: quota });
-    expect(await failed.pilot.produce({ from: PHONE, turns: [turn("w1", "hola")] })).toBeUndefined();
-    expect(failed.model.plans).toBe(1);
-    time += 2000;
-    expect(await failed.pilot.produce({ from: PHONE, turns: [turn("w2", "hola")] })).toBeUndefined();
-    expect(failed.model.plans).toBe(1);
-    expect(pilotLogs(failed.logs).at(-1)).toMatchObject({ status: "FALLBACK", reason: "BREAKER_OPEN" });
-    expect(failed.logs.some(([event, data]) => event === "agent_pilot_breaker" && data.reason === "QUOTA_OR_BILLING")).toBe(true);
-    time += PILOT_LIMITS.quotaBreakerOpenMs;
-    expect(await failed.pilot.produce({ from: PHONE, turns: [turn("w3", "hola")] })).toBeUndefined();
-    expect(failed.model.plans).toBe(2);
-  });
-
   it("un lote sin texto no se decide (sin llamar al modelo)", async () => {
     const media = make();
     expect(await media.pilot.produce({ from: PHONE, turns: [{ messageId: "i1", kind: "IMAGE" }] })).toBeUndefined();
