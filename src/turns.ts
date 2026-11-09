@@ -1,4 +1,5 @@
 import { repeatCandidate } from "./attention-filter.js";
+import { isResultsOnlyRequest } from "./results-silence.js";
 import { audioFailureProducer, resolveAudioTurns } from "./audio-turns.js";
 import type { AudioFailureCode } from "./audio/types.js";
 import { engineCanDecide, engineReply, instantPhotoReply, photoOutcomeOf, shadowAfter, shadowBefore } from "./batch-engine.js";
@@ -352,10 +353,21 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
     const from = turns[index]!.from;
     perContact.set(from, [...(perContact.get(from) ?? []), index]);
   }
+  // Silencio SOLO si TODOS los turnos del contacto en este lote son texto y
+  // la solicitud completa se refiere únicamente al estado/acceso a resultados.
+  // Se evalúa ANTES de consultar modelos o catálogos y sin reservar envíos.
+  const resultsOnly = new Set([...perContact.entries()].filter(([, indices]) =>
+    indices.every((index) => turns[index]!.kind === "TEXT" && typeof turns[index]!.text === "string") &&
+    isResultsOnlyRequest(indices.map((index) => turns[index]!.text!).join("\n"))
+  ).map(([from]) => from));
+  const silenceProducer: TurnProducer = async (ctx) => {
+    const done = await ctx.persist("close", (audit, runId, lease) => audit.recordIgnored(runId, "NO_REPLY", lease));
+    return done ? { kind: "none" } : { kind: "none" };
+  };
   // Un contacto del PILOTO (solo mensajes de texto o audio) también se atiende como lote, aunque traiga un solo mensaje: así su respuesta sale por la misma ruta de un solo envío por lote.
   const pilot = deps.turns?.agentPilot;
   const isPilotBatch = (from: string, indices: readonly number[]) => Boolean(pilot?.isPilot(from)) && indices.every((index) => turns[index]!.kind === "TEXT" || turns[index]!.kind === "AUDIO");
-  const batched = new Set([...perContact.entries()].filter(([from, indices]) => indices.length > 1 || isPilotBatch(from, indices)).map(([from]) => from));
+  const batched = new Set([...perContact.entries()].filter(([from, indices]) => !resultsOnly.has(from) && (indices.length > 1 || isPilotBatch(from, indices))).map(([from]) => from));
 
   const claims = new Map<number, ClaimedTurn>();
   // Mensajes que no se reclamaron porque una persona tiene la palabra (pausa humana): no se atienden solos, pero la memoria en sombra los registra como pendientes.
@@ -411,8 +423,9 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
       await resolveFor([index]);
       const turn = turns[index]!;
       try {
-        const result = await claimed.run(producerFor(turn, deps)!);
+        const result = await claimed.run(resultsOnly.has(turn.from) ? silenceProducer : producerFor(turn, deps)!);
         reports[index] = { messageId: turn.messageId, result };
+        if (resultsOnly.has(turn.from)) deps.log("results_query_silenced", { kind: "RESULTS_ONLY", sent: false });
         // Un mensaje que no llegó a buen término (falla técnica, respuesta retenida) se puede repetir y debe procesarse.
         if (result === "ignored" || result === "technical_issue") forget(turn);
       } catch {
