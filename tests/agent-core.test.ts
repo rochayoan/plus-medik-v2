@@ -267,7 +267,7 @@ describe("runAgentTurn: tubería corta con un modelo simulado", () => {
   it("un texto con una cifra inventada se repara UNA vez con los códigos; si insiste, REJECTED (responde el modo esencial)", async () => {
     const seen: Seen = { respond: [] };
     const fixed = await runAgentTurn({ model: model({ toolCalls: [hours] }, ["Abrimos hasta las 20:00.", "Atendemos de lunes a viernes de 07:00 a 18:00."], seen), tools }, { utterances: [u("a que hora abren")] });
-    expect(fixed).toMatchObject({ status: "VERIFIED", repairs: 1, firstViolations: [{ code: "UNGROUNDED_FIGURE" }], usage: { calls: 3 } });
+    expect(fixed).toMatchObject({ status: "VERIFIED", repairs: 1, firstViolations: [{ code: "UNGROUNDED_FIGURE" }], usage: { calls: 2 } });
     expect(seen.respond[1]!.feedback).toEqual([{ code: "UNGROUNDED_FIGURE", detail: expect.any(String) }]);
     const stubborn = await runAgentTurn({ model: model({ toolCalls: [hours] }, ["Abrimos hasta las 20:00."]), tools }, { utterances: [u("a que hora abren")] });
     expect(stubborn).toMatchObject({ status: "REJECTED", violations: [{ code: "UNGROUNDED_FIGURE" }], repairs: 1 });

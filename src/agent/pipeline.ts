@@ -1,6 +1,7 @@
 import { stripPaymentTalk } from "../payment-talk.js";
 import { describeProviderError } from "../provider-error.js";
-import type { AgentDecision, AgentModel, Capabilities, HandoffReason, ModelUsage, RecentEntry, Utterance, Violation } from "./contracts.js";
+import type { AgentDecision, AgentModel, Capabilities, HandoffReason, ModelUsage, PlanOutput, RecentEntry, Utterance, Violation } from "./contracts.js";
+import { groundedQuoteCalls, operationalPlan } from "./intent-guard.js";
 import { runToolCalls, type ToolRegistry } from "./tools.js";
 import { verifyReply } from "./verify.js";
 
@@ -64,14 +65,22 @@ export async function runAgentTurn(deps: AgentDeps, input: AgentTurnInput): Prom
     ({ toolRuns: [], facts: [], violations: [], ...decision, usage });
   if (input.utterances.length === 0) return done({ status: "VERIFIED" });
 
-  // 1. El modelo decide qué consultar. Una salida del plan que no se puede leer NO tumba el turno: se responde sin herramientas (y el motivo queda en el registro).
-  let plan;
-  try {
-    plan = await deps.model.plan({ utterances: input.utterances, recent, tools: deps.tools.list(), capabilities });
-    usage = addUsage(usage, plan.usage);
-  } catch (error) {
-    return done({ status: "MODEL_ERROR", modelError: modelFailure(error) });
+  // 1. Preguntas administrativas: consultar el conocimiento aprobado sin gastar
+  // una llamada de planificación. Los demás turnos conservan el planificador.
+  let plan: PlanOutput;
+  const direct = operationalPlan(input.utterances, deps.tools.list(), capabilities);
+  if (direct) {
+    plan = direct;
+  } else {
+    try {
+      plan = await deps.model.plan({ utterances: input.utterances, recent, tools: deps.tools.list(), capabilities });
+      usage = addUsage(usage, plan.usage);
+    } catch (error) {
+      return done({ status: "MODEL_ERROR", modelError: modelFailure(error) });
+    }
   }
+  const grounded = groundedQuoteCalls(plan.toolCalls, input.utterances, recent);
+  plan = { ...plan, toolCalls: grounded.calls, ...(grounded.rejected && !plan.fallback ? { fallback: "quote_study_not_in_patient_context" } : {}) };
   const planInfo = plan.fallback ? { planFallback: plan.fallback } : {};
 
   // SILENCIO ante lo CLARAMENTE ajeno al laboratorio. El modelo propone; el sistema exige además que las reglas tampoco vean nada del laboratorio (tema OTHER en todo lo escrito) y que no haya conversación
