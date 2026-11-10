@@ -1,5 +1,8 @@
 {
   "functions": {
-    "api/kapso/webhook.ts": { "maxDuration": 300 }
+    "api/kapso/webhook.ts": {
+      "maxDuration": 300,
+      "includeFiles": "assets/ubicacion-plusmedik.png"
+    }
   }
 }

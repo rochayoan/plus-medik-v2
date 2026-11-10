@@ -42,13 +42,23 @@ describe("foto de ubicación junto al link de Maps", () => {
     expect(await t.send("59170000000", LINK)).toBeUndefined();
     expect(t.logs.at(-1)?.data.outcome).toBe("NO_PHOTO");
   });
-  it("id caducado: sube de nuevo y reintenta una vez; si vuelve a fallar, texto", async () => {
-    const sendImage = vi.fn().mockRejectedValueOnce(new Error("expired")).mockResolvedValueOnce({ providerMessageId: "wamid.2" });
-    const ok = setup({ sendImage });
-    expect(await ok.send("59170000000", LINK)).toEqual({ providerMessageId: "wamid.2" });
-    expect(ok.ports.upload).toHaveBeenCalledTimes(2);
-    const bad = setup({ sendImage: vi.fn().mockRejectedValue(new Error("down")) });
-    expect(await bad.send("59170000000", LINK)).toBeUndefined();
-    expect(JSON.stringify(bad.logs)).not.toContain("down");
+  it("un fallo de envio es incierto: NO reintenta la imagen ni sustituye con texto", async () => {
+    const sendImage = vi.fn().mockRejectedValue(new Error("timeout del proveedor"));
+    const bad = setup({ sendImage });
+    await expect(bad.send("59170000000", LINK)).rejects.toThrow("LOCATION_PHOTO_SEND_UNCERTAIN");
+    expect(sendImage).toHaveBeenCalledTimes(1);
+    expect(bad.ports.upload).toHaveBeenCalledTimes(1);
+    expect(bad.logs.at(-1)?.data.outcome).toBe("SEND_UNCERTAIN");
+    expect(JSON.stringify(bad.logs)).not.toContain("timeout del proveedor");
+  });
+  it("la subida fallida permite reintento seguro o texto sin intentar enviar", async () => {
+    const t = setup();
+    t.ports.upload.mockRejectedValueOnce(new Error("upload temporal")).mockResolvedValueOnce("media-safe");
+    await expect(t.send("59170000000", LINK)).resolves.toEqual({ providerMessageId: "wamid.img" });
+    expect(t.ports.upload).toHaveBeenCalledTimes(2);
+    const failed = setup();
+    failed.ports.upload.mockRejectedValue(new Error("upload fallido"));
+    expect(await failed.send("59170000000", LINK)).toBeUndefined();
+    expect(failed.ports.sendImage).not.toHaveBeenCalled();
   });
 });

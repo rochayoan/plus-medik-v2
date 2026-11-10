@@ -36,22 +36,30 @@ export function createLocationPhotoSender(ports: LocationPhotoPorts): LocationPh
   return async (to, body) => {
     // Solo una respuesta corta con el link del laboratorio lleva la foto; cualquier otra sale como texto.
     if (!MAPS_LINK.test(body) || body.length > MAX_CAPTION_CHARS) return undefined;
+    let id: string | undefined;
+    // Solo reintentar operaciones previas al envio (leer/subir). Son seguras.
     for (const force of [false, true]) {
       try {
-        const id = await mediaId(force);
-        if (!id) {
-          ports.log("location_photo", { outcome: "NO_PHOTO" });
-          return undefined;
-        }
-        const sent = await ports.sendImage(to, id, body);
-        ports.log("location_photo", { outcome: "SENT" });
-        return sent;
+        id = await mediaId(force);
+        break;
       } catch {
-        // Un id caducado o una subida fallida: un único reintento subiendo de nuevo; luego, texto. Nunca el texto del error.
         media = undefined;
-        ports.log("location_photo", { outcome: "FAILED", retry: !force });
+        ports.log("location_photo", { outcome: "UPLOAD_FAILED", retry: !force });
       }
     }
-    return undefined;
+    if (!id) {
+      ports.log("location_photo", { outcome: "NO_PHOTO" });
+      return undefined;
+    }
+    // Un error al enviar puede significar que WhatsApp ya acepto el mensaje.
+    // Nunca reenviar ni caer a texto en ese caso: propagar al ledger de envio incierto.
+    try {
+      const sent = await ports.sendImage(to, id, body);
+      ports.log("location_photo", { outcome: "SENT" });
+      return sent;
+    } catch {
+      ports.log("location_photo", { outcome: "SEND_UNCERTAIN" });
+      throw new Error("LOCATION_PHOTO_SEND_UNCERTAIN");
+    }
   };
 }
