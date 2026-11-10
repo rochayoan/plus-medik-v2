@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { isResultsOnlyRequest } from "../src/results-silence.js";
+import { isResultsOnlyRequest, routeResultsMessage } from "../src/results-silence.js";
 import { processTurns, type IncomingTurn } from "../src/turns.js";
 import type { QuoteDeps } from "../src/whatsapp-quote.js";
 import type { AuditRepository } from "../src/audit.js";
@@ -20,19 +20,32 @@ describe("resultados: silencio determinista sin IA ni mensajes", () => {
     expect(isResultsOnlyRequest(message)).toBe(true);
   });
   it.each([
-    "Quiero cotizar un hemograma y saber mis resultados",
     "¿Qué significan mis resultados?",
     "¿Mi resultado positivo significa una enfermedad?",
-    "Mis resultados y los horarios de atención",
+    "Necesito mis resultados urgente",
     "Estoy hospitalizado, necesito resultados urgente",
-    "Quiero hablar con una persona por mis resultados",
     "El enlace de mis resultados no funciona",
-    "¿Cuánto cuesta la prueba para mis resultados?",
-    "hemograma listo",
     "¿Cuánto demora el resultado de glucosa?",
-    "¿Cuánto tiempo tardan los resultados?"
-  ])("no silencia una petición adicional, sensible o ambigua: %s", (message) => {
-    expect(isResultsOnlyRequest(message)).toBe(false);
+    "¿Cuánto tiempo tardan los resultados?",
+    "¿A qué hora entregan los resultados?"
+  ])("no responde temas de resultados, incluso con urgencia: %s", (message) => {
+    expect(isResultsOnlyRequest(message)).toBe(true);
+  });
+  it.each([
+    "Quiero cotizar un hemograma y saber mis resultados",
+    "¿Cuánto cuesta la prueba para mis resultados?",
+    "Quiero hablar con una persona por mis resultados",
+    "Tengo fiebre y necesito mis resultados",
+    "hemograma listo"
+  ])("preserva otras solicitudes explícitas: %s", (message) => {
+    expect(routeResultsMessage(message)).toBe("NORMAL");
+  });
+  it.each([
+    "¿Ya están mis resultados y hasta qué hora atienden?",
+    "¿Ya están mis resultados? ¿A qué hora abren?",
+    "Mis resultados y los horarios de atención"
+  ])("solo responde horario general: %s", (message) => {
+    expect(routeResultsMessage(message)).toBe("OFFICE_HOURS");
   });
 
   it("todo un lote de resultados se audita como NO_REPLY; ningún modelo, catálogo ni Kapso se llama", async () => {

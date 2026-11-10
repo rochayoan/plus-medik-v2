@@ -1,18 +1,29 @@
 import { plain } from "./text-normalize.js";
 
-// Regla explícita del negocio: recepción atiende las consultas EXCLUSIVAS sobre
-// disponibilidad, enlace, descarga o entrega de resultados ya realizados.
-// Aplicar a un LOTE COMPLETO (no al mensaje aislado) para no silenciar una
-const SUBJECT = /\b(hemograma|glucosa|analisis|estudio\w*)\b/;
+// Recibos, accesos e interpretación de resultados corresponden al personal.
+// La decisión se toma ANTES de cualquier modelo. Los pedidos de cotización,
+// citas, preparación o atención humana explícita siguen su propio flujo.
 const RESULTS = /\b(resultado\w*|informe\w*)\b/;
-const REQUEST = /\b(ya|esta|estan|estara|estaran|listo\w*|salio|salieron|entrega\w*|entregar\w*|enviar\w*|envia\w*|mandar\w*|manda\w*|pasar\w*|pasen|recibir\w*|recoger\w*|retirar\w*|descarg\w*|obtener\w*|consultar\w*|link\w*|enlace\w*|acceso|clave|contrasena|disponible\w*|cuando|cuanto (tarda|demora))\b/;
-const EXCLUDE = /\b(cotiz\w*|precio\w*|cuesta\w*|costo\w*|presupuesto\w*|pagar\w*|pago\w*|cobran|cuanto (sale|cuesta|cuestan|vale|valen)|ayuno\w*|preparaci\w*|muestra\w*|direccion\w*|ubicacion\w*|horario\w*|atienden|abren|cierra\w*|turno\w*|cita\w*|interpreta\w*|interpretar\w*|significa\w*|significado|explica\w*|valores|normal|alto\w*|bajo\w*|positivo\w*|negativo\w*|diagnostic\w*|tratamiento\w*|medicamento\w*|dolor\w*|fiebre|urgente\w*|urgencia\w*|emergencia|hospital\w*|internad\w*|hospitalizad\w*|doctor\w*|medico\w*|persona|asesor\w*|recepcion|humano|hablar|reclamo\w*|queja\w*|problema\w*|no puedo|no funciona|error\w*|cuanto tiempo|cuanto demora|cuanto tardan|demora\w*|tarda\w*|plazo\w*|tiempo de entrega)\b/;
+const RESULTS_STATUS = /\b(salio|salieron|est[aá]n listos|est[aá] listo|ya esta|ya estan)\b/;
+const STUDY = /\b(hemograma|glucosa|analisis|estudio\w*)\b/;
+const OTHER_INTENT = /\b(cotiz\w*|cotic\w*|precio\w*|cuesta\w*|costo\w*|presupuesto\w*|tarifa\w*|cuanto (sale|cuesta|cuestan|vale|valen)|ayuno\w*|preparacion\w*|muestra\w*|direccion\w*|ubicacion\w*|sucursal\w*|turno\w*|cita\w*|agendar\w*|reserva\w*|pago\w*|pagar\w*|factura\w*|receta\w*|orden medica|persona|asesor\w*|recepcion|humano|hablar con|llamenme|llamame|dolor\w*|fiebre\w*|sangr\w*|medicamento\w*)\b/;
+const OFFICE_HOURS = /\b(horario\w* (de )?(atencion|apertura|la sucursal|laboratorio)|horario\w* del laboratorio|a que hora (abren|abre|atienden|atiende|cierran|cierra)|hasta que hora (abren|atienden|atiende|estan abiertos)|desde que hora (abren|atienden)|cuando (abren|atienden)|a que hora abre el laboratorio)\b/;
+const RESULTS_HOURS = /\b(horario\w* (de )?(entrega|retiro|recogida) (de )?resultado\w*|a que hora (entregan|salen|estan) (los |mis )?resultado\w*)\b/;
 
-// No se hacen inferencias clínicas ni se inspeccionan datos del paciente.
-// Ante mezcla de intenciones o incertidumbre, responder por el flujo vigente.
-export function isResultsOnlyRequest(text: string): boolean {
+export type ResultsRouting = "SILENT" | "OFFICE_HOURS" | "NORMAL";
+
+// Se analiza el lote completo. Solo las consultas inequívocas se redirigen.
+// La frase de horario es canónica: jamás se traslada la parte privada de
+// resultados a las herramientas, al LLM ni a la respuesta.
+export function routeResultsMessage(text: string): ResultsRouting {
   const message = plain(text.slice(0, 4000));
-  if (!message || EXCLUDE.test(message)) return false;
-  if (!RESULTS.test(message) && !(SUBJECT.test(message) && /\b(salio|salieron)\b/.test(message))) return false;
-  return REQUEST.test(message);
+  if (!message) return "NORMAL";
+  const resultsContext = RESULTS.test(message) || (STUDY.test(message) && RESULTS_STATUS.test(message));
+  if (!resultsContext || OTHER_INTENT.test(message)) return "NORMAL";
+  if (OFFICE_HOURS.test(message) && !RESULTS_HOURS.test(message)) return "OFFICE_HOURS";
+  return "SILENT";
+}
+
+export function isResultsOnlyRequest(text: string): boolean {
+  return routeResultsMessage(text) === "SILENT";
 }
