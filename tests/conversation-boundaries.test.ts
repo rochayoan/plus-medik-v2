@@ -22,7 +22,7 @@ describe("G5.3: dónde puede aparecer la conversación con modelo", () => {
   });
 
   it("solo la propia capa, el manejador de texto (como TIPO) y el cableado de Vercel la nombran", () => {
-    const allowed = new Set(["src/conversation-model.ts", "src/conversation-openai.ts", "src/conversation-facts.ts", "src/system-prompt.ts", "src/text-handler.ts", "src/conversation-memory.ts", "src/study-interpreter.ts", "src/agent/verify.ts", "src/agent/openai.ts", "src/agent/shadow.ts", "src/agent/pilot.ts", "src/agent/pipeline.ts", "src/conversation-state-store.ts", "src/crm-attention.ts", "api/kapso/webhook.ts"]);
+    const allowed = new Set(["src/business-answers.ts", "src/conversation-model.ts", "src/conversation-openai.ts", "src/conversation-facts.ts", "src/system-prompt.ts", "src/text-handler.ts", "src/conversation-memory.ts", "src/study-interpreter.ts", "src/agent/verify.ts", "src/agent/openai.ts", "src/agent/shadow.ts", "src/agent/pilot.ts", "src/agent/pipeline.ts", "src/conversation-state-store.ts", "src/crm-attention.ts", "api/kapso/webhook.ts"]);
     for (const path of files) {
       if (allowed.has(rel(path))) continue;
       expect(source(path), rel(path)).not.toMatch(MENTION);
@@ -182,8 +182,8 @@ describe("G5.8: el prompt es código TypeScript (src/system-prompt.ts) y se desp
   it("los datos comerciales confirmados no contienen precios, estudios ni derivaciones", () => {
     const data = source(join(root, "src/system-prompt.ts")).split("export const BUSINESS_DATA")[1]!;
     expect(data).not.toMatch(/\b(bs|bob|usd)\b\s*\d|\$\s*\d/i);
-    expect(data.match(/estado: "POR_COMPLETAR"/g)).toHaveLength(4);
-    expect(data.match(/estado: "CONFIRMADO"/g)).toHaveLength(3);
+    expect(data.match(/estado: "POR_COMPLETAR"/g)).toHaveLength(3);
+    expect(data.match(/estado: "CONFIRMADO"/g)).toHaveLength(4);
     expect(data).toContain("Atención general del laboratorio: las 24 horas, todos los días");
   });
 
