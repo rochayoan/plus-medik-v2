@@ -319,13 +319,13 @@ describe.skipIf(!bin)("respuestas con conocimiento aprobado (extremo a extremo c
 
     it("si la migración 9 NO estuviera aplicada (la función no existe), tampoco se envía lo basado en conocimiento", async () => {
       const k = world();
-      await publish("POLICY", `policy:${k.tag}`, { topic: "RESULTS_DELIVERY", title: `FACTURA ${k.tag} DE PRUEBA`, body: "CUERPO DE PRUEBA" });
+      await publish("POLICY", `policy:${k.tag}`, { topic: "INVOICING", title: `FACTURA ${k.tag} DE PRUEBA`, body: "CUERPO DE PRUEBA" });
       const w = setup();
       // simula 404 de PostgREST para la función: el adaptador devuelve el estado de la base (42883 → 500). Se emula con una red que rechaza esa función.
       const original = w.quote.audit!.recordKnowledgeRefs;
       w.quote.audit!.recordKnowledgeRefs = async () => { throw new Error("function does not exist"); };
       const p = patient();
-      await ask(w, p.phone, "¿cuándo entregan los resultados?");
+      await ask(w, p.phone, "¿emiten factura?");
       expect(w.sends).toEqual([{ to: p.phone, body: DRAFT_TEXTS.handoff_unavailable }]);
       w.quote.audit!.recordKnowledgeRefs = original;
     });
