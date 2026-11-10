@@ -48,6 +48,34 @@ describe("resultados: silencio determinista sin IA ni mensajes", () => {
     expect(routeResultsMessage(message)).toBe("OFFICE_HOURS");
   });
 
+  it("resultados + horario: el manejador recibe SOLO una pregunta de horario general y ningún dato de resultados", async () => {
+    const received: string[] = [];
+    const handler = vi.fn(async (t: IncomingTurn) => {
+      received.push(t.text ?? "");
+      return { body: "Horario general confirmado" };
+    });
+    const audit = {
+      claim: vi.fn(async () => ({ kind: "claimed" as const, runId: "run-h", lease })),
+      renewLease: vi.fn(async () => true),
+      recordIgnored: vi.fn(async () => undefined),
+      recordReply: vi.fn(async () => undefined),
+      reserveSend: vi.fn(async () => "reserved" as const),
+      confirmSend: vi.fn(async () => "proceed" as const)
+    } as unknown as AuditRepository;
+    const sendText = vi.fn(async () => undefined);
+    const deps: QuoteDeps = {
+      audit, sendText, loadCatalog: vi.fn(async () => []),
+      analyze: vi.fn(async () => { throw new Error("No llamar"); }),
+      downloadImage: vi.fn(async () => ({ bytes: new Uint8Array() })),
+      log: vi.fn(),
+      turns: { handlers: { text: handler }, contactKeyFor: () => "a".repeat(64) } as NonNullable<QuoteDeps["turns"]>
+    };
+    await processTurns([turn("¿Ya están mis resultados y hasta qué hora atienden?", "hours-1")], deps);
+    expect(received).toEqual(["¿Cuál es el horario de atención?"]);
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledWith(from, "Horario general confirmado");
+  });
+
   it("todo un lote de resultados se audita como NO_REPLY; ningún modelo, catálogo ni Kapso se llama", async () => {
     const handler = vi.fn(async () => ({ body: "NO DEBE SALIR" }));
     const recordIgnored = vi.fn(async () => undefined);
