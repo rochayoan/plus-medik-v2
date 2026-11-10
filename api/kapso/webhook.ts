@@ -25,6 +25,7 @@ import { createCrmHandoffSink } from "../../src/crm-outbox/handoff-sink.js";
 import { QUOTE_TEXTS } from "../../src/quote-session.js";
 import { appendApprovedQuotePreparations } from "../../src/quote-preparation.js";
 import { appendQuoteTurnaround } from "../../src/quote-turnaround.js";
+import { answerFromBusinessData } from "../../src/business-answers.js";
 import { createLocationPhotoSender, type LocationPhotoSender } from "../../src/location-photo.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -227,7 +228,8 @@ const agentPilot = agentSettings && turnsEnabled && textHandlerEnabled
       handoffEnabled: crmOutbox !== undefined,
       context: {
         loadCatalog: ttlCache(() => loadActiveCatalog(), 60_000),
-        ...(knowledgeOptions ? { answer: (question: string) => answerFromKnowledge(question, knowledgeOptions) } : {}),
+        // Ubicación y horario general: primero los datos comerciales de Git (BUSINESS_DATA); lo demás, el conocimiento aprobado de siempre.
+        answer: async (question: string) => answerFromBusinessData(question) ?? (knowledgeOptions ? answerFromKnowledge(question, knowledgeOptions) : undefined),
         ...(convState ? { reader: createConversationReader({ store: createSupabaseConversationStore() }) } : {}),
         contactKeyFor,
         recent: createRecentProvider({}),
