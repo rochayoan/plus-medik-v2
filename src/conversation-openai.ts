@@ -15,6 +15,9 @@ import { BUSINESS_DATA, SYSTEM_PROMPT } from "./system-prompt.js";
 //   OPENAI_CONVERSATION_REASONING          opcional: low | medium | high | xhigh | max (solo para modelos que lo admiten)
 //   PLUSMEDIK_LLM_BUSINESS_INFO=on         opcional (G5.6): además de conversar, el modelo recibe los datos comerciales CONFIRMADOS y vigentes de src/system-prompt.ts (sucursales,
 //                                          horarios, teléfonos, servicios, pagos, políticas) y puede informarlos. Sin ningún dato confirmado y vigente se queda apagada (y se registra un código)
+//   PLUSMEDIK_LLM_SILENCE_OFF_TOPIC=on     opcional: un mensaje CLARAMENTE ajeno al laboratorio (deportes, política, cadenas, spam...) no se responde. El modelo solo propone; el sistema exige además que no haya nada
+//                                          pendiente con el contacto (solicitud abierta, duda o cotización reciente) y que el texto no mencione nada del laboratorio; ante cualquier duda o falla se responde como siempre. Necesita
+//                                          la categoría OTHER (la de por defecto) y las sesiones de cotización (de ahí sale el estado de la conversación)
 //   PLUSMEDIK_LLM_CATEGORIES               opcional: GREETING,OTHER (por defecto) y/o RECIPE_OR_QUOTE — qué mensajes pueden pasar por el modelo
 //   PLUSMEDIK_LLM_TIMEOUT_MS               opcional, 1000–30000 (por defecto 8000)
 //   PLUSMEDIK_LLM_MAX_OUTPUT_TOKENS        opcional, 50–2000 (por defecto 300; 500 con los datos comerciales)
@@ -90,7 +93,9 @@ export type ConversationConfigError =
   | "PROMPT_INVALID"
   // Solo se registran (no apagan la conversación): secciones de datos con defectos (esas secciones no se envían) o PLUSMEDIK_LLM_BUSINESS_INFO=on sin ninguna sección confirmada y vigente.
   | "PROMPT_DATA_INVALID"
-  | "BUSINESS_DATA_PENDING";
+  | "BUSINESS_DATA_PENDING"
+  // Solo se registra (no apaga la conversación): PLUSMEDIK_LLM_SILENCE_OFF_TOPIC=on sin la categoría OTHER, que es la única a la que se le puede callar.
+  | "SILENCE_NEEDS_OTHER";
 
 function integerIn(value: string | undefined, min: number, max: number): number | undefined | "INVALID" {
   if (value === undefined || value.trim() === "") return undefined;
@@ -150,14 +155,23 @@ export function resolveConversationModel(
     businessInfo = false;
   }
 
+  // Silencio ante lo ajeno al laboratorio (bandera aparte, apagada por defecto). Solo tiene sentido si los mensajes sin camino propio (OTHER) pasan por el modelo.
+  let silenceOffTopic = env.PLUSMEDIK_LLM_SILENCE_OFF_TOPIC?.trim().toLowerCase() === "on";
+  if (silenceOffTopic && !categories.includes("OTHER")) {
+    log("llm_conversation_config_invalid", { error: "SILENCE_NEEDS_OTHER" satisfies ConversationConfigError });
+    silenceOffTopic = false;
+  }
+
   return createConversationModel({
     client: options.client ?? createOpenAiConversationClient({ apiKey: apiKey!, model, ...(effortRaw ? { reasoningEffort: effortRaw as Effort } : {}) }),
-    prompt: source.prompt,
-    promptId: `${source.sha256.slice(0, 12)}${businessInfo ? "+datos" : ""}`,
+    // Con el silencio apagado el modelo ve EXACTAMENTE el prompt de antes: la descripción de OFF_TOPIC solo se incluye cuando el silencio está encendido.
+    prompt: silenceOffTopic ? source.prompt : source.prompt.replace(/^- OFF_TOPIC:.*\r?\n/m, ""),
+    promptId: `${source.sha256.slice(0, 12)}${businessInfo ? "+datos" : ""}${silenceOffTopic ? "+silencio" : ""}`,
     model,
     categories,
     sections,
     businessInfo,
+    silenceOffTopic,
     ...(options.now ? { now: options.now } : {}),
     ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),

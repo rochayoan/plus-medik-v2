@@ -267,7 +267,8 @@ describe("resolveConversationModel: apagada por defecto y sin configuración inc
     const { client, calls } = fakeClient(answer("GREETING", "¡Hola!"));
     const { model } = resolve({ ...complete, OPENAI_API_KEY: undefined }, true, client);
     expect(await model!.reply({ text: "hola", category: "GREETING" })).toMatchObject({ status: "REPLY" });
-    expect(calls[0]!.instructions).toBe(CONVERSATION_PROMPT.split("{{DATOS}}").join(NO_DATA_BLOCK));
+    // con el silencio apagado (por defecto) el prompt es el de siempre: la descripción de OFF_TOPIC solo se incluye si el silencio está encendido
+    expect(calls[0]!.instructions).toBe(CONVERSATION_PROMPT.replace(/^- OFF_TOPIC:.*\r?\n/m, "").split("{{DATOS}}").join(NO_DATA_BLOCK));
   });
 });
 
@@ -278,8 +279,8 @@ describe("prompt de conversación: SYSTEM_PROMPT de src/system-prompt.ts", () =>
     expect(CONVERSATION_PROMPT).toBe(SYSTEM_PROMPT);
   });
 
-  it("nombra las diez intenciones del esquema y las reglas de oro, trae UN marcador de datos y ningún dato del laboratorio", () => {
-    expect(MODEL_INTENTS).toHaveLength(10);
+  it("nombra las once intenciones del esquema y las reglas de oro, trae UN marcador de datos y ningún dato del laboratorio", () => {
+    expect(MODEL_INTENTS).toHaveLength(11);
     for (const intent of MODEL_INTENTS) expect(CONVERSATION_PROMPT, intent).toContain(intent);
     expect(CONVERSATION_PROMPT.split("{{DATOS}}")).toHaveLength(2);
     expect(CONVERSATION_PROMPT).toMatch(/Orientación médica: NUNCA/);
@@ -533,8 +534,17 @@ describe("resolveConversationModel: bandera de datos comerciales", () => {
     expect(logs).toEqual([]);
   });
 
-  it("con la bandera pero SIN ningún dato confirmado y vigente (el archivo de hoy): la conversación sigue sin datos y se registra el código", () => {
+  it("con la bandera y el horario general confirmado en el archivo real: se habilitan los datos comerciales", () => {
     const { model, logs } = resolve({ ...base, PLUSMEDIK_LLM_BUSINESS_INFO: "on" });
+    expect(model!.businessInfo).toBe(true);
+    expect(model!.categories.has("INFO_REQUEST")).toBe(true);
+    expect(logs).toEqual([]);
+  });
+
+  it("con la bandera pero SIN ningún dato confirmado: la conversación sigue sin datos y registra el código", () => {
+    const { model, logs } = resolve({ ...base, PLUSMEDIK_LLM_BUSINESS_INFO: "on" }, [
+      { id: "HORARIOS", title: "Horarios de atención", status: "PENDING", source: null, validUntil: null, text: "" }
+    ]);
     expect(model!.businessInfo).toBe(false);
     expect(logs).toEqual([["llm_conversation_config_invalid", { error: "BUSINESS_DATA_PENDING" }]]);
   });
@@ -594,5 +604,14 @@ describe("manejador de texto con datos comerciales", () => {
     expect((await handler(turn("me duele la cabeza")))!.body).toBe(DRAFT_TEXTS.medical_unavailable);
     expect((await handler(turn("quiero hablar con una persona")))!.body).toBe(DRAFT_TEXTS.handoff_unavailable);
     expect(reply).not.toHaveBeenCalled();
+  });
+});
+
+describe("pruebas reales del piloto: «¿En qué puedo ayudarte hoy?»", () => {
+  it("el saludo con «hoy» no se rechaza como promesa de tiempo", () => {
+    for (const reply of ["¡Hola! 👋 ¿En qué puedo ayudarte hoy?", "¡Hola! 👋 ¿En qué puedo ayudarte hoy en PlusMedik?"]) expect(guardModelReply(reply), reply).toMatchObject({ ok: true });
+  });
+  it("pero «hoy» como promesa sigue rechazado", () => {
+    for (const reply of ["Te respondemos hoy mismo.", "Hoy te atienden sin falta.", "Estará listo hoy."]) expect(guardModelReply(reply), reply).toMatchObject({ ok: false });
   });
 });

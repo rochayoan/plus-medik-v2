@@ -270,6 +270,13 @@ function setup(options: SetupOptions = {}) {
   return { deps, audit, sends, logs, attention };
 }
 const text = (body: string, id = "t1", from = "59170000000"): IncomingTurn => ({ messageId: id, from, kind: "TEXT", text: body });
+// Mensajes que llegan en entregas SEPARADAS del webhook (uno por llamada). Varios mensajes del mismo contacto dentro de UNA llamada son un lote de Kapso y se atienden como una sola solicitud
+// con una sola respuesta (ver tests/kapso-batch.test.ts).
+async function oneByOne(turns: IncomingTurn[], deps: Parameters<typeof processTurns>[1]): Promise<Awaited<ReturnType<typeof processTurns>>> {
+  const reports: Awaited<ReturnType<typeof processTurns>> = [];
+  for (const turn of turns) reports.push(...(await processTurns([turn], deps)));
+  return reports;
+}
 
 describe("el filtro en el manejador de texto: lo irrelevante no se responde", () => {
   it.each(["Hola", "buenas tardes", "gracias", "Muchas gracias!", "ok gracias", "👍", "jajaja", "perfecto, gracias por la atención"])("«%s»: el turno se cierra SIN respuesta, auditado, sin consultas ni modelo", async (body) => {
@@ -286,7 +293,7 @@ describe("el filtro en el manejador de texto: lo irrelevante no se responde", ()
 
   it("CONTROL: con el filtro apagado esos mismos mensajes se responden como antes (ningún cambio)", async () => {
     const w = setup({ attention: false, sessions: false });
-    await processTurns([text("hola", "a"), text("gracias", "b")], w.deps);
+    await oneByOne([text("hola", "a"), text("gracias", "b")], w.deps);
     expect(w.sends).toEqual([DRAFT_TEXTS.greeting, DRAFT_TEXTS.fallback]);
     expect(w.logs.some(([event]) => event === "attention_filter")).toBe(false);
   });
@@ -327,7 +334,7 @@ describe("repeticiones: se descartan ANTES de reclamar el turno", () => {
 
   it("otro contacto con el mismo texto sí se atiende; y un mensaje distinto también", async () => {
     const w = setup({ sessions: false });
-    const reports = await processTurns([text("quiero cotizar mis estudios", "a", "59170000001"), text("quiero cotizar mis estudios", "b", "59170000002"), text("quiero cotizar otros estudios", "c", "59170000001")], w.deps);
+    const reports = await oneByOne([text("quiero cotizar mis estudios", "a", "59170000001"), text("quiero cotizar mis estudios", "b", "59170000002"), text("quiero cotizar otros estudios", "c", "59170000001")], w.deps);
     expect(reports.map((report) => report.result)).toEqual(["conversation", "conversation", "conversation"]);
   });
 
@@ -348,13 +355,13 @@ describe("repeticiones: se descartan ANTES de reclamar el turno", () => {
 
   it("lo médico repetido NO se descarta", async () => {
     const w = setup({ sessions: false });
-    const reports = await processTurns([text("me duele mucho el pecho", "a"), text("me duele mucho el pecho", "b")], w.deps);
+    const reports = await oneByOne([text("me duele mucho el pecho", "a"), text("me duele mucho el pecho", "b")], w.deps);
     expect(reports.map((report) => report.result)).toEqual(["conversation", "conversation"]);
   });
 
   it("sin el filtro no se descarta ninguna repetición", async () => {
     const w = setup({ attention: false, sessions: false });
-    const reports = await processTurns([text("quiero cotizar mis estudios", "a"), text("quiero cotizar mis estudios", "b")], w.deps);
+    const reports = await oneByOne([text("quiero cotizar mis estudios", "a"), text("quiero cotizar mis estudios", "b")], w.deps);
     expect(reports.map((report) => report.result)).toEqual(["conversation", "conversation"]);
   });
 });
@@ -463,7 +470,7 @@ describe("varios mensajes seguidos: una sola confirmación con todo, sin perder 
   it("sin espera configurada (0) no se agrupa: el comportamiento de antes", async () => {
     const audit = fakeAudit({ items: [itemOf(1, { studyIds: [uuid(1)] }), itemOf(2, { studyIds: [uuid(2)] })], position: 2 });
     const w = setup({ audit, settleMs: 0 });
-    await processTurns([text("hemograma", "a"), text("glucosa", "b")], w.deps);
+    await oneByOne([text("hemograma", "a"), text("glucosa", "b")], w.deps);
     expect(w.sends).toHaveLength(2);
   });
 });
@@ -627,7 +634,10 @@ describe("G6.1: el silencio nunca cierra, cancela, bloquea ni borra; solo una co
     const audit = open();
     const w = setup({ audit });
     await processTurns([text("gracias, me duele mucho el pecho", "a"), text("ok gracias, quiero hablar con una persona", "b")], w.deps);
-    expect(w.sends).toEqual([DRAFT_TEXTS.medical_unavailable, DRAFT_TEXTS.handoff_unavailable]);
+    // mismo lote = una sola respuesta, pero NINGUNA de las dos excepciones de seguridad se pierde
+    expect(w.sends).toEqual([`${DRAFT_TEXTS.medical_unavailable}
+
+${DRAFT_TEXTS.handoff_unavailable}`]);
     expect(audit.quoteClose).not.toHaveBeenCalled();
     expect(audit.quoteBegin).not.toHaveBeenCalled();
   });

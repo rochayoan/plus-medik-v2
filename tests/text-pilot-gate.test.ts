@@ -35,6 +35,37 @@ describe("puerta de piloto de texto sin afectar fotos de otros pacientes", () =>
       enabled: true, ready: false, reason: "PILOT_SCOPE_MISSING_OR_MISMATCH"
     });
   });
+  it("autoriza dos pilotos adicionales sin modificar el teléfono CRM", () => {
+    expect(resolveTextPilotGate({
+      ...scoped,
+      PLUSMEDIK_TEXT_PILOT_EXTRA_PHONES: "+59170000001,59170000002",
+      ALLOWED_PHONES: "59170000000,59170000002,59170000001,59170000003"
+    })).toEqual({
+      enabled: true, ready: true, pilotPhone: pilot,
+      extraPhones: ["59170000001", "59170000002"]
+    });
+  });
+  it("permite un adicional y mantiene retrocompatibilidad al no definirlos", () => {
+    expect(resolveTextPilotGate({ ...scoped, PLUSMEDIK_TEXT_PILOT_EXTRA_PHONES: "59170000001" })).toEqual({
+      enabled: true, ready: true, pilotPhone: pilot, extraPhones: ["59170000001"]
+    });
+    expect(resolveTextPilotGate(scoped)).toEqual(ready);
+    expect(resolveTextPilotGate({ ...scoped, PLUSMEDIK_TEXT_PILOT_EXTRA_PHONES: "" })).toEqual(ready);
+  });
+  it.each([
+    ["extra excluido por whitelist", "59170000001", "59170000000"],
+    ["lista con más de dos extras", "59170000001,59170000002,59170000003", "59170000000,59170000001,59170000002,59170000003"],
+    ["extra repetido", "59170000001,59170000001", "59170000000,59170000001"],
+    ["extra idéntico al CRM", "59170000000", "59170000000"],
+    ["extra incompleto", "591", "59170000000"],
+    ["extra vacío", "59170000001,", "59170000000,59170000001"],
+  ])("falla cerrado: %s", (_label, extras, allowed) => {
+    expect(resolveTextPilotGate({
+      ...scoped, PLUSMEDIK_TEXT_PILOT_EXTRA_PHONES: extras, ALLOWED_PHONES: allowed
+    })).toEqual({
+      enabled: true, ready: false, reason: "PILOT_SCOPE_MISSING_OR_MISMATCH"
+    });
+  });
   it("un flag inválido no desactiva silenciosamente el aislamiento", () => {
     expect(resolveTextPilotGate({ ...scoped, PLUSMEDIK_TEXT_PILOT_GUARD: "onn" })).toEqual({
       enabled: true, ready: false, reason: "INVALID_FLAG"

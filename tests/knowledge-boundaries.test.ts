@@ -67,7 +67,7 @@ describe("G3.1A: dónde puede aparecer el conocimiento y que sigue apagado", () 
   it("solo el manejador de texto, la capa de respuestas, el productor de turnos (rastro), la auditoría (rastro) y el cableado de Vercel lo mencionan; el resto del webhook y del motor no", () => {
     // G4.2: el apéndice de cotización lee conocimiento clínico aprobado, pero no conoce su administración.
     // API web de médicos: lee solo la preparación aprobada y vigente (misma lectura que el apéndice de WhatsApp); no conoce la administración.
-    const allowed = new Set(["src/text-handler.ts", "src/knowledge-answers.ts", "src/quote-preparation.ts", "src/turns.ts", "src/audit.ts", "api/kapso/webhook.ts", "src/web-quote.ts", "src/web-quote-runtime.ts"]);
+    const allowed = new Set(["src/text-handler.ts", "src/knowledge-answers.ts", "src/quote-preparation.ts", "src/quote-study-details.ts", "src/turns.ts", "src/audit.ts", "api/kapso/webhook.ts", "src/web-quote.ts", "src/web-quote-runtime.ts", "src/agent/tools.ts", "src/agent/shadow.ts"]);
     for (const path of [...outsideKnowledge, ...apiFiles]) {
       // G4.1: el módulo de datos por estudio reutiliza tipos y reglas del conocimiento (y lo dice); su propia frontera se prueba en study-facts-boundaries.test.ts
       if (allowed.has(rel(path)) || rel(path).startsWith("src/study-facts/")) continue;
@@ -84,7 +84,9 @@ describe("G3.1A: dónde puede aparecer el conocimiento y que sigue apagado", () 
   it("el cableado de Vercel solo construye el servicio de conocimiento si PLUSMEDIK_KNOWLEDGE_ANSWERS vale 'on' (y si no, `knowledge` queda indefinido); el servicio se crea de forma perezosa", () => {
     const api = source(join(root, "api/kapso/webhook.ts"));
     expect(api).toMatch(/const knowledgeAnswersEnabled = on\("PLUSMEDIK_KNOWLEDGE_ANSWERS"\);/);
-    expect(api).toMatch(/knowledge: knowledgeAnswersEnabled\s*\?[\s\S]*lazyKnowledge\([\s\S]*:\s*undefined/);
+    // El servicio se arma en `knowledgeOptions` (lo comparten el manejador de texto y, en sombra, el núcleo conversacional); sin la bandera queda indefinido.
+    expect(api).toMatch(/const knowledgeOptions = knowledgeAnswersEnabled\s*\?[\s\S]*lazyKnowledge\([\s\S]*:\s*undefined;/);
+    expect(api).toContain("knowledge: knowledgeOptions");
     expect(api).toContain('on("PLUSMEDIK_TEXT_HANDLER")');
   });
 

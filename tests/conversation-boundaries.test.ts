@@ -22,21 +22,28 @@ describe("G5.3: dónde puede aparecer la conversación con modelo", () => {
   });
 
   it("solo la propia capa, el manejador de texto (como TIPO) y el cableado de Vercel la nombran", () => {
-    const allowed = new Set(["src/conversation-model.ts", "src/conversation-openai.ts", "src/conversation-facts.ts", "src/system-prompt.ts", "src/text-handler.ts", "api/kapso/webhook.ts"]);
+    const allowed = new Set(["src/conversation-model.ts", "src/conversation-openai.ts", "src/conversation-facts.ts", "src/system-prompt.ts", "src/text-handler.ts", "src/conversation-memory.ts", "src/study-interpreter.ts", "src/agent/verify.ts", "src/agent/openai.ts", "src/agent/shadow.ts", "src/agent/pilot.ts", "src/agent/pipeline.ts", "src/conversation-state-store.ts", "src/crm-attention.ts", "api/kapso/webhook.ts"]);
     for (const path of files) {
       if (allowed.has(rel(path))) continue;
       expect(source(path), rel(path)).not.toMatch(MENTION);
     }
     // el manejador de texto solo importa TIPOS de la capa: no depende de ella ni del proveedor en tiempo de ejecución
-    expect(source(join(root, "src/text-handler.ts"))).toMatch(/^import type \{ ConversationModel, ConversationOutcome, ModelCategory \} from "\.\/conversation-model\.js";$/m);
+    expect(source(join(root, "src/text-handler.ts"))).toMatch(/^import type \{ ConversationModel, ConversationOutcome, HistoryEntry, ModelCategory \} from "\.\/conversation-model\.js";$/m);
     expect(importsOf(join(root, "src/text-handler.ts")).filter((imported) => /conversation|openai/i.test(imported))).toEqual(["./conversation-model.js"]);
   });
 });
 
 describe("G5.3: el proveedor y la red", () => {
   it("la lógica (conversation-model.ts) no importa ningún proveedor ni toca la red, el entorno ni el motor de recetas", () => {
-    expect(importsOf(join(root, "src/conversation-model.ts")).sort()).toEqual(["./conversation-facts.js", "./text-normalize.js", "zod"]);
+    // ./provider-error.js (G7) es PURO —sin imports, red, entorno ni registro—: solo convierte un error en códigos de lista blanca para el log; ver la prueba siguiente.
+    expect(importsOf(join(root, "src/conversation-model.ts")).sort()).toEqual(["./conversation-facts.js", "./provider-error.js", "./text-normalize.js", "zod"]);
     expect(code(join(root, "src/conversation-model.ts"))).not.toMatch(/\bfetch\s*\(|process\.env|from "openai"|new OpenAI|responses\.create|openrouter|anthropic|supabase|console\./i);
+  });
+
+  it("provider-error.ts (causa de un fallo, solo códigos) es puro: sin imports, red, entorno, base de datos ni registro, y nunca lee el mensaje del error", () => {
+    const file = join(root, "src/provider-error.ts");
+    expect(importsOf(file)).toEqual([]);
+    expect(code(file)).not.toMatch(/\bfetch\s*\(|process\.env|console\.|supabase|from "openai"|\.message\b/i);
   });
 
   it("solo conversation-openai.ts habla con OpenAI en esta capa: respeta el modo offline, no guarda el texto en el proveedor, sin reintentos ocultos y sin la caché de disco", () => {
@@ -68,16 +75,15 @@ describe("G5.3: privacidad y registro", () => {
     expect(model).toMatch(/sanitizeForModel\(text, maxInputChars\)/);
     expect(model).not.toMatch(/turn\.from|contactPhone|\.phone/);
     // G6.0: además del mensaje, solo el ESTADO de la conversación (cantidades), y únicamente con la atención selectiva
-    expect(code(join(root, "src/text-handler.ts"))).toMatch(/conversation\.reply\(\{ text: turn\.text \?\? "", category, \.\.\.\(context \? \{ context \} : \{\}\) \}\)/);
-    expect(code(join(root, "src/text-handler.ts"))).toMatch(/const context = options\.attention \? await turnContext\?\.memory\?\.\(\)\.catch\(\(\) => undefined\) : undefined;/);
+    expect(code(join(root, "src/text-handler.ts"))).toMatch(/conversation\.reply\(\{ text: turn\.text \?\? "", category, \.\.\.\(context \? \{ context \} : \{\}\), \.\.\.\(history && history\.length > 0 \? \{ history \} : \{\}\) \}\)/);
+    expect(code(join(root, "src/text-handler.ts"))).toMatch(/const context = options\.attention \|\| silences \? await turnContext\?\.memory\?\.\(\{ wait: silences \}\)\.catch\(\(\) => undefined\) : undefined;/);
   });
 });
 
 describe("G5.3: apagada por defecto y cableado", () => {
-  it("el cableado exige turnos Y manejador de texto, la guarda de respuestas válida, y no cambia las banderas del motor de recetas", () => {
+  it("el cableado YA NO conecta esta capa (la sustituye el agente conversacional único de src/agent) y no cambia las banderas del motor de recetas", () => {
     const api = source(join(root, "api/kapso/webhook.ts"));
-    expect(api).toMatch(/const conversationModel = turnsEnabled && textHandlerEnabled \? resolveConversationModel\(process\.env, logLine, \{ responseGuardActive: replyGuard\.enabled && !\("error" in replyGuard\) \}\) : undefined;/);
-    expect(api).toMatch(/conversation: conversationModel,/);
+    expect(api).not.toMatch(/resolveConversationModel|resolveConversationMemory|conversation: conversationModel/);
     expect(api).toContain('const ENGINE_FLAGS = { semanticPrimary: true, semanticAuto: true, partialAuto: true, handwrittenAuto: "on" } as const;');
   });
 
@@ -91,11 +97,12 @@ describe("G5.3: apagada por defecto y cableado", () => {
     expect(config).toMatch(/log\("llm_conversation_config_invalid", \{ error \}\);/);
   });
 
-  it(".env.example define las variables nuevas y todas están en blanco (apagadas)", () => {
+  it(".env.example: la bandera y el modelo del agente único siguen en blanco (apagados); las variables de esta capa duplicada ya no existen", () => {
     const example = source(join(root, ".env.example"));
-    for (const name of ["PLUSMEDIK_LLM_CONVERSATION", "PLUSMEDIK_LLM_BUSINESS_INFO", "OPENAI_CONVERSATION_MODEL", "OPENAI_CONVERSATION_REASONING", "PLUSMEDIK_LLM_CATEGORIES", "PLUSMEDIK_LLM_TIMEOUT_MS", "PLUSMEDIK_LLM_MAX_OUTPUT_TOKENS", "PLUSMEDIK_LLM_MAX_INPUT_CHARS"]) {
+    for (const name of ["PLUSMEDIK_LLM_CONVERSATION", "OPENAI_CONVERSATION_MODEL", "OPENAI_CONVERSATION_REASONING"]) {
       expect([...example.matchAll(new RegExp(`^${name}=(.*)$`, "gm"))].map((match) => match[1]!.trim()), name).toEqual([""]);
     }
+    for (const name of ["PLUSMEDIK_LLM_BUSINESS_INFO", "PLUSMEDIK_LLM_SILENCE_OFF_TOPIC", "PLUSMEDIK_LLM_CATEGORIES", "PLUSMEDIK_LLM_TIMEOUT_MS", "PLUSMEDIK_LLM_MAX_OUTPUT_TOKENS", "PLUSMEDIK_LLM_MAX_INPUT_CHARS"]) expect(example, name).not.toMatch(new RegExp(`^${name}=`, "m"));
   });
 
   it("el prompt es una constante de código (src/system-prompt.ts): no existe módulo generado, archivo Markdown ni paso de generación", () => {
@@ -172,11 +179,12 @@ describe("G5.8: el prompt es código TypeScript (src/system-prompt.ts) y se desp
     expect(model).not.toMatch(/system-prompt|SYSTEM_PROMPT|BUSINESS_DATA/);
   });
 
-  it("el prompt no hace de fuente de estudios, precios ni derivaciones: los datos pendientes quedan marcados POR COMPLETAR y no hay importes ni enlaces", () => {
+  it("los datos comerciales confirmados no contienen precios, estudios ni derivaciones", () => {
     const data = source(join(root, "src/system-prompt.ts")).split("export const BUSINESS_DATA")[1]!;
-    expect(data).not.toMatch(/https?:\/\/|\b(bs|bob|usd)\b\s*\d|\$\s*\d/i);
-    expect(data.match(/estado: "POR_COMPLETAR"/g)).toHaveLength(7);
-    expect(data).not.toMatch(/estado: "CONFIRMADO"/);
+    expect(data).not.toMatch(/\b(bs|bob|usd)\b\s*\d|\$\s*\d/i);
+    expect(data.match(/estado: "POR_COMPLETAR"/g)).toHaveLength(4);
+    expect(data.match(/estado: "CONFIRMADO"/g)).toHaveLength(3);
+    expect(data).toContain("Atención general del laboratorio: las 24 horas, todos los días");
   });
 
   it("no hay .dockerignore, .slugignore ni .gitignore del proyecto que excluyan src/system-prompt.ts", () => {

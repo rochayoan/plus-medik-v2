@@ -1,4 +1,4 @@
-import type { ConversationModel, ConversationOutcome, ModelCategory } from "./conversation-model.js";
+import type { ConversationModel, ConversationOutcome, HistoryEntry, ModelCategory } from "./conversation-model.js";
 import { decideAttention } from "./attention-filter.js";
 import { ANSWER_TEXTS, answerFromKnowledge, detectTopics, type AnswerOptions } from "./knowledge-answers.js";
 import { looksAutomated, looksLikeOwnReply, replySignature } from "./reply-guard.js";
@@ -71,11 +71,11 @@ export interface ConversationTexts {
 // BORRADORES pendientes de aprobación del laboratorio. Sin cifras, moneda, plazos ni horarios; solo uno promete a una persona (handoff_confirmed) y solo se usa con
 // la derivación persistida.
 export const DRAFT_TEXTS: ConversationTexts = {
-  greeting: "Hola 👋 Soy el asistente de PlusMedik. Para cotizar tus estudios, envíame una foto clara y completa de tu receta.",
-  send_recipe: "Para cotizar tus estudios, envíame una foto clara y completa de tu receta.",
-  fallback: "Recibimos tu mensaje. Por este medio puedo cotizar recetas: envíame una foto clara y completa de tu receta.",
+  greeting: "¡Hola! 👋 Soy la recepcionista virtual de PlusMedik. ¿En qué puedo ayudarte? Puedes escribir tus estudios o enviarme una foto de tu receta para cotizar.",
+  send_recipe: "Con gusto te ayudo a cotizar. Puedes escribir los nombres de tus estudios o enviar una foto clara y completa de tu receta.",
+  fallback: "Con gusto te oriento. ¿Sobre qué te gustaría saber más? También puedes escribir tus estudios o enviar una foto de tu receta para cotizar.",
   handoff_confirmed: "Recibimos tu solicitud. Una persona del equipo la revisará y te escribirá por este chat.",
-  handoff_unavailable: "Recibimos tu mensaje, pero por ahora no puedo derivarlo a una persona desde este chat. Si quieres una cotización, envíame una foto clara y completa de tu receta.",
+  handoff_unavailable: "Recibimos tu consulta. Por ahora no puedo conectarte directamente con recepción desde este chat ni confirmar información que no tenga verificada. Si estás en el laboratorio, consulta con el personal de atención.",
   medical_unavailable: "Recibimos tu mensaje. No puedo darte orientación médica por este chat. Si es una urgencia, comunícate con los servicios de emergencia de tu localidad.",
   medical_handoff_confirmed: "Recibimos tu mensaje. No puedo darte orientación médica por este chat. Si es una urgencia, comunícate con los servicios de emergencia de tu localidad. Una persona del equipo revisará tu mensaje y te escribirá por este chat."
 };
@@ -140,6 +140,9 @@ export interface TextHandlerOptions {
   // clasificar, y opcionalmente pedidos de cotización sin foto): lo médico, pedir a una persona y la información del laboratorio NUNCA llegan al modelo, y si el modelo mismo los reconoce, su texto
   // se descarta y el mensaje sigue por el camino determinista. Cualquier falla del modelo responde con el texto fijo.
   conversation?: ConversationModel;
+  // Historial reciente (solo contactos autorizados explícitamente; ausente = el modelo solo ve el mensaje actual). Se consulta ÚNICAMENTE justo antes de llamar al modelo, es decir, nunca para
+  // lo médico, pedir a una persona, la información aprobada ni las cotizaciones. Cualquier falla equivale a «sin historial».
+  history?: (turn: IncomingTurn) => Promise<readonly HistoryEntry[]>;
   log(event: string, data: Record<string, unknown>): void;
 }
 
@@ -158,9 +161,12 @@ export function createTextHandler(options: TextHandlerOptions): (turn: IncomingT
     if (!conversation) return undefined;
     try {
       // G6.0: el único contexto que recibe el modelo es el ESTADO de la conversación (cuántos estudios lleva la solicitud abierta, si hay una duda, si hubo una cotización reciente), calculado por el sistema.
-      // Nunca el texto de mensajes anteriores. Si no se puede calcular, el modelo recibe solo el mensaje.
-      const context = options.attention ? await turnContext?.memory?.().catch(() => undefined) : undefined;
-      return await conversation.reply({ text: turn.text ?? "", category, ...(context ? { context } : {}) });
+      // Nunca el texto de mensajes anteriores. Si no se puede calcular, el modelo recibe solo el mensaje. Con el silencio ante lo ajeno el estado también se necesita (y se espera a que terminen los
+      // mensajes anteriores del lote): sin él no se puede saber que no hay nada pendiente, y entonces se responde.
+      const silences = conversation.silencesOffTopic === true && category === "OTHER";
+      const context = options.attention || silences ? await turnContext?.memory?.({ wait: silences }).catch(() => undefined) : undefined;
+      const history = options.history ? await options.history(turn).catch(() => undefined) : undefined;
+      return await conversation.reply({ text: turn.text ?? "", category, ...(context ? { context } : {}), ...(history && history.length > 0 ? { history } : {}) });
     } catch {
       // Nunca el texto del error ni del mensaje.
       options.log("llm_conversation", { outcome: "FALLBACK", reason: "ERROR", category });
@@ -172,7 +178,7 @@ export function createTextHandler(options: TextHandlerOptions): (turn: IncomingT
     outcome.intent === "BUSINESS_INFO" ? sign({ body: outcome.body, stale: "NONE" }, category, ["BUSINESS"]) : sign({ body: outcome.body, stale: "NEWER_TURN" }, category);
 
   // El camino de G2.1 (sin conocimiento): derivación bloqueada o textos fijos. Es también lo que se responde cuando no hay conocimiento disponible.
-  async function baseReply(turn: IncomingTurn, category: TextCategory, extra: Record<string, unknown> = {}, context?: TurnHandlerContext, allowModel = true): Promise<TurnReply> {
+  async function baseReply(turn: IncomingTurn, category: TextCategory, extra: Record<string, unknown> = {}, context?: TurnHandlerContext, allowModel = true): Promise<TurnReply | undefined> {
     const reason = HANDOFF_REASON[category];
     const log = (state: "none" | "blocked" | "recorded" | "failed") => options.log("text_turn", { category, handoff: state, ...extra });
 
@@ -200,6 +206,11 @@ export function createTextHandler(options: TextHandlerOptions): (turn: IncomingT
     if (allowModel && options.conversation && (category === "GREETING" || category === "OTHER" || category === "RECIPE_OR_QUOTE") && isPlainTalk(turn.text ?? "")) {
       const outcome = await askModel(turn, category, context);
       if (outcome?.status === "REROUTE") return route(turn, outcome.category, context, false);
+      // Mensaje claramente ajeno al laboratorio y sin nada pendiente (el modelo propone y el sistema lo confirmó): sin respuesta. El turno queda cerrado y auditado como sin respuesta. Solo códigos.
+      if (outcome?.status === "SILENT") {
+        options.log("text_turn", { category, handoff: "none", model: "silent", ...extra });
+        return undefined;
+      }
       if (outcome?.status === "REPLY") {
         log("none");
         return fromModel(outcome, category);
@@ -213,7 +224,7 @@ export function createTextHandler(options: TextHandlerOptions): (turn: IncomingT
 
   // Camino de un mensaje ya clasificado: conocimiento aprobado (si lo hay) y, si no, la respuesta base. `allowModel` es falso al retomar un camino por indicación del modelo (así el modelo
   // se consulta una sola vez por mensaje).
-  async function route(turn: IncomingTurn, category: TextCategory, context: TurnHandlerContext | undefined, allowModel: boolean): Promise<TurnReply> {
+  async function route(turn: IncomingTurn, category: TextCategory, context: TurnHandlerContext | undefined, allowModel: boolean): Promise<TurnReply | undefined> {
     const text = turn.text ?? "";
     // G5.6: preguntas COMERCIALES (sucursales, direcciones, horarios, teléfonos, servicios, métodos de pago, políticas) con los datos confirmados del archivo principal, solo si esa bandera está
     // encendida. Precios, estudios, preparación, muestra y tiempos de entrega NUNCA pasan por aquí: siguen por el catálogo / conocimiento aprobado / derivación al CRM. Si el modelo no puede

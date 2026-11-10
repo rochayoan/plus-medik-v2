@@ -22,7 +22,7 @@ describe("G5.0: dónde puede aparecer la derivación al CRM", () => {
   });
 
   it("solo la cola, los turnos, el manejador de texto, las sesiones y el cableado de Vercel la nombran", () => {
-    const allowed = new Set(["src/turns.ts", "src/guarded-turn.ts", "src/text-handler.ts", "src/quote-session.ts", "src/quote-session-turns.ts", "api/kapso/webhook.ts", "api/outbox/drain.ts"]);
+    const allowed = new Set(["src/turns.ts", "src/guarded-turn.ts", "src/text-handler.ts", "src/quote-session.ts", "src/quote-session-turns.ts", "src/batch-execution.ts", "api/kapso/webhook.ts", "api/outbox/drain.ts"]);
     for (const path of files) {
       if (allowed.has(rel(path)) || rel(path).startsWith("src/crm-outbox/")) continue;
       expect(source(path), rel(path)).not.toMatch(MENTION);

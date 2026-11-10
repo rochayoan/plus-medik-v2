@@ -3,8 +3,10 @@ import type { AnalysisResult } from "./analyze.js";
 import { catalogFingerprint, processingFailureCode, type AuditRepository, type ProcessingPhase } from "./audit.js";
 import { withAiCallObserver, type AiCallEvent } from "./cache.js";
 import { buildVisionDiagnostic, visionDiagnosticKeyFor } from "./vision-diagnostics.js";
+import type { MessageHistory } from "./message-history.js";
 import { runGuardedTurn, type Produced, type TurnContext, type TurnProducer, type TurnsConfig } from "./guarded-turn.js";
 import type { PublicQuote } from "./partial-auto.js";
+import { summarizeAiFailures } from "./provider-error.js";
 import type { CatalogStudy } from "./types.js";
 
 // Integración mínima WhatsApp (Kapso): recibir una imagen -> motor de PlusMedik -> responder con la cotización. Esta capa NO decide nada del AUTO MATCH:
@@ -98,7 +100,10 @@ export const formatBs = (amount: number): string => `Bs ${Number.isInteger(amoun
 
 // Recibe SOLO la salida pública: estudios, precios y el subtotal cotizado.
 // AUTO_PARTIAL se comunica al paciente SIN exponer textos dudosos, candidatos ni datos clínicos.
-export function formatQuoteMessage(quote: PublicQuote, options: { partial?: boolean } = {}): string {
+// Pie común de las cotizaciones; los apéndices (preparación, notas) se insertan ANTES de él.
+export const QUOTE_FOOTER = "Respóndenos por este chat para continuar. 😊";
+
+export function formatQuoteMessage(quote: PublicQuote, options: { partial?: boolean; instant?: boolean } = {}): string {
   const lines = quote.studies.map((study) => `${emojiFor(study.name)} ${study.name} — ${formatBs(study.priceBs)}`);
   return [
     "🩺 *PlusMedik* · Cotización de tu receta",
@@ -109,16 +114,19 @@ export function formatQuoteMessage(quote: PublicQuote, options: { partial?: bool
     ...(options.partial ? [
       "",
       "⚠️ *Cotización parcial:* hay estudios o detalles de la receta que no pudimos confirmar. Este importe incluye solo los estudios listados, no necesariamente toda la solicitud.",
-      "Para intentar completar la cotización, envía otra foto completa y más clara de la receta, o consulta directamente al laboratorio por los estudios no incluidos."
+      ...(options.instant ? [] : ["Para intentar completar la cotización, envía otra foto completa y más clara de la receta, o consulta directamente al laboratorio por los estudios no incluidos."])
     ] : []),
     "",
-    "Respóndenos por este chat para continuar. 😊"
+    ...(options.instant ? [] : [QUOTE_FOOTER])
   ].join("\n");
 }
 
 // Sin cotización automática (ningún estudio verificable, documento que no es una solicitud, etc.): se pide una mejor foto. No menciona estudios pendientes.
 export const NO_QUOTE_MESSAGE = "🩺 *PlusMedik*\n\nNo pudimos generar la cotización con esta imagen. ¿Puedes enviarnos una foto más clara de tu receta, completa y bien iluminada? 📸";
-export const TECHNICAL_ISSUE_MESSAGE = "🩺 *PlusMedik*\n\nTuvimos un inconveniente al revisar tu receta. Por favor, intenta enviarla de nuevo en unos minutos. 🙏";
+const NO_QUOTE_MESSAGE_INSTANT = "🩺 *PlusMedik*\n\nNo pudimos identificar estudios con suficiente certeza en esta fotografía para generar una cotización. 📋";
+export const TECHNICAL_ISSUE_MESSAGE = "🩺 *PlusMedik*\n\nHubo un inconveniente técnico al procesar tu solicitud. Esto no significa que la fotografía sea ilegible. Puedes intentar más tarde o escribir los estudios; no es necesario reenviar la misma foto de inmediato. 🙏";
+export const STUDIES_UNRESOLVED_MESSAGE = "🩺 *PlusMedik*\n\nNo pude identificar con certeza algunos estudios de la solicitud. Puedes escribir sus nombres completos para verificarlos; no te daré precios de estudios dudosos.";
+export const NOT_RECIPE_MESSAGE = "🩺 *PlusMedik*\n\nLa imagen no parece ser una solicitud de estudios. Si necesitas una cotización, escribe los estudios o envía una receta.";
 
 // ───────────────────────────── orquestación (con dependencias inyectables) ─────────────────────────────
 
@@ -131,6 +139,8 @@ export interface QuoteDeps {
   sendText(to: string, body: string): Promise<void | { providerMessageId?: string }>;
   log(event: string, data: Record<string, unknown>): void;
   audit?: AuditRepository;
+  // Historial de mensajes para auditoría (apagado si falta; ver src/message-history.ts): registra la respuesta que Kapso aceptó. Nunca altera ni retrasa el envío.
+  history?: MessageHistory;
   // Cada cuántos ms se renueva el lease mientras se procesa (por defecto 40 s con un lease de 120 s). Solo disponibilidad: la seguridad no depende de esto.
   leaseRenewIntervalMs?: number;
   // true: si el claim falla (la base no responde) NO se responde, porque no se puede demostrar que nadie más responderá. Por defecto false (política heredada).
@@ -211,6 +221,7 @@ export function buildAnalysisLog(analysis: AnalysisResult): Record<string, unkno
 // común de guarded-turn.ts (claim -> trabajo -> reserva -> comprobación final -> Kapso -> resultado), que es la que garantiza que nunca se responda dos veces.
 export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProducer {
   const who = maskPhone(image.from);
+  const instant = deps.turns?.instantPhotoQuotes === true;
   return async (ctx): Promise<Produced> => {
     let reply: string;
     let result: "quoted" | "no_quote" | "technical_issue";
@@ -231,7 +242,7 @@ export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProduc
       if (!mimeType) {
         deps.log("image_rejected_type", { messageId: image.messageId, phone: who });
         await ctx.persist("image", (audit, runId, lease) => audit.recordIgnored(runId, "IMAGE_TYPE", lease));
-        reply = NO_QUOTE_MESSAGE;
+        reply = instant ? NO_QUOTE_MESSAGE_INSTANT : NO_QUOTE_MESSAGE;
         result = "no_quote";
       } else {
         phase = "CATALOG_LOAD";
@@ -258,8 +269,11 @@ export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProduc
         // Todas las evidencias del análisis se confirman juntas o ninguna (una transacción en la base). Si falla, el envío al paciente sigue igual.
         evidenceAttempted = true;
         await ctx.persist("evidence", (audit, runId, lease) => audit.recordEvidence(runId, { analysis, aiCalls, catalog: catalogFingerprint(catalog) }, lease));
+        // Memoria en sombra (memoria del agente): la receta leída, solo con ids de estudios y cuántos puntos quedaron pendientes (nunca precios ni texto). Mejor esfuerzo: no espera ni lanza.
+        const readIds = (analysis.internal?.quoted.lines ?? analysis.quote?.lines ?? []).map((line) => line.id);
+        deps.turns?.convState?.artifact({ from: image.from, key: image.messageId, kind: "RECIPE", studyIds: readIds, unrecognized: analysis.internal?.pending.length ?? 0 });
         if (analysis.publicQuote && analysis.outcome !== "HUMAN_REVIEW") {
-          reply = formatQuoteMessage(analysis.publicQuote, { partial: analysis.outcome === "AUTO_PARTIAL" });
+          reply = formatQuoteMessage(analysis.publicQuote, { partial: analysis.outcome === "AUTO_PARTIAL", instant });
           if (deps.quotePreparations) {
             // Solo los estudios realmente MOSTRADOS al paciente (AUTO parcial puede excluir otros).
             const visible = new Set(analysis.publicQuote.studies.map((item) => `${item.name}|${item.priceBs}`));
@@ -273,14 +287,21 @@ export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProduc
             }
           }
           result = "quoted";
+          deps.turns?.convState?.artifact({ from: image.from, key: image.messageId, kind: "QUOTE", studyIds: readIds });
         } else {
-          reply = NO_QUOTE_MESSAGE;
+          reply = analysis.reasons.includes("not_a_request")
+            ? NOT_RECIPE_MESSAGE
+            : analysis.reasons.some((reason) => reason.startsWith("catalog_") || reason.startsWith("semantic_") || reason === "package_alternative_unresolved")
+              ? STUDIES_UNRESOLVED_MESSAGE
+              : instant ? NO_QUOTE_MESSAGE_INSTANT : NO_QUOTE_MESSAGE;
           result = "no_quote";
         }
       }
     } catch (error) {
       const errorCode = processingFailureCode(phase);
-      deps.log("processing_failed", { messageId: image.messageId, phone: who, errorCode });
+      // Qué llamada a qué modelo falló y por qué (cuota/tasa/tiempo…), solo con códigos de lista blanca: sin esto un fallo de IA era indistinguible de otro.
+      const aiFailures = summarizeAiFailures(aiCalls);
+      deps.log("processing_failed", { messageId: image.messageId, phone: who, errorCode, ...(aiFailures.length > 0 ? { aiFailures } : {}) });
       if (!evidenceAttempted) await ctx.persist("evidence", (audit, runId, lease) => audit.recordEvidence(runId, { aiCalls }, lease));
       await ctx.persist("failure", (audit, runId, lease) => audit.recordFailure(runId, errorCode, lease));
       reply = TECHNICAL_ISSUE_MESSAGE;

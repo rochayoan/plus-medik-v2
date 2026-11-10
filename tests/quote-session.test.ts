@@ -55,7 +55,6 @@ describe("estudios escritos", () => {
   it("reconoce nombres y alias exactos, con relleno de cortesía alrededor y separadores variados", () => {
     expect(ids("hemograma")).toEqual([uuid(1)]);
     expect(ids("Hola, quiero cotizar hemograma")).toEqual([uuid(1)]);
-    // Cortesías iniciales no deben impedir la cotización de nombres inequívocos.
     for (const phrase of ["Oye, quiero cotizar hemograma y glucosa", "oye quiero cotizar hemograma y glucosa", "Oiga, cotízame hemograma y glucosa"]) {
       const extraction = extractStudyRequests(phrase, CATALOG);
       expect(extraction?.result).toMatchObject({ status: "RESOLVED", studyIds: [uuid(1), uuid(2)], unresolved: 0 });
@@ -293,7 +292,8 @@ describe("G5.9 · listas de estudios", () => {
     expect(extractStudyRequests("¿cuánto cuesta el hemograma?", CATALOG)).toMatchObject({ wantsQuote: true });
     expect(extractStudyRequests("quiero que me cotices la glucosa", CATALOG)).toMatchObject({ wantsQuote: true });
     expect(extractStudyRequests("hemograma y glucosa", CATALOG)).toMatchObject({ wantsQuote: false });
-    expect(extractStudyRequests("necesito hacerme una glucosa", CATALOG)).toMatchObject({ wantsQuote: false });
+    // Piloto 31/10/2026: un pedido claro («necesito…», «quiero…») se cotiza directamente; nombrar estudios sueltos sigue acumulando.
+    expect(extractStudyRequests("necesito hacerme una glucosa", CATALOG)).toMatchObject({ wantsQuote: true });
   });
 });
 

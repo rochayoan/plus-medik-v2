@@ -61,6 +61,10 @@ describe("itemFromAnalysis: lo que el motor decidió, traducido a la sesión", (
   it("cotizada COMPLETA → identificada (sin repetidos)", () => {
     expect(itemFromAnalysis(analysis({ outcome: "AUTO_COMPLETE", publicQuote: {}, internal: lines(1, 2, 1) }))).toEqual({ status: "RESOLVED", studyIds: [uuid(1), uuid(2)], ambiguous: [], unresolved: 0, reasons: [] });
   });
+  it("la falta de coincidencia en el catálogo NO transforma una receta legible en imagen ilegible", () => {
+    expect(itemFromAnalysis(analysis({ reasons: ["catalog_unmatched"], outcome: "HUMAN_REVIEW" })))
+      .toMatchObject({ status: "UNRESOLVED", reasons: ["UNRESOLVED_TEXT"] });
+  });
   it("sin la bandera de AUTO parcial (sin outcome): AUTO_SAFE con cotización → identificada", () => {
     expect(itemFromAnalysis(analysis({ decision: "AUTO_SAFE", quote: { lines: [{ id: uuid(3) }] } }))).toMatchObject({ status: "RESOLVED", studyIds: [uuid(3)] });
   });
@@ -68,7 +72,7 @@ describe("itemFromAnalysis: lo que el motor decidió, traducido a la sesión", (
     expect(itemFromAnalysis(analysis({ outcome: "AUTO_PARTIAL", publicQuote: {}, internal: lines(1) }))).toMatchObject({ status: "UNCERTAIN", studyIds: [uuid(1)], reasons: ["ENGINE_PARTIAL"] });
   });
   it.each([
-    ["revisión humana", { outcome: "HUMAN_REVIEW", internal: lines(1) }],
+    ["revisión humana sin causa identificada", { outcome: "HUMAN_REVIEW", internal: lines(1) }],
     ["sin cotización", { outcome: "AUTO_COMPLETE", internal: lines() }],
     ["completa pero sin estudios", { outcome: "AUTO_COMPLETE", publicQuote: {}, internal: lines() }],
     ["sin nada", {}]
@@ -130,12 +134,12 @@ describe("foto en modo sesión", () => {
     expect(w.audit.reserveSend).toHaveBeenCalledWith("run-1", "conversation", LEASE, { stale: "NEWER_TURN" });
   });
 
-  it("si el análisis falla: aviso técnico, la foto queda ilegible en la sesión y el fallo se audita", async () => {
+  it("si el análisis falla: aviso técnico, la foto queda pendiente y NO se la marca ilegible", async () => {
     const w = setup();
     w.analyze.mockRejectedValueOnce(new Error("modelo caído"));
     await processTurns([image()], w.deps);
     expect(w.sends).toEqual([TECHNICAL_ISSUE_MESSAGE]);
-    expect(w.audit.quoteFinish).toHaveBeenCalledWith("run-1", LEASE, expect.objectContaining({ status: "UNREADABLE" }));
+    expect(w.audit.quoteFinish).toHaveBeenCalledWith("run-1", LEASE, expect.objectContaining({ status: "UNCERTAIN", reasons: ["ENGINE_PARTIAL"] }));
     expect(w.audit.recordFailure).toHaveBeenCalled();
   });
 
@@ -197,7 +201,8 @@ describe("texto en modo sesión", () => {
   it("un texto sin estudios (saludo, información) lo atiende el manejador de siempre sin tocar la sesión", async () => {
     const w = setup();
     await processTurns([text("hola", "t1"), text("¿a qué hora abren?", "t2")], w.deps);
-    expect(w.sends).toEqual([DRAFT_TEXTS.greeting, DRAFT_TEXTS.handoff_unavailable]);
+    // mismo lote: cada mensaje conserva su camino, pero el saludo genérico (que solo pide estudios o la receta) se omite cuando el lote trae algo más concreto; la respuesta a la pregunta se conserva
+    expect(w.sends).toEqual([DRAFT_TEXTS.handoff_unavailable]);
     expect(w.audit.quoteBegin).not.toHaveBeenCalled();
   });
 
@@ -218,6 +223,63 @@ describe("sin manejador de texto las sesiones NO se usan (nadie podría escribir
     expect(w.sends).toHaveLength(1);
     expect(w.audit.quoteBegin).not.toHaveBeenCalled();
     expect(w.audit.reserveSend).toHaveBeenCalledWith("run-1", "quoted", LEASE, { stale: "NONE" });
+  });
+});
+
+describe("fotografía inmediata opt-in: conserva textos y elimina LISTO", () => {
+  const pricedAnalysis = (partial = false) => ({
+    decision: "AUTO_SAFE", outcome: partial ? "AUTO_PARTIAL" : "AUTO_COMPLETE",
+    reasons: [], finalVisualStudies: [], disputes: [], judgeResolved: [], unresolvedDisputes: [],
+    publicQuote: {
+      studies: [
+        { name: "HEMOGRAMA COMPLETO", priceBs: 45 },
+        { name: "GLUCOSA EN AYUNAS", priceBs: 30 }
+      ],
+      totalBs: 75, totalLabel: "Total de los estudios cotizados", tariff: "PACIENTE"
+    },
+    internal: {
+      quoted: { lines: [
+        { id: uuid(1), name: "HEMOGRAMA COMPLETO", priceBs: 45 },
+        { id: uuid(2), name: "GLUCOSA EN AYUNAS", priceBs: 30 }
+      ] },
+      studies: [], pending: [], advisories: [], document: { zones: [] }
+    }
+  } as unknown as AnalysisResult);
+
+  it("cotiza cada foto de inmediato con ambos precios, total, rastro clínico y sin pedir confirmación", async () => {
+    const w = setup({ analysis: pricedAnalysis() });
+    w.deps.turns!.instantPhotoQuotes = true;
+    const appendix = vi.fn(async (body: string) => body + "\n\n🧪 *PREPARACIÓN Y AYUNO*\n• Indicaciones aprobadas.");
+    w.deps.quotePreparations = appendix;
+    const reports = await processTurns([image("instant-1")], w.deps);
+    expect(reports[0]?.result).toBe("quoted");
+    expect(w.sends).toHaveLength(1);
+    expect(w.sends[0]).toContain("HEMOGRAMA COMPLETO — Bs 45");
+    expect(w.sends[0]).toContain("GLUCOSA EN AYUNAS — Bs 30");
+    expect(w.sends[0]).toContain("Bs 75");
+    expect(w.sends[0]).toContain("PREPARACIÓN Y AYUNO");
+    expect(w.sends[0]).not.toMatch(/LISTO|Cuando termines|Puedes enviar|Respóndenos|[?]/i);
+    expect(appendix).toHaveBeenCalledTimes(1);
+    expect(w.audit.quoteBegin).not.toHaveBeenCalled();
+    expect(w.audit.quoteFinish).not.toHaveBeenCalled();
+    expect(w.audit.reserveSend).toHaveBeenCalledWith("run-1", "quoted", LEASE, { stale: "NONE" });
+  });
+
+  it("aunque haya estudios dudosos, muestra solo lo cotizado sin solicitar nada al paciente", async () => {
+    const w = setup({ analysis: pricedAnalysis(true) });
+    w.deps.turns!.instantPhotoQuotes = true;
+    await processTurns([image("partial-1")], w.deps);
+    expect(w.sends[0]).toContain("Cotización parcial");
+    expect(w.sends[0]).toContain("Bs 75");
+    expect(w.sends[0]).not.toMatch(/envía otra foto|consulta directamente|LISTO|Respóndenos|[?]/i);
+    expect(w.audit.quoteBegin).not.toHaveBeenCalled();
+  });
+
+  it("no altera las cotizaciones por estudios ESCRITOS ni las sesiones de texto", async () => {
+    const w = setup();
+    w.deps.turns!.instantPhotoQuotes = true;
+    await processTurns([text("hemograma", "text-after-instant")], w.deps);
+    expect(w.audit.quoteBegin).toHaveBeenCalled();
   });
 });
 
@@ -377,14 +439,16 @@ describe("G5.9 · texto en modo sesión: cotizar sin «listo», acumular y pregu
     const w = start(fakeAudit());
     await processTurns([text("¿qué es el hemograma?", "t1"), text("¿para qué sirve la glucosa?", "t2")], w.deps);
     expect(w.audit.quoteBegin).not.toHaveBeenCalled();
-    expect(w.sends).toEqual([DRAFT_TEXTS.fallback, DRAFT_TEXTS.fallback]);
+    // las dos preguntas reciben el mismo texto de siempre: en el lote sale una sola vez
+    expect(w.sends).toEqual([DRAFT_TEXTS.fallback]);
   });
 
   it("los precios, requisitos clínicos y derivaciones conservan su camino: preparación y plazos no entran a la sesión", async () => {
     const w = start(fakeAudit());
     await processTurns([text("¿necesito ayuno para el hemograma?", "t1"), text("¿cuánto demora el resultado de la glucosa?", "t2"), text("quiero hablar con una persona", "t3")], w.deps);
     expect(w.audit.quoteBegin).not.toHaveBeenCalled();
-    expect(w.sends).toHaveLength(3);
+    // las tres reciben el mismo texto de siempre (ninguna entra a la sesión): en el lote sale una sola vez
+    expect(w.sends).toEqual([DRAFT_TEXTS.handoff_unavailable]);
   });
 
   it("una solicitud que ya está llena avisa en vez de cotizar a medias", async () => {

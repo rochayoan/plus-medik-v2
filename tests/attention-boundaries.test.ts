@@ -22,7 +22,7 @@ describe("G6.0: dónde puede aparecer la atención selectiva", () => {
   });
 
   it("solo el propio módulo, el manejador de texto, los turnos, la configuración de turnos, el productor de texto de las sesiones y el cableado de Vercel la nombran", () => {
-    const allowed = new Set(["src/attention-filter.ts", "src/text-handler.ts", "src/turns.ts", "src/guarded-turn.ts", "src/quote-session-turns.ts", "api/kapso/webhook.ts"]);
+    const allowed = new Set(["src/attention-filter.ts", "src/text-handler.ts", "src/turns.ts", "src/guarded-turn.ts", "src/quote-session-turns.ts", "src/batch-engine.ts", "src/conversation-state-store.ts", "src/agent/shadow.ts", "api/kapso/webhook.ts"]);
     for (const path of files) {
       if (allowed.has(rel(path))) continue;
       expect(source(path), rel(path)).not.toMatch(MENTION);
@@ -142,15 +142,17 @@ describe("G6.0: el contexto que recibe el modelo", () => {
     const turns = code(join(root, "src/turns.ts"));
     expect(turns).toMatch(/audit\.quoteRead\?\.\(runId, lease\)/);
     expect(turns).toMatch(/audit\.quoteLastStudies\?\.\(runId, lease,/);
-    expect(turns).toMatch(/deps\.turns\?\.attention && deps\.turns\.quoteSessions/);
-    expect(readdirSync(join(root, "supabase/migrations")).filter((name) => name.endsWith(".sql"))).toHaveLength(16);
+    // el estado de la conversación existe con las sesiones de cotización (lo pide la atención selectiva o el silencio ante lo ajeno, cada uno por su bandera)
+    expect(turns).toMatch(/\.\.\.\(deps\.turns\?\.quoteSessions\s*\? \{[^}]*async memory\(options\?: \{ wait\?: boolean \}\)/);
+    // sin contar las migraciones 21 a 23 (historial de mensajes) y 24 (eventos de conversación), que son de otras capas: esta memoria no agregó ninguna
+    expect(readdirSync(join(root, "supabase/migrations")).filter((name) => name.endsWith(".sql") && !name.includes("message_history") && !name.includes("conversation_events") && !name.includes("agent_pilot"))).toHaveLength(20);
     expect(code(join(root, "src/attention-filter.ts"))).not.toMatch(/plusmedik_|rpc\(/);
   });
 
-  it("el modelo solo recibe el estado si la atención selectiva está encendida, y el estado se calcula al pedirlo (no en cada mensaje)", () => {
+  it("el modelo solo recibe el estado si la atención selectiva (o el silencio ante lo ajeno, que es opt-in) está encendida, y el estado se calcula al pedirlo (no en cada mensaje)", () => {
     const handler = code(join(root, "src/text-handler.ts"));
-    expect(handler).toMatch(/const context = options\.attention \? await turnContext\?\.memory\?\.\(\)\.catch\(\(\) => undefined\) : undefined;/);
-    expect(code(join(root, "src/turns.ts"))).toMatch(/async memory\(\): Promise<ConversationMemory \| undefined> \{/);
+    expect(handler).toMatch(/const context = options\.attention \|\| silences \? await turnContext\?\.memory\?\.\(\{ wait: silences \}\)\.catch\(\(\) => undefined\) : undefined;/);
+    expect(code(join(root, "src/turns.ts"))).toMatch(/async memory\(options\?: \{ wait\?: boolean \}\): Promise<ConversationMemory \| undefined> \{/);
   });
 });
 

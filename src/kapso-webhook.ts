@@ -1,5 +1,7 @@
 import { AuditWriteError } from "./audit.js";
 import { classifyKapsoEvent, eventsOf, type AttentionRepository, type ClassifiedKapsoEvent, type KapsoEventKind } from "./human-control.js";
+import type { ConversationRecorder } from "./conversation-state-store.js";
+import type { MessageHistory } from "./message-history.js";
 import { extractIncomingTurns, hasProcessableTurns, processTurns } from "./turns.js";
 import { extractIncomingImages, handleImageMessage, isAllowedPhone, maskPhone, verifyWebhookSignature, type QuoteDeps } from "./whatsapp-quote.js";
 
@@ -19,9 +21,10 @@ export interface KapsoWebhookDeps {
   secret: string | undefined;
   allowedPhones: string | undefined;
   quote: QuoteDeps;
-  // Con piloto acotado: número que usa TURNOS + texto; todos los demás contactos
-  // conservan la ruta de fotografías. Nunca se loguea el valor.
+  // Piloto original para TURNOS + texto. Los contactos adicionales se autorizan
+  // por separado; todos los demás conservan la ruta de imágenes.
   textPilotPhone?: string;
+  textPilotExtraPhones?: readonly string[];
   // Configuración anterior para fotografías de contactos fuera del piloto.
   // Mantiene requireAuditGuard sin depender del flag global de turnos.
   legacyQuote?: QuoteDeps;
@@ -34,6 +37,10 @@ export interface KapsoWebhookDeps {
     contactKeyFor(phone: string): string | undefined;
     attention: AttentionRepository;
   };
+  // Historial de mensajes para auditoría (apagado si falta; ver src/message-history.ts). Solo OBSERVA: se registra en segundo plano, nunca retrasa ni cambia la respuesta del webhook.
+  history?: MessageHistory;
+  // Memoria estructurada en SOMBRA (la bandera del agente conversacional): registra que una persona escribió. Solo observa; no retrasa ni cambia la respuesta del webhook (se espera con `schedule`).
+  convState?: ConversationRecorder;
   log(event: string, data: Record<string, unknown>): void;
 }
 
@@ -57,6 +64,9 @@ export async function handleKapsoWebhook(request: Request, deps: KapsoWebhookDep
   const counts: Partial<Record<KapsoEventKind, number>> = {};
   for (const event of classified) counts[event.kind] = (counts[event.kind] ?? 0) + 1;
   deps.log("webhook_events", { counts });
+
+  // Historial de auditoría: entrantes, mensajes humanos y estados de entrega de TODOS los contactos (el filtro de ALLOWED_PHONES y del piloto decide a quién ATIENDE el agente, no a quién se guarda), en segundo plano y antes de cualquier otra decisión; es idempotente, así que un reintento de Kapso no duplica nada.
+  if (deps.history) deps.schedule(deps.history.observe({ raws, classified, inScope: () => true }));
 
   // Control de atención humana: se registra ANTES de responder (ver política de ACK).
   const control = deps.humanControl;
@@ -86,7 +96,7 @@ export async function handleKapsoWebhook(request: Request, deps: KapsoWebhookDep
   // Modo turnos (deps.quote.turns, apagado por defecto): imágenes y, si hay manejador, texto u otros mensajes se procesan como turnos del contacto (ver turns.ts).
   // La política de ACK no cambia: 200 de inmediato y el trabajo en segundo plano.
   if (deps.quote.turns) {
-    const turns = extractIncomingTurns(payload, request.headers.get("x-webhook-batch"), { eventName: eventName, nowSeconds: Date.now() / 1000 })
+    const turns = extractIncomingTurns(payload, request.headers.get("x-webhook-batch"), { eventName: eventName, nowSeconds: Date.now() / 1000, audio: Boolean(deps.quote.turns.audio && deps.quote.turns.handlers?.text) })
       .filter((turn) => isAllowedPhone(turn.from, deps.allowedPhones));
     if (!deps.textPilotPhone) {
       if (!hasProcessableTurns(turns, deps.quote)) return text(200, "ignored");
@@ -94,12 +104,14 @@ export async function handleKapsoWebhook(request: Request, deps: KapsoWebhookDep
       return text(200, "ok");
     }
 
+    const pilotScope = [deps.textPilotPhone, ...(deps.textPilotExtraPhones ?? [])].join(",");
+
     // Separar por CONTACTO, no por la lista global ALLOWED_PHONES.
     // En el mismo lote pueden venir imágenes de otros pacientes y texto piloto:
     // cada subconjunto mantiene su ruta. No duplicar imágenes del piloto.
-    const pilotTurns = turns.filter((turn) => isAllowedPhone(turn.from, deps.textPilotPhone));
+    const pilotTurns = turns.filter((turn) => isAllowedPhone(turn.from, pilotScope));
     const otherImages = extractIncomingImages(payload, request.headers.get("x-webhook-batch"))
-      .filter((image) => isAllowedPhone(image.from, deps.allowedPhones) && !isAllowedPhone(image.from, deps.textPilotPhone));
+      .filter((image) => isAllowedPhone(image.from, deps.allowedPhones) && !isAllowedPhone(image.from, pilotScope));
     const hasPilot = hasProcessableTurns(pilotTurns, deps.quote);
     if (!hasPilot && otherImages.length === 0) return text(200, "ignored");
     if (hasPilot) deps.schedule(processTurns(pilotTurns, deps.quote));
@@ -127,7 +139,7 @@ async function registerControlEvent(event: ClassifiedKapsoEvent, idempotencyKey:
     try {
       await control.attention.recordEvent({ eventKey, contactKey, kind: event.kind as "UNKNOWN_ORIGIN" | "OTHER_APP_OUTBOUND" | "META_AGENT_OUTBOUND", occurredAt: event.occurredAt, detail: { origin: (event.origin ?? "missing").replace(/[^a-z0-9_]/g, "_").slice(0, 40) } });
     } catch (error) {
-      deps.log("attention_event_not_recorded", { kind: event.kind, ...(error instanceof AuditWriteError ? { error: error.kind } : {}) });
+      deps.log("attention_event_not_recorded", { kind: event.kind, ...(error instanceof AuditWriteError ? { error: error.kind, httpStatus: error.httpStatus, serverCode: error.detail.serverCode, requestId: error.detail.requestId } : {}) });
     }
     return true;
   }
@@ -139,9 +151,14 @@ async function registerControlEvent(event: ClassifiedKapsoEvent, idempotencyKey:
   try {
     const result = await control.attention.registerHumanMessage({ eventKey, contactKey, occurredAt: event.occurredAt });
     deps.log("human_event", { outcome: result.outcome, revision: result.revision, blockedRuns: result.blockedRuns, lateReservedRuns: result.lateReservedRuns, repliedAfterEventRuns: result.repliedAfterEventRuns, phone: maskPhone(event.contactPhone) });
+    // Memoria en sombra: el registro (idempotente por evento) corre en segundo plano; el 200 al webhook no lo espera.
+    if (deps.convState) {
+      deps.convState.humanMessage({ contactKey, eventKey, ...(event.occurredAt ? { at: event.occurredAt } : {}) });
+      deps.schedule(deps.convState.flush());
+    }
     return true;
   } catch (error) {
-    deps.log("human_event_failed", error instanceof AuditWriteError ? { error: error.kind } : {});
+    deps.log("human_event_failed", error instanceof AuditWriteError ? { error: error.kind, httpStatus: error.httpStatus, serverCode: error.detail.serverCode, requestId: error.detail.requestId } : {});
     return false;
   }
 }

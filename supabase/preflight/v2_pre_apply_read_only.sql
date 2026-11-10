@@ -1,4 +1,4 @@
--- PlusMedik V2 — verificación ANTES de aplicar las 16 migraciones (solo lectura)
+-- PlusMedik V2 — verificación ANTES de aplicar las 25 migraciones (solo lectura)
 -- GENERADO por scripts/migration-manifest.ts a partir de supabase/migrations/*.sql. NO editar a mano (una prueba falla si no coincide).
 -- SOLO LECTURA: una sola sentencia SELECT. No contiene DDL, DML, RPC ni datos clínicos; devuelve metadatos y conteos.
 -- Ejecutar exclusivamente en el proyecto Supabase cvokrtrdzxfchntwwslz (verificar el identificador en la URL del panel ANTES de ejecutar),
@@ -24,6 +24,15 @@
 --   14  20261102000000_plusmedik_quote_text_flow.sql  2094f37085484e0c889f3fa46a563539b7f7ba61049ffb332064a7059d17d9f5
 --   15  20261103000000_plusmedik_crm_attention_control.sql  0f14159a903f1e50d3666923fa0e46edc06d36b752ec7ef6348923b5e43c3bc9
 --   16  20261104000000_plusmedik_reply_guard_atomic_rate.sql  33b409b481cbc845ed6b07f2a3b74af86251ba936ac6b5c465127d838097568b
+--   17  20261105000000_plusmedik_conversation_memory.sql  dc498daf5ef825b9be84ae81fa643fadcc9a71346146b24efd1340ef63bb716f
+--   18  20261106000000_plusmedik_daily_reply_cap.sql  c16ed9d3088c055169e62f7a75cce78f25855d44ddba57a9a77128387b9cc606
+--   19  20261107000000_plusmedik_batch_fold.sql  c64848610b18f85e0b0a388adb0263379478af5aba86b66c2ea62ef87814e25a
+--   20  20261108000000_plusmedik_quote_shadow_peek.sql  82d45e295d56a8580b882b5bfd94a2741b1961a315af4b7bf1e23b2beeecfe9f
+--   21  20261109000000_plusmedik_message_history.sql  00c79db4d432b9c1b799b6d726e48ab3e8fcec8f4007af22be97c707d3731547
+--   22  20261110000000_plusmedik_message_history_plaintext.sql  6bec8f72e94d362fa13ff31a914b0693eec67601b6b2c68b8d5a7f50c445a1fb
+--   23  20261111000000_plusmedik_message_history_phone.sql  67a862e32125d72007b0cfc4a2c7d3a6f9320f5067835f0eac9d6f730057105d
+--   24  20261112000000_plusmedik_conversation_events.sql  78b1b697b54b04e7bd41dd91c63755d64c8c96727b874b8b219f0b5e56b74bf9
+--   25  20261113000000_plusmedik_agent_pilot.sql  192775dc58fd553b9351ea494f60e7bd1c91d3330e2d865a7fce4e2f9ea51201
 --
 -- Resultado: una tabla (orden, seccion, comprobacion, estado, detalle). Estados: OK · INFO · WARN (revisar) · BLOCK (detenerse).
 -- La primera fila es el VEREDICTO. Guardar el resultado completo: las filas INSTANTANEA deben ser IDÉNTICAS antes y después.
@@ -286,7 +295,51 @@ manifest(mig, kind, name, parent) as (
     (15, 'constraint', 'plusmedik_attention_events_outcome_crm_check', 'plusmedik_attention_events'),
     (15, 'function', 'plusmedik_attention_crm_action', ''),
     (16, 'function', 'plusmedik_guard_rate_decide', ''),
-    (16, 'table', 'plusmedik_guard_rate_ledger', '')
+    (16, 'table', 'plusmedik_guard_rate_ledger', ''),
+    (17, 'function', 'plusmedik_memory_forget', ''),
+    (17, 'function', 'plusmedik_memory_recent', ''),
+    (17, 'function', 'plusmedik_memory_record', ''),
+    (17, 'index', 'plusmedik_conversation_messages_expiry_idx', 'plusmedik_conversation_messages'),
+    (17, 'index', 'plusmedik_conversation_messages_recent_idx', 'plusmedik_conversation_messages'),
+    (17, 'table', 'plusmedik_conversation_messages', ''),
+    (18, 'function', 'plusmedik_turn_reserve_send_capped', ''),
+    (19, 'function', 'plusmedik_turn_fold', ''),
+    (20, 'function', 'plusmedik_quote_shadow_peek', ''),
+    (21, 'function', 'plusmedik_history_attach_text', ''),
+    (21, 'function', 'plusmedik_history_delivery', ''),
+    (21, 'function', 'plusmedik_history_erase', ''),
+    (21, 'function', 'plusmedik_history_export', ''),
+    (21, 'function', 'plusmedik_history_gaps', ''),
+    (21, 'function', 'plusmedik_history_purge', ''),
+    (21, 'function', 'plusmedik_history_rank', ''),
+    (21, 'function', 'plusmedik_history_record', ''),
+    (21, 'index', 'plusmedik_message_history_access_at_idx', 'plusmedik_message_history_access'),
+    (21, 'index', 'plusmedik_message_history_contact_idx', 'plusmedik_message_history'),
+    (21, 'index', 'plusmedik_message_history_expiry_idx', 'plusmedik_message_history'),
+    (21, 'index', 'plusmedik_message_history_time_idx', 'plusmedik_message_history'),
+    (21, 'table', 'plusmedik_message_history', ''),
+    (21, 'table', 'plusmedik_message_history_access', ''),
+    (22, 'column', 'body', 'plusmedik_message_history'),
+    (22, 'function', 'plusmedik_history_attach', ''),
+    (22, 'function', 'plusmedik_history_save', ''),
+    (23, 'column', 'contact_phone', 'plusmedik_message_history'),
+    (23, 'function', 'plusmedik_history_put', ''),
+    (23, 'index', 'plusmedik_message_history_phone_idx', 'plusmedik_message_history'),
+    (24, 'function', 'plusmedik_conv_append', ''),
+    (24, 'function', 'plusmedik_conv_contacts_since', ''),
+    (24, 'function', 'plusmedik_conv_erase', ''),
+    (24, 'function', 'plusmedik_conv_events_read', ''),
+    (24, 'function', 'plusmedik_conv_payload_ok', ''),
+    (24, 'function', 'plusmedik_conv_purge', ''),
+    (24, 'index', 'plusmedik_conv_events_contact_idx', 'plusmedik_conv_events'),
+    (24, 'index', 'plusmedik_conv_events_expiry_idx', 'plusmedik_conv_events'),
+    (24, 'index', 'plusmedik_conv_events_time_idx', 'plusmedik_conv_events'),
+    (24, 'table', 'plusmedik_conv_events', ''),
+    (25, 'function', 'plusmedik_agent_pilot_set', ''),
+    (25, 'function', 'plusmedik_agent_pilot_state', ''),
+    (25, 'function', 'plusmedik_history_recent', ''),
+    (25, 'table', 'plusmedik_agent_pilot_log', ''),
+    (25, 'table', 'plusmedik_agent_pilot_switch', '')
 ),
 migration_files(mig, file) as (
   values
@@ -305,10 +358,20 @@ migration_files(mig, file) as (
     (13, '20261101000000_plusmedik_crm_outbox.sql'),
     (14, '20261102000000_plusmedik_quote_text_flow.sql'),
     (15, '20261103000000_plusmedik_crm_attention_control.sql'),
-    (16, '20261104000000_plusmedik_reply_guard_atomic_rate.sql')
+    (16, '20261104000000_plusmedik_reply_guard_atomic_rate.sql'),
+    (17, '20261105000000_plusmedik_conversation_memory.sql'),
+    (18, '20261106000000_plusmedik_daily_reply_cap.sql'),
+    (19, '20261107000000_plusmedik_batch_fold.sql'),
+    (20, '20261108000000_plusmedik_quote_shadow_peek.sql'),
+    (21, '20261109000000_plusmedik_message_history.sql'),
+    (22, '20261110000000_plusmedik_message_history_plaintext.sql'),
+    (23, '20261111000000_plusmedik_message_history_phone.sql'),
+    (24, '20261112000000_plusmedik_conversation_events.sql'),
+    (25, '20261113000000_plusmedik_agent_pilot.sql')
 ),
 service_functions(name) as (
   values
+    ('plusmedik_agent_pilot_state'),
     ('plusmedik_attention_crm_action'),
     ('plusmedik_attention_record_event'),
     ('plusmedik_attention_register_human_message'),
@@ -325,6 +388,11 @@ service_functions(name) as (
     ('plusmedik_audit_recover_stale'),
     ('plusmedik_audit_renew_lease'),
     ('plusmedik_audit_reserve_send'),
+    ('plusmedik_conv_append'),
+    ('plusmedik_conv_contacts_since'),
+    ('plusmedik_conv_erase'),
+    ('plusmedik_conv_events_read'),
+    ('plusmedik_conv_purge'),
     ('plusmedik_crm_outbox_claim'),
     ('plusmedik_crm_outbox_enqueue'),
     ('plusmedik_crm_outbox_list'),
@@ -334,6 +402,17 @@ service_functions(name) as (
     ('plusmedik_crm_outbox_stats'),
     ('plusmedik_crm_outbox_status'),
     ('plusmedik_facts_usage'),
+    ('plusmedik_history_attach'),
+    ('plusmedik_history_attach_text'),
+    ('plusmedik_history_delivery'),
+    ('plusmedik_history_erase'),
+    ('plusmedik_history_export'),
+    ('plusmedik_history_gaps'),
+    ('plusmedik_history_purge'),
+    ('plusmedik_history_put'),
+    ('plusmedik_history_recent'),
+    ('plusmedik_history_record'),
+    ('plusmedik_history_save'),
     ('plusmedik_kb_approve'),
     ('plusmedik_kb_create_draft'),
     ('plusmedik_kb_deactivate'),
@@ -346,12 +425,16 @@ service_functions(name) as (
     ('plusmedik_kb_snapshot'),
     ('plusmedik_kb_submit'),
     ('plusmedik_kb_usage'),
+    ('plusmedik_memory_forget'),
+    ('plusmedik_memory_recent'),
+    ('plusmedik_memory_record'),
     ('plusmedik_quote_item_begin'),
     ('plusmedik_quote_item_finish'),
     ('plusmedik_quote_last_studies'),
     ('plusmedik_quote_review_targets'),
     ('plusmedik_quote_session_close'),
     ('plusmedik_quote_session_read'),
+    ('plusmedik_quote_shadow_peek'),
     ('plusmedik_reply_guard_reset'),
     ('plusmedik_reply_guard_status'),
     ('plusmedik_study_fact_approve'),
@@ -363,10 +446,12 @@ service_functions(name) as (
     ('plusmedik_study_facts_list'),
     ('plusmedik_study_facts_snapshot'),
     ('plusmedik_turn_claim'),
+    ('plusmedik_turn_fold'),
     ('plusmedik_turn_record_facts'),
     ('plusmedik_turn_record_knowledge'),
     ('plusmedik_turn_release'),
     ('plusmedik_turn_reserve_send'),
+    ('plusmedik_turn_reserve_send_capped'),
     ('plusmedik_turn_reserve_send_guarded')
 ),
 -- Qué parte del manifiesto existe hoy en la base (por catálogos; no depende del registro de migraciones, que el SQL Editor no escribe).

@@ -302,7 +302,8 @@ describe("latido del lease (solo disponibilidad; la seguridad no depende de él)
     await expect(handleImageMessage(image, deps)).resolves.toBe("ignored");
     expect(sendText).not.toHaveBeenCalled();
     expect(vi.mocked(repo.reserveSend)).not.toHaveBeenCalled();
-    expect(logged(logs, "audit_unavailable")).toEqual([{ stage: "evidence", kind: "LEASE_LOST" }]);
+    // G7: el registro ahora trae también el estado HTTP (410), sin texto del servidor
+    expect(logged(logs, "audit_unavailable")).toEqual([{ stage: "evidence", kind: "LEASE_LOST", httpStatus: 410 }]);
   });
 });
 
