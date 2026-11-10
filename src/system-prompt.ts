@@ -81,7 +81,7 @@ Responde SOLO con el objeto JSON pedido: {"intent": "...", "reply": "..."}. El "
 `.trim();
 
 // ───────────────────────────── DATOS COMERCIALES — completa aquí ─────────────────────────────
-// Cambia "estado" a "CONFIRMADO" SOLO cuando todos los datos incluidos en esa sección estén confirmados por el responsable y escribe su "fuente" y "vigenteHasta".
+// Los cambios de esta configuración se autorizan con permisos de escritura en Git y se publican mediante deploy: SIN dos aprobadores, SIN IDs de CRM, SIN RPC de aprobación.\n// Cambia "estado" a "CONFIRMADO" SOLO con datos reales y verificables; conserva "fuente" y "vigenteHasta" como trazabilidad del dato, no como aprobación manual.
 // Una línea por dato. Sin precios ni importes. Mientras tengan [POR COMPLETAR] (o el estado sea POR_COMPLETAR) la sección NO se envía al modelo.
 
 export const BUSINESS_DATA: BusinessData = {
