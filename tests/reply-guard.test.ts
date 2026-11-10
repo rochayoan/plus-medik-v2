@@ -238,8 +238,9 @@ describe("cableado con la máquina de turnos", () => {
     const image = setup({ replyGuard: guardConfig, handlers: handlers("GREETING") });
     image.deps.analyze = vi.fn(async () => { throw new Error("boom"); });
     await processTurns([turn("m2", "IMAGE")], image.deps);
+    // El fallo técnico al leer una imagen ya no se envía (no se sabe si era una receta): no hay reserva de envío, y si la hubiera nunca llevaría guarda.
     for (const call of image.audit.reserveSend.mock.calls) expect(call[3]).toEqual({ stale: "NEWER_TURN" });
-    expect(image.audit.reserveSend).toHaveBeenCalled();
+    expect(image.sends).toEqual([]);
   });
 
   it("'limited': no se envía nada, no se confirma ni se libera el turno, y el registro lleva solo el motivo", async () => {
