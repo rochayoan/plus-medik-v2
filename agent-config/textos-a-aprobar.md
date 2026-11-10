@@ -9,11 +9,11 @@
 
 | Clave | Cuándo se usa | Texto actual (BORRADOR) | Aprobado por / fecha |
 | --- | --- | --- | --- |
-| `greeting` | Saludo cuando el paciente solo saluda. | Hola 👋 Soy el asistente de PlusMedik. Para cotizar tus estudios, envíame una foto clara y completa de tu receta. | |
-| `send_recipe` | Pide la foto de la receta cuando el mensaje es un pedido de cotización sin foto. | Para cotizar tus estudios, envíame una foto clara y completa de tu receta. | |
-| `fallback` | Mensaje que no se entiende ni se puede derivar. | Recibimos tu mensaje. Por este medio puedo cotizar recetas: envíame una foto clara y completa de tu receta. | |
+| `greeting` | Saludo cuando el paciente solo saluda. | ¡Hola! 👋 Soy la recepcionista virtual de PlusMedik. ¿En qué puedo ayudarte? Escríbeme los estudios que necesitas y te paso la cotización, o envíame una foto de tu receta si la tienes. | |
+| `send_recipe` | Pide la foto de la receta cuando el mensaje es un pedido de cotización sin foto. | Con gusto te ayudo a cotizar. Escríbeme los nombres de los estudios que necesitas o, si la tienes a mano, envíame una foto de tu receta. | |
+| `fallback` | Mensaje que no se entiende ni se puede derivar. | Con gusto te ayudo. ¿Qué estudio necesitas o qué te gustaría saber? Puedes escribirme su nombre o, si prefieres, enviar una foto de tu receta. | |
 | `handoff_confirmed` | Confirma la derivación a una persona. SOLO se envía con el caso ya registrado en el CRM. | Recibimos tu solicitud. Una persona del equipo la revisará y te escribirá por este chat. | |
-| `handoff_unavailable` | Se envía cuando la derivación no se pudo registrar: no promete a una persona. | Recibimos tu mensaje, pero por ahora no puedo derivarlo a una persona desde este chat. Si quieres una cotización, envíame una foto clara y completa de tu receta. | |
+| `handoff_unavailable` | Se envía cuando la derivación no se pudo registrar: no promete a una persona. | Recibimos tu consulta. Un asesor la revisará y te atenderá lo antes posible por este chat. | |
 | `medical_unavailable` | Consulta médica sin caso registrado: sin orientación médica y aviso de urgencias. | Recibimos tu mensaje. No puedo darte orientación médica por este chat. Si es una urgencia, comunícate con los servicios de emergencia de tu localidad. | |
 | `medical_handoff_confirmed` | Consulta médica con caso registrado: conserva el aviso de urgencias y promete a una persona. | Recibimos tu mensaje. No puedo darte orientación médica por este chat. Si es una urgencia, comunícate con los servicios de emergencia de tu localidad. Una persona del equipo revisará tu mensaje y te escribirá por este chat. | |
 
