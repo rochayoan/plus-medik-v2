@@ -254,15 +254,15 @@ describe("handleImageMessage", () => {
     expect(sent[0]?.body).not.toMatch(/HUMAN|\bAUTO\b/i);
   });
 
-  it("un documento que no es una solicitud no recibe cotización", async () => {
+  it("un documento que no es una solicitud no recibe cotización NI mensaje: se calla (casi siempre es una imagen de una conversación interna)", async () => {
     const analysis = assembleAnalysis({
       consensus: buildSimpleConsensus({ requestedStudies: [row("Hemograma completo")], uncertainStudies: [], notes: "" }, { requestedStudies: [row("Hemograma completo")], uncertainStudies: [], notes: "" }),
       judgement: { resolvedStudies: [], unresolvedDisputes: [] }, catalog, partialAuto: true,
       document: { documentType: "NOT_A_REQUEST", completeDocumentVisible: true, agreement: true }
     });
     const { deps, sent } = makeDeps({ analysis });
-    expect(await handleImageMessage(incoming, deps)).toBe("no_quote");
-    expect(sent[0]?.body).toContain("La imagen no parece ser una solicitud");
+    expect(await handleImageMessage(incoming, deps)).toBe("ignored");
+    expect(sent).toEqual([]);
   });
 
   it("una imagen sin formato reconocible (p. ej. PDF) o ilegible: se pide otra foto y NO se llama al motor", async () => {
@@ -281,13 +281,13 @@ describe("handleImageMessage", () => {
     }
   });
 
-  it("si el motor o la descarga fallan: un mensaje técnico neutro, sin detalles del error, y el error queda en el log", async () => {
+  it("si el motor o la descarga fallan: NO se envía un aviso técnico (no se sabe si era una receta; quien atiende la ve en el chat) y el error queda en el log", async () => {
     for (const failing of [{ analyze: vi.fn(async () => { throw new Error("OPENAI 503 secret-detail"); }) }, { downloadImage: vi.fn(async () => { throw new Error("HTTP 404"); }) }, { loadCatalog: vi.fn(async () => { throw new Error("supabase down"); }) }]) {
       const { deps, sent, logs } = makeDeps(failing);
-      expect(await handleImageMessage(incoming, deps)).toBe("technical_issue");
-      expect(sent).toEqual([{ to: "59171234567", body: TECHNICAL_ISSUE_MESSAGE }]);
-      expect(sent[0]?.body).not.toMatch(/OPENAI|secret|HTTP|supabase/i);
+      expect(await handleImageMessage(incoming, deps)).toBe("ignored");
+      expect(sent).toEqual([]);
       expect(logs.some((entry) => entry.event === "processing_failed")).toBe(true);
+      expect(logs.some((entry) => entry.event === "reply_suppressed")).toBe(true);
     }
   });
 
