@@ -76,7 +76,8 @@ describe("textos de respuesta: sin políticas, horarios, precios ni datos médic
   });
 
   it("los textos que no son de derivación no prometen que una persona responderá", () => {
-    for (const key of ["greeting", "send_recipe", "fallback", "handoff_unavailable", "medical_unavailable"] as const) {
+    // handoff_unavailable queda fuera a propósito: por decisión del laboratorio (2026-11-10) avisa que un asesor atenderá la consulta.
+    for (const key of ["greeting", "send_recipe", "fallback", "medical_unavailable"] as const) {
       expect(DRAFT_TEXTS[key], key).not.toMatch(/te escribir|te llamar|te contactar|revisar|responder|asesor/i);
     }
   });
