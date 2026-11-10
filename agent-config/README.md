@@ -1,5 +1,34 @@
 # Configuración del agente conversacional de PlusMedik
 
+## Ruta oficial de cambios: GitHub, sin aprobadores ni IDs del CRM
+
+Quien tenga permiso de escritura en este repositorio puede modificar los datos
+comerciales del agente directamente en `src/system-prompt.ts`, revisarlos con
+`npm run agent-config -- check` y desplegar el commit autorizado. **No se
+necesita una segunda identidad, un ID de CRM, un borrador pendiente ni una
+RPC `plusmedik_kb_approve`.**
+
+Para modificar **enlace de Google Maps**, edita la línea `Ubicación en Google
+Maps` de `BUSINESS_DATA.NEGOCIO` o el mapa de `SUCURSALES`. Para publicar
+un enlace a una **foto del establecimiento**, añade una línea que describa
+claramente la imagen con su URL HTTPS en la sección que corresponda: el agente
+podrá compartir un enlace verificado. **Esto no implementa el envío de la
+imagen binaria por WhatsApp**, que necesitaría un flujo de medios separado.
+
+El cambio se publica mediante commit + despliegue del servicio que atiende
+Kapso. Git conserva quién cambió cada archivo y permite revertir la versión.
+Los datos deben ser correctos y verificables: acceso al repositorio no habilita
+a inventar información médica, precios o horarios.
+
+La administración de conocimiento versionado en Supabase (`plusmedik_kb_*`)
+es un mecanismo LEGADO e independiente, **no forma parte del proceso de
+cambiar enlaces, fotos, horarios ni datos comerciales desde este repositorio**.
+No solicites IDs de dos usuarios para esos cambios y no intentes publicar
+cambios comerciales mediante `create_draft → submit → approve`.
+La base conserva sus registros y RPC existentes por compatibilidad; esta
+política no los elimina ni cambia datos clínicos ya almacenados.
+
+
 **El archivo principal es [`src/system-prompt.ts`](../src/system-prompt.ts).** Es código TypeScript normal: `SYSTEM_PROMPT` (personalidad, tono, reglas de conversación) y `BUSINESS_DATA` (datos comerciales: negocio, sucursales y direcciones, horarios, teléfonos, servicios, métodos de pago y políticas). El agente lo **importa** como cualquier módulo: no hay Markdown, ni lectura de archivos, ni paso de generación, ni dependencia del hosting. Todo está **apagado por defecto** y **no contiene ningún dato del laboratorio** (las siete secciones de datos están POR_COMPLETAR).
 
 Esta carpeta solo conserva el documento de textos fijos para aprobación:
@@ -54,4 +83,4 @@ El filtro de salida es código (`guardModelReply`), no texto del prompt: aunque 
 - Las preguntas sobre «resultados» (cuándo/dónde entregan) se resuelven por el camino determinista (mezclan la política con el tiempo de entrega de cada estudio, que es de Supabase).
 - Los textos fijos de respaldo (`textos-a-aprobar.md`) dicen «PlusMedik» en código: si el nombre comercial cambia, se actualizan en `src/text-handler.ts` (`DRAFT_TEXTS`).
 - Si el modelo falla o su respuesta se descarta, el paciente recibe el texto fijo / la derivación de siempre.
-- Hay otra ruta, independiente y opcional, para el conocimiento **aprobado y versionado** (G3: `src/knowledge`, con aprobación de dos personas desde el CRM). Con `PLUSMEDIK_LLM_BUSINESS_INFO=on`, los datos de `BUSINESS_DATA` prevalecen para las preguntas comerciales; la ruta G3 sigue siendo la de lo clínico por estudio.
+- La ruta de conocimiento versionado G3 permanece por compatibilidad histórica, pero **no debe usarse para editar datos comerciales**. Con `PLUSMEDIK_LLM_BUSINESS_INFO=on`, `BUSINESS_DATA` es la configuración comercial de la conversación; la información clínica y el catálogo siguen teniendo límites independientes.
