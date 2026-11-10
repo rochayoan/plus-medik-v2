@@ -25,6 +25,9 @@ import { createCrmHandoffSink } from "../../src/crm-outbox/handoff-sink.js";
 import { QUOTE_TEXTS } from "../../src/quote-session.js";
 import { appendApprovedQuotePreparations } from "../../src/quote-preparation.js";
 import { appendQuoteTurnaround } from "../../src/quote-turnaround.js";
+import { createLocationPhotoSender, type LocationPhotoSender } from "../../src/location-photo.js";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { appendApprovedQuoteStudyDetails } from "../../src/quote-study-details.js";
 import { createSupabaseStudyFactsStore, StudyFactsService } from "../../src/study-facts/index.js";
 import { resolveQuoteSessionsConfig } from "../../src/quote-session-turns.js";
@@ -133,6 +136,26 @@ function kapsoClient(): WhatsAppClient {
   if (!kapsoApiKey) throw new Error("Missing KAPSO_API_KEY");
   return new WhatsAppClient({ baseUrl: "https://api.kapso.ai/meta/whatsapp", kapsoApiKey });
 }
+
+// PLUSMEDIK_LOCATION_PHOTO=off la apaga; por defecto está encendida. La foto vive en assets/ubicacion-plusmedik.png (se puede cambiar con PLUSMEDIK_LOCATION_PHOTO_PATH).
+const locationPhotoEnabled = (process.env.PLUSMEDIK_LOCATION_PHOTO ?? "on").trim().toLowerCase() !== "off";
+const locationPhoto: LocationPhotoSender = locationPhotoEnabled
+  ? createLocationPhotoSender({
+      readPhoto: async () => {
+        try {
+          return new Uint8Array(await readFile(process.env.PLUSMEDIK_LOCATION_PHOTO_PATH ?? join(process.cwd(), "assets", "ubicacion-plusmedik.png")));
+        } catch {
+          return undefined;
+        }
+      },
+      upload: async (bytes) => (await kapsoClient().media.upload({ phoneNumberId: phoneNumberId(), type: "image/png", file: bytes, fileName: "ubicacion-plusmedik.png" })).id,
+      sendImage: async (to, mediaId, caption) => {
+        const response = await kapsoClient().messages.sendImage({ phoneNumberId: phoneNumberId(), to, image: { id: mediaId, caption } });
+        return { providerMessageId: response.messages[0]?.id };
+      },
+      log: (event, data) => console.log(JSON.stringify({ event, ...data }))
+    })
+  : async () => undefined;
 
 function phoneNumberId(): string {
   const id = process.env.KAPSO_PHONE_NUMBER_ID;
@@ -261,6 +284,9 @@ const realDeps: QuoteDeps = {
       }
     : undefined,
   async sendText(to, body) {
+    // Si la respuesta lleva el link de Maps del laboratorio, sale la foto de ubicación con el texto como pie (un solo mensaje). Si algo falla, sale el texto de siempre.
+    const withPhoto = await locationPhoto(to, body);
+    if (withPhoto) return withPhoto;
     const response = await kapsoClient().messages.sendText({ phoneNumberId: phoneNumberId(), to, body });
     return { providerMessageId: response.messages[0]?.id };
   },

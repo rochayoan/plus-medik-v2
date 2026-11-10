@@ -9,7 +9,7 @@
 
 | Clave | Cuándo se usa | Texto actual (BORRADOR) | Aprobado por / fecha |
 | --- | --- | --- | --- |
-| `greeting` | Saludo cuando el paciente solo saluda. | ¡Hola! 👋 Soy la recepcionista virtual de PlusMedik. ¿En qué puedo ayudarte? Escríbeme los estudios que necesitas y te paso la cotización, o envíame una foto de tu receta si la tienes. | |
+| `greeting` | Saludo cuando el paciente solo saluda. | ¡Hola! 👋 Soy la recepcionista virtual de PlusMedik. ¿Te ayudo con la ubicación o con la cotización de algún estudio? Escríbeme los estudios que necesitas, o envíame una foto de tu receta si la tienes. | |
 | `send_recipe` | Pide la foto de la receta cuando el mensaje es un pedido de cotización sin foto. | Con gusto te ayudo a cotizar. Escríbeme los nombres de los estudios que necesitas o, si la tienes a mano, envíame una foto de tu receta. | |
 | `fallback` | Mensaje que no se entiende ni se puede derivar. | Con gusto te ayudo. ¿Qué estudio necesitas o qué te gustaría saber? Puedes escribirme su nombre o, si prefieres, enviar una foto de tu receta. | |
 | `handoff_confirmed` | Confirma la derivación a una persona. SOLO se envía con el caso ya registrado en el CRM. | Recibimos tu solicitud. Una persona del equipo la revisará y te escribirá por este chat. | |

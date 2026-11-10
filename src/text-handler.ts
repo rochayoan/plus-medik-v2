@@ -72,7 +72,7 @@ export interface ConversationTexts {
 // un asesor atiende el chat, así que se avisa «un asesor te atenderá lo antes posible» aunque la cola al CRM no esté activa) mencionan a una persona. Se usan con
 // la derivación persistida.
 export const DRAFT_TEXTS: ConversationTexts = {
-  greeting: "¡Hola! 👋 Soy la recepcionista virtual de PlusMedik. ¿En qué puedo ayudarte? Escríbeme los estudios que necesitas y te paso la cotización, o envíame una foto de tu receta si la tienes.",
+  greeting: "¡Hola! 👋 Soy la recepcionista virtual de PlusMedik. ¿Te ayudo con la ubicación o con la cotización de algún estudio? Escríbeme los estudios que necesitas, o envíame una foto de tu receta si la tienes.",
   send_recipe: "Con gusto te ayudo a cotizar. Escríbeme los nombres de los estudios que necesitas o, si la tienes a mano, envíame una foto de tu receta.",
   fallback: "Con gusto te ayudo. ¿Qué estudio necesitas o qué te gustaría saber? Puedes escribirme su nombre o, si prefieres, enviar una foto de tu receta.",
   handoff_confirmed: "Recibimos tu solicitud. Una persona del equipo la revisará y te escribirá por este chat.",
