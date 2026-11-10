@@ -83,7 +83,7 @@ export interface TurnRef {
 // Lo que el trabajo de un turno decide: nada que enviar (el trabajo ya cerró la corrida si hacía falta) o una respuesta.
 export type Produced =
   | { kind: "none" }
-  | { kind: "reply"; body: string; result: SendableResult; processingStatus: "COMPLETED" | "FAILED"; stale?: StalePolicy; signature?: string; generic?: true; photo?: PhotoReport; quality?: ReplyQuality; closes?: string[]; cap?: { max: number; windowSeconds: number } };
+  | { kind: "reply"; body: string; result: SendableResult; processingStatus: "COMPLETED" | "FAILED"; stale?: StalePolicy; signature?: string; generic?: true; quiet?: true; photo?: PhotoReport; quality?: ReplyQuality; closes?: string[]; cap?: { max: number; windowSeconds: number } };
 
 // Lo que dejó el análisis de UNA foto en la solicitud (solo estado e ids de lab_tests; nunca precios ni texto). Lo informa el productor de las fotos para que el motor de lotes sepa qué aportó cada una sin
 // tener que leerlo de la base: una foto con un número de turno posterior al del texto que anota el lote no es visible para él. No altera ningún envío.
@@ -197,6 +197,13 @@ export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claime
 
   async function deliver(produced: Extract<Produced, { kind: "reply" }>): Promise<TurnOutcome> {
     const { body: reply, result, processingStatus } = produced;
+    // Respuesta «silenciosa si va sola» (un audio que no se pudo escuchar, una imagen que no es una solicitud, un fallo técnico de lectura): sola no se envía, porque un mensaje en vano confunde al paciente
+    // y quien atiende ve el contenido en el chat. La corrida se cierra «sin respuesta» (con evidencia del análisis solo se permite foldTurn). En un lote con otras respuestas sí se conserva.
+    if (produced.quiet === true) {
+      if (guarded) await context.persist("fold", (audit, runId, held) => (audit.foldTurn ? audit.foldTurn(runId, held) : audit.recordIgnored(runId, "NO_REPLY", held)));
+      deps.log("reply_suppressed", { messageId: ref.messageId, phone: ref.who, result, reason: "QUIET_ALONE" });
+      return "ignored";
+    }
     // RESERVA DE ENVÍO: la única autorización para llamar a Kapso. Se concede una sola vez, a la ejecución que posee el lease vigente y mientras nadie haya
     // bloqueado la respuesta. Sin reserva NO se envía (la base concilia lo pendiente; ver plusmedik_audit_recover_stale).
     if (guarded) {

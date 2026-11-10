@@ -28,19 +28,19 @@ describe("src/system-prompt.ts real de PlusMedik", () => {
   it("confirma negocio, horario y servicios; deja pendientes datos no verificados", () => {
     expect(report.problems).toEqual([]);
     expect(report.sections.map((section) => section.id)).toEqual([...DATA_SECTION_IDS]);
-    for (const section of report.sections.filter((item) => !["NEGOCIO", "HORARIOS", "SERVICIOS"].includes(item.id))) {
+    for (const section of report.sections.filter((item) => !["NEGOCIO", "SUCURSALES", "HORARIOS", "SERVICIOS"].includes(item.id))) {
       expect(section, section.id).toMatchObject({ status: "PENDING", text: "", source: null, validUntil: null });
     }
-    for (const id of ["NEGOCIO", "HORARIOS", "SERVICIOS"]) {
+    for (const id of ["NEGOCIO", "SUCURSALES", "HORARIOS", "SERVICIOS"]) {
       expect(report.sections.find((section) => section.id === id)).toMatchObject({ status: "CONFIRMED", validUntil: "2026-12-31" });
     }
     expect(report.sections.find((section) => section.id === "HORARIOS")?.text).toContain("las 24 horas, todos los días");
+    expect(report.sections.find((section) => section.id === "HORARIOS")?.text).toContain("No es necesario sacar cita previa");
   });
 
   it("solo señala como pendientes las secciones no confirmadas", () => {
     const missing = Object.fromEntries(report.pending.map((item) => [item.section, item.missing]));
-    expect(Object.keys(missing).sort()).toEqual(["METODOS_DE_PAGO", "POLITICAS", "SUCURSALES", "TELEFONOS"]);
-    expect(missing.SUCURSALES).toContain("Sucursal 1 — Dirección");
+    expect(Object.keys(missing).sort()).toEqual(["METODOS_DE_PAGO", "POLITICAS", "TELEFONOS"]);
     expect(missing.TELEFONOS).toContain("WhatsApp de atención");
     expect(missing.METODOS_DE_PAGO).toContain("Métodos aceptados");
     expect(missing.POLITICAS).toContain("Facturación");
@@ -65,9 +65,10 @@ describe("src/system-prompt.ts real de PlusMedik", () => {
 
   it("permite los datos confirmados sin inventar plazos ni horarios específicos", () => {
     const facts = renderFacts(report.sections, new Date("2026-10-30T12:00:00Z"));
-    expect(facts.included).toEqual(["NEGOCIO", "HORARIOS", "SERVICIOS"]);
+    expect(facts.included).toEqual(["NEGOCIO", "SUCURSALES", "HORARIOS", "SERVICIOS"]);
     expect(facts.block).toContain("las 24 horas, todos los días");
-    expect(facts.block).toContain("https://maps.app.goo.gl/oj24D8D3fCiofd9R8");
+    expect(facts.block).toContain("https://maps.app.goo.gl/DU3r4eedeEWKHHZ2A");
+    expect(facts.block).toContain("Calle Cuellar casi esquina Santa Bárbara");
     expect(guardModelReply("Abrimos a las 08:00.", facts.context)).toMatchObject({ ok: false });
     expect(guardModelReply("El resultado del hemograma tarda 24 horas.", facts.context)).toMatchObject({ ok: false });
     expect(renderFacts(report.sections, new Date("2027-01-01T12:00:00Z")).included).not.toContain("HORARIOS");

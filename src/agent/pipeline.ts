@@ -1,3 +1,4 @@
+import { isCourtesyOnly } from "./courtesy.js";
 import { stripPaymentTalk } from "../payment-talk.js";
 import { describeProviderError } from "../provider-error.js";
 import type { AgentDecision, AgentModel, Capabilities, HandoffReason, ModelUsage, RecentEntry, Utterance, Violation } from "./contracts.js";
@@ -64,6 +65,8 @@ export async function runAgentTurn(deps: AgentDeps, input: AgentTurnInput): Prom
   const done = (decision: Omit<AgentDecision, "usage" | "toolRuns" | "facts" | "violations"> & Partial<Pick<AgentDecision, "toolRuns" | "facts" | "violations">>): AgentDecision =>
     ({ toolRuns: [], facts: [], violations: [], ...decision, usage });
   if (input.utterances.length === 0) return done({ status: "VERIFIED" });
+  // Solo agradecimientos, despedidas o «ya me atendieron»: no se responde (sin llamar al modelo). Un mensaje con algo más sigue el camino de siempre.
+  if (input.utterances.every((utterance) => isCourtesyOnly(utterance.text))) return done({ status: "SILENT", planFallback: "courtesy_only" });
 
   // 1. El modelo decide qué consultar. Una salida del plan que no se puede leer NO tumba el turno: se responde sin herramientas (y el motivo queda en el registro).
   let plan;

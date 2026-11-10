@@ -100,11 +100,11 @@ describe("modo turnos: imagen", () => {
     expect(t.sends).toHaveLength(1);
   });
 
-  it("un aviso técnico de una imagen sí puede quedar obsoleto (NEWER_TURN); la cotización no", async () => {
+  it("un fallo técnico al leer una imagen NO se le muestra al paciente: se cierra sin respuesta y sin reservar envío", async () => {
     const t = setup({ quote: { analyze: vi.fn(async () => { throw new Error("falla del modelo"); }) } });
-    expect(await handleImageMessage({ messageId: "wamid.i1", from: "59170000000", mediaId: "m1" }, t.deps)).toBe("technical_issue");
-    expect(t.audit.reserveSend).toHaveBeenCalledWith("run-1", "technical_issue", LEASE, { stale: "NEWER_TURN" });
-    expect(t.sends[0]![1]).toBe(TECHNICAL_ISSUE_MESSAGE);
+    expect(await handleImageMessage({ messageId: "wamid.i1", from: "59170000000", mediaId: "m1" }, t.deps)).toBe("ignored");
+    expect(t.audit.reserveSend).not.toHaveBeenCalled();
+    expect(t.sends).toHaveLength(0);
   });
 });
 

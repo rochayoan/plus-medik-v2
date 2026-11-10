@@ -113,9 +113,9 @@ describe("auditoría persistente del webhook", () => {
     const repo = audit();
     const d = deps(repo);
     d.analyze = vi.fn(async () => { throw new Error("OpenAI unavailable secret=not-logged"); });
-    await expect(handleImageMessage(image, d)).resolves.toBe("technical_issue");
+    await expect(handleImageMessage(image, d)).resolves.toBe("ignored");
     expect(vi.mocked(repo.recordFailure)).toHaveBeenCalledWith("run-1", "AI_PROCESSING_FAILED", LEASE);
-    expect(vi.mocked(repo.recordReply)).toHaveBeenCalledWith("run-1", expect.objectContaining({ state: "ACCEPTED", result: "technical_issue", processingStatus: "FAILED" }), LEASE);
+    expect(vi.mocked(repo.recordReply)).not.toHaveBeenCalled();
     expect(JSON.stringify(vi.mocked(d.log).mock.calls)).not.toContain("secret=not-logged");
   });
 
@@ -135,7 +135,7 @@ describe("auditoría persistente del webhook", () => {
       });
       throw new Error("OpenAI unavailable");
     };
-    await expect(handleImageMessage(image, d)).resolves.toBe("technical_issue");
+    await expect(handleImageMessage(image, d)).resolves.toBe("ignored");
     expect(vi.mocked(repo.recordEvidence)).toHaveBeenCalledWith("run-1", { aiCalls: [expect.objectContaining({ label: "openai-reader", outcome: "OK", usage: { inputTokens: 7 } })] }, LEASE);
     expect(vi.mocked(repo.recordFailure)).toHaveBeenCalledWith("run-1", "AI_PROCESSING_FAILED", LEASE);
   });

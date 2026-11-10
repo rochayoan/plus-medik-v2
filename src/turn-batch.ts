@@ -121,6 +121,8 @@ export function mergeProduced(items: readonly Produced[]): { produced: Produced;
       processingStatus: parts.some((p) => p.processingStatus === "FAILED") ? "FAILED" : "COMPLETED",
       // Una cotización o un aviso que no admite descarte (stale NONE) obliga a enviar el mensaje completo.
       stale: parts.some((p) => (p.stale ?? "NONE") === "NONE") ? "NONE" : "NEWER_TURN",
+      // Solo es «silenciosa» si TODO lo que lleva lo es (varios audios fallidos juntos); con algo más, el aviso se conserva.
+      ...(parts.every((p) => p.quiet === true) ? { quiet: true as const } : {}),
       ...(signature ? { signature } : {})
     },
     included

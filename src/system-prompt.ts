@@ -88,25 +88,25 @@ export const BUSINESS_DATA: BusinessData = {
   // Nombre comercial y, si aplica, razón social o frase de presentación.
   NEGOCIO: {
     estado: "CONFIRMADO",
-    fuente: "confirmacion_responsable_2026-10-31",
+    fuente: "confirmacion_responsable_2026-11-10",
     vigenteHasta: "2026-12-31",
     datos: `
 - Nombre comercial: PLUSMEDIK.
 - Actividad: laboratorio clínico en Santa Cruz de la Sierra, Bolivia.
-- Ubicación en Google Maps: https://maps.app.goo.gl/oj24D8D3fCiofd9R8
+- Ubicación en Google Maps: https://maps.app.goo.gl/DU3r4eedeEWKHHZ2A
 `
   },
 
   // Una línea por dato y por sucursal (copia el bloque por cada sucursal): nombre, dirección completa, referencias y enlace https al mapa si lo hay.
   SUCURSALES: {
-    estado: "POR_COMPLETAR",
-    fuente: "",
-    vigenteHasta: "",
+    estado: "CONFIRMADO",
+    fuente: "imagen_oficial_donde_estamos_2026-11-10",
+    vigenteHasta: "2026-12-31",
     datos: `
-- Sucursal 1 — Nombre: [POR COMPLETAR]
-- Sucursal 1 — Dirección: [POR COMPLETAR]
-- Sucursal 1 — Referencias: [POR COMPLETAR]
-- Sucursal 1 — Mapa: [POR COMPLETAR]
+- Sucursal 1 — Nombre: PLUSMEDIK (sede central).
+- Sucursal 1 — Dirección: Calle Cuellar casi esquina Santa Bárbara, Santa Cruz de la Sierra, Bolivia.
+- Sucursal 1 — Referencias: diagonal a la puerta principal del hospital San Juan de Dios.
+- Sucursal 1 — Mapa: https://maps.app.goo.gl/DU3r4eedeEWKHHZ2A
 `
   },
 
@@ -117,7 +117,8 @@ export const BUSINESS_DATA: BusinessData = {
     fuente: "confirmacion_responsable_2026-10-30",
     vigenteHasta: "2026-12-31",
     datos: `
-- Atención general del laboratorio: las 24 horas, todos los días (lunes a domingo).
+- Atención general del laboratorio: las 24 horas, todos los días del año (lunes a domingo, los 365 días).
+- No es necesario sacar cita previa.
 `
   },
 
@@ -127,7 +128,7 @@ export const BUSINESS_DATA: BusinessData = {
     fuente: "",
     vigenteHasta: "",
     datos: `
-- Teléfono general: [POR COMPLETAR]
+- Teléfono general: 77602262 y 62007191 (según la imagen oficial «¿Dónde estamos?»; falta confirmar cuál es el WhatsApp de atención).
 - Sucursal 1 — Teléfono: [POR COMPLETAR]
 - WhatsApp de atención: [POR COMPLETAR]
 `

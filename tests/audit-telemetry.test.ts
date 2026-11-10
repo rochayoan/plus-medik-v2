@@ -440,7 +440,7 @@ describe("clasificación de fallos del procesamiento: por etapa, no por texto", 
   it("un fallo posterior al análisis es inesperado y nunca se persiste ni se registra el mensaje del error", async () => {
     const after = quoteDeps({});
     after.deps.analyze = vi.fn(async () => ({ get outcome(): never { throw new Error(`${misleading} secret=sk-SECRETO`); } }) as unknown as AnalysisResult);
-    await expect(handleImageMessage(image, after.deps)).resolves.toBe("technical_issue");
+    await expect(handleImageMessage(image, after.deps)).resolves.toBe("ignored");
     expect(after.audit.recordFailure).toHaveBeenCalledWith("run-1", "UNEXPECTED_PROCESSING_FAILED", LEASE);
     expect(JSON.stringify([vi.mocked(after.audit.recordFailure).mock.calls, after.logs])).not.toContain("SECRETO");
     expect(JSON.stringify(after.logs)).not.toContain("secret=");

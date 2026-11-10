@@ -88,11 +88,11 @@ export const AGENT_SCENARIOS: AgentScenario[] = [
   },
   {
     id: "agradecimiento",
-    title: "Un agradecimiento tras una conversación en curso",
+    title: "Un agradecimiento tras una conversación en curso: no se responde (decisión 2026-11-10, sin llamar al modelo)",
     turns: ["gracias, muy amable"],
     recent: [{ from: "ASSISTANT", text: "Abajo tienes el detalle de tu cotización." }],
-    expect: { quoteBlock: false, replyNoMatch: NO_PRICES },
-    good: [{ calls: [], text: "¡De nada! Cualquier otra consulta, aquí estoy." }]
+    expect: { silent: true },
+    good: [{ calls: [], silent: true, text: "(no se usa)" }]
   },
   {
     id: "cotizar-por-nombre",

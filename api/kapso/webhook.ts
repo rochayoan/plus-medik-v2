@@ -24,6 +24,11 @@ import { resolveCrmOutbox } from "../../src/crm-outbox/config.js";
 import { createCrmHandoffSink } from "../../src/crm-outbox/handoff-sink.js";
 import { QUOTE_TEXTS } from "../../src/quote-session.js";
 import { appendApprovedQuotePreparations } from "../../src/quote-preparation.js";
+import { appendQuoteTurnaround } from "../../src/quote-turnaround.js";
+import { answerFromBusinessData } from "../../src/business-answers.js";
+import { createLocationPhotoSender, type LocationPhotoSender } from "../../src/location-photo.js";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { appendApprovedQuoteStudyDetails } from "../../src/quote-study-details.js";
 import { createSupabaseStudyFactsStore, StudyFactsService } from "../../src/study-facts/index.js";
 import { resolveQuoteSessionsConfig } from "../../src/quote-session-turns.js";
@@ -133,6 +138,26 @@ function kapsoClient(): WhatsAppClient {
   return new WhatsAppClient({ baseUrl: "https://api.kapso.ai/meta/whatsapp", kapsoApiKey });
 }
 
+// PLUSMEDIK_LOCATION_PHOTO=off la apaga; por defecto está encendida. La foto vive en assets/ubicacion-plusmedik.png (se puede cambiar con PLUSMEDIK_LOCATION_PHOTO_PATH).
+const locationPhotoEnabled = (process.env.PLUSMEDIK_LOCATION_PHOTO ?? "on").trim().toLowerCase() !== "off";
+const locationPhoto: LocationPhotoSender = locationPhotoEnabled
+  ? createLocationPhotoSender({
+      readPhoto: async () => {
+        try {
+          return new Uint8Array(await readFile(process.env.PLUSMEDIK_LOCATION_PHOTO_PATH ?? join(process.cwd(), "assets", "ubicacion-plusmedik.png")));
+        } catch {
+          return undefined;
+        }
+      },
+      upload: async (bytes) => (await kapsoClient().media.upload({ phoneNumberId: phoneNumberId(), type: "image/png", file: bytes, fileName: "ubicacion-plusmedik.png" })).id,
+      sendImage: async (to, mediaId, caption) => {
+        const response = await kapsoClient().messages.sendImage({ phoneNumberId: phoneNumberId(), to, image: { id: mediaId, caption } });
+        return { providerMessageId: response.messages[0]?.id };
+      },
+      log: (event, data) => console.log(JSON.stringify({ event, ...data }))
+    })
+  : async () => undefined;
+
 function phoneNumberId(): string {
   const id = process.env.KAPSO_PHONE_NUMBER_ID;
   if (!id) throw new Error("Missing KAPSO_PHONE_NUMBER_ID");
@@ -203,7 +228,8 @@ const agentPilot = agentSettings && turnsEnabled && textHandlerEnabled
       handoffEnabled: crmOutbox !== undefined,
       context: {
         loadCatalog: ttlCache(() => loadActiveCatalog(), 60_000),
-        ...(knowledgeOptions ? { answer: (question: string) => answerFromKnowledge(question, knowledgeOptions) } : {}),
+        // Ubicación y horario general: primero los datos comerciales de Git (BUSINESS_DATA); lo demás, el conocimiento aprobado de siempre.
+        answer: async (question: string) => answerFromBusinessData(question) ?? (knowledgeOptions ? answerFromKnowledge(question, knowledgeOptions) : undefined),
         ...(convState ? { reader: createConversationReader({ store: createSupabaseConversationStore() }) } : {}),
         contactKeyFor,
         recent: createRecentProvider({}),
@@ -244,8 +270,9 @@ const realDeps: QuoteDeps = {
             }
           })
         });
-        if (!quoteStudyDetailsEnabled) return prepared;
-        return appendApprovedQuoteStudyDetails({
+        // El tiempo de entrega sale del catálogo (lab_tests.notes), no del marco de datos aprobados por estudio: se añade siempre que haya dato.
+        if (!quoteStudyDetailsEnabled) return appendQuoteTurnaround(prepared, studyIds, catalog);
+        return appendQuoteTurnaround(await appendApprovedQuoteStudyDetails({
           quote: prepared,
           studyIds,
           catalog,
@@ -255,10 +282,13 @@ const realDeps: QuoteDeps = {
               throw new Error("QUOTE_STUDY_DETAILS_TRACE_UNAVAILABLE");
             }
           })
-        });
+        }), studyIds, catalog);
       }
     : undefined,
   async sendText(to, body) {
+    // Si la respuesta lleva el link de Maps del laboratorio, sale la foto de ubicación con el texto como pie (un solo mensaje). Si algo falla, sale el texto de siempre.
+    const withPhoto = await locationPhoto(to, body);
+    if (withPhoto) return withPhoto;
     const response = await kapsoClient().messages.sendText({ phoneNumberId: phoneNumberId(), to, body });
     return { providerMessageId: response.messages[0]?.id };
   },

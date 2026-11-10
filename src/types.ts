@@ -79,6 +79,8 @@ export interface CatalogStudy {
   // Contexto para el resolvedor semántico (opcional; no interviene en el matching exacto).
   category?: string | null;
   sampleType?: string | null;
+  // «Tiempo de entrega» tal como lo escribió el laboratorio en lab_tests.notes («2 horas», «3 dias», «En el dia»). Solo informativo: nunca interviene en el matching ni en los precios.
+  turnaroundText?: string | null;
 }
 
 export type CatalogResolution =

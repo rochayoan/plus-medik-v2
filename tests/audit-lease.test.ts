@@ -187,11 +187,12 @@ describe("el envío solo ocurre tras una reserva concedida", () => {
   it("el aviso técnico por un fallo del motor y el aviso de imagen no soportada también se reservan, con su tipo", async () => {
     const failing = audit();
     const a = flow(failing, { analyze: vi.fn(async () => { throw new Error("IA caída"); }) });
-    await expect(handleImageMessage(image, a.deps)).resolves.toBe("technical_issue");
-    expect(a.sendText).toHaveBeenCalledWith(image.from, TECHNICAL_ISSUE_MESSAGE);
+    // El fallo técnico al leer una imagen ya no se envía al paciente: queda el registro del fallo y no hay reserva ni envío.
+    await expect(handleImageMessage(image, a.deps)).resolves.toBe("ignored");
+    expect(a.sendText).not.toHaveBeenCalled();
     expect(vi.mocked(failing.recordFailure)).toHaveBeenCalledWith("run-1", "AI_PROCESSING_FAILED", LEASE);
-    expect(vi.mocked(failing.reserveSend)).toHaveBeenCalledWith("run-1", "technical_issue", LEASE);
-    expect(vi.mocked(failing.recordReply)).toHaveBeenCalledWith("run-1", expect.objectContaining({ result: "technical_issue", processingStatus: "FAILED" }), LEASE);
+    expect(vi.mocked(failing.reserveSend)).not.toHaveBeenCalled();
+    expect(vi.mocked(failing.recordReply)).not.toHaveBeenCalled();
 
     const wrongType = audit();
     const b = flow(wrongType, { downloadImage: vi.fn(async () => ({ bytes: Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]) })) });

@@ -312,12 +312,14 @@ describe.skipIf(!bin)("recuperación de procesamientos interrumpidos (extremo a 
   });
 
   describe("mensajes al paciente y fallos del motor", () => {
-    it("un fallo del motor responde el aviso técnico de siempre, una vez, y la corrida queda FAILED + enviada", async () => {
+    it("un fallo del motor NO envía aviso técnico (no se sabe si era una receta) y la corrida queda FAILED sin envío", async () => {
       const image = newImage();
       const run = setup({ analyze: async () => { throw new Error("IA caída"); } });
-      await expect(handleImageMessage(image, run.deps)).resolves.toBe("technical_issue");
-      expect(run.sends).toEqual([TECHNICAL_ISSUE_MESSAGE]);
-      expect(await row(image.messageId)).toMatchObject({ processing_status: "FAILED", send_state: "ACCEPTED", error_code: "AI_PROCESSING_FAILED" });
+      await expect(handleImageMessage(image, run.deps)).resolves.toBe("ignored");
+      expect(run.sends).toEqual([]);
+      const stored = await row(image.messageId);
+      expect(stored).toMatchObject({ processing_status: "FAILED", error_code: "AI_PROCESSING_FAILED" });
+      expect(stored.send_state).not.toBe("ACCEPTED");
     });
 
     it("sin cotización se pide una foto más clara (texto de siempre) y una imagen de tipo no soportado también; una demasiado grande no recibe respuesta", async () => {

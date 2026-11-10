@@ -535,12 +535,12 @@ describe.skipIf(!bin)("audios (transcripción dentro del flujo del mensaje) de e
   // ───────────────────────────── fallas parciales y archivos inválidos ─────────────────────────────
 
   describe("fallas, reintentos y archivos inválidos: nunca se inventa información", () => {
-    it("archivo que NO es audio (el enlace devolvió una página): aviso de que no se pudo abrir, nada se cotiza, y la solicitud queda marcada para que «listo» no cotice como si el audio no existiera", async () => {
+    it("archivo que NO es audio (el enlace devolvió una página): NO se envía aviso (solo), nada se cotiza, y la solicitud queda marcada para que «listo» no cotice como si el audio no existiera", async () => {
       const p = patient();
       const w = setup();
       w.world.media.A = { bytes: new TextEncoder().encode(`<html><body>expired</body></html>`.padEnd(400, " ")) };
       await deliver(w, audioEvent(id("aud"), p.phone, "A"));
-      expect(w.sends).toEqual([{ to: p.phone, body: AUDIO_TEXTS.invalid }]);
+      expect(w.sends).toEqual([]);
       expect(w.transcriber).not.toHaveBeenCalled();
       expect(await itemStatuses(p.key)).toEqual(["UNREADABLE"]);
       // el paciente escribe y pide cerrar: no se cotiza a ciegas
@@ -550,32 +550,32 @@ describe.skipIf(!bin)("audios (transcripción dentro del flujo del mensaje) de e
       expect(w.sends.some((sent) => hasPrice(sent.body))).toBe(false);
     });
 
-    it("formato que el transcriptor no admite (AMR) y aquí no se convierte: aviso, sin llamar a OpenAI", async () => {
+    it("formato que el transcriptor no admite (AMR) y aquí no se convierte: sin aviso, sin llamar a OpenAI", async () => {
       const p = patient();
       const w = setup();
       w.world.media.A = { bytes: new Uint8Array(400).fill(0).map((_, i) => "#!AMR\n".charCodeAt(i) || 0) };
       await deliver(w, audioEvent(id("aud"), p.phone, "A"));
-      expect(w.sends).toEqual([{ to: p.phone, body: AUDIO_TEXTS.invalid }]);
+      expect(w.sends).toEqual([]);
       expect(w.transcriber).not.toHaveBeenCalled();
     });
 
-    it("audio sin palabras reconocibles: aviso de que no se entendió; nada se cotiza", async () => {
+    it("audio sin palabras reconocibles: sin aviso (solo); nada se cotiza", async () => {
       const p = patient();
       const w = setup();
       w.world.spoken.A = new AudioFailure("UNINTELLIGIBLE");
       await deliver(w, audioEvent(id("aud"), p.phone, "A"));
-      expect(w.sends).toEqual([{ to: p.phone, body: AUDIO_TEXTS.unintelligible }]);
+      expect(w.sends).toEqual([]);
       expect(w.transcriber).toHaveBeenCalledTimes(1);
     });
 
-    it("audio demasiado grande o transcripción que no cabe entera: aviso; jamás se usa un trozo", async () => {
+    it("audio demasiado grande o transcripción que no cabe entera: sin aviso (solo); jamás se usa un trozo", async () => {
       const p = patient();
       const w = setup();
       w.world.media.A = { bytes: new Uint8Array(11 * 1024 * 1024) };
       w.world.spoken.B = new AudioFailure("TOO_LONG");
       await deliverOne(w, audioEvent(id("aud"), p.phone, "A"));
       await deliverOne(w, audioEvent(id("aud"), p.phone, "B"));
-      expect(w.sends.map((sent) => sent.body)).toEqual([AUDIO_TEXTS.too_long, AUDIO_TEXTS.too_long]);
+      expect(w.sends).toEqual([]);
       expect(w.world.transcribed).toEqual(["B"]);
     });
 
@@ -595,7 +595,7 @@ describe.skipIf(!bin)("audios (transcripción dentro del flujo del mensaje) de e
       w2.world.media.B = { status: 410 };
       await deliver(w2, audioEvent(id("aud"), q.phone, "B", { mediaId: null }));
       expect(w2.world.sdkCalls).toEqual([]);
-      expect(w2.sends).toEqual([{ to: q.phone, body: AUDIO_TEXTS.invalid }]);
+      expect(w2.sends).toEqual([]);
     });
 
     it("NUNCA se descarga de una URL de Meta: sin enlace de Kapso se usa el id con el SDK; sin ninguno de los dos, aviso", async () => {
@@ -612,7 +612,7 @@ describe.skipIf(!bin)("audios (transcripción dentro del flujo del mensaje) de e
       const w2 = setup();
       await deliver(w2, audioEvent(id("aud"), q.phone, "B", { url: "https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=B", mediaId: null }));
       expect(w2.world.downloaded).toEqual([]);
-      expect(w2.sends).toEqual([{ to: q.phone, body: AUDIO_TEXTS.invalid }]);
+      expect(w2.sends).toEqual([]);
     });
 
     it("OpenAI falla dos veces y a la tercera responde: se reintenta dentro del mismo procesamiento y sale UNA respuesta normal", async () => {
@@ -629,17 +629,17 @@ describe.skipIf(!bin)("audios (transcripción dentro del flujo del mensaje) de e
       expect(w.sends[0]!.body).toContain("HEMOGRAMA COMPLETO");
     });
 
-    it("OpenAI no responde nunca: aviso de que no se pudo procesar, una sola respuesta, ningún intento posterior y nada cotizado", async () => {
+    it("OpenAI no responde nunca: sin aviso al paciente (solo), ningún intento posterior y nada cotizado", async () => {
       const p = patient();
       const w = setup();
       w.world.spoken.A = new AudioFailure("UNAVAILABLE", true);
       const messageId = id("aud");
       await deliver(w, audioEvent(messageId, p.phone, "A"));
-      expect(w.sends).toEqual([{ to: p.phone, body: AUDIO_TEXTS.unavailable }]);
+      expect(w.sends).toEqual([]);
       expect(w.transcriber).toHaveBeenCalledTimes(3);
-      // el reintento de Kapso de la misma entrega no vuelve a avisar ni a transcribir
+      // el reintento de Kapso de la misma entrega no vuelve a transcribir
       await deliver(w, audioEvent(messageId, p.phone, "A"));
-      expect(w.sends).toHaveLength(1);
+      expect(w.sends).toHaveLength(0);
       expect(w.transcriber).toHaveBeenCalledTimes(3);
     });
 

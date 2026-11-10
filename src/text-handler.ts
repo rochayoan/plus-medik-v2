@@ -68,14 +68,15 @@ export interface ConversationTexts {
   medical_handoff_confirmed: string;
 }
 
-// BORRADORES pendientes de aprobación del laboratorio. Sin cifras, moneda, plazos ni horarios; solo uno promete a una persona (handoff_confirmed) y solo se usa con
+// BORRADORES pendientes de aprobación del laboratorio. Sin cifras, moneda, plazos ni horarios; solo handoff_confirmed (con la derivación persistida) y handoff_unavailable (decisión del laboratorio, 2026-11-10:
+// un asesor atiende el chat, así que se avisa «un asesor te atenderá lo antes posible» aunque la cola al CRM no esté activa) mencionan a una persona. Se usan con
 // la derivación persistida.
 export const DRAFT_TEXTS: ConversationTexts = {
-  greeting: "¡Hola! 👋 Soy la recepcionista virtual de PlusMedik. ¿En qué puedo ayudarte? Puedes escribir tus estudios o enviarme una foto de tu receta para cotizar.",
-  send_recipe: "Con gusto te ayudo a cotizar. Puedes escribir los nombres de tus estudios o enviar una foto clara y completa de tu receta.",
-  fallback: "Con gusto te oriento. ¿Sobre qué te gustaría saber más? También puedes escribir tus estudios o enviar una foto de tu receta para cotizar.",
+  greeting: "¡Hola! 👋 Soy la recepcionista virtual de PlusMedik. ¿Te ayudo con la ubicación o con la cotización de algún estudio? Escríbeme los estudios que necesitas, o envíame una foto de tu receta si la tienes.",
+  send_recipe: "Con gusto te ayudo a cotizar. Escríbeme los nombres de los estudios que necesitas o, si la tienes a mano, envíame una foto de tu receta.",
+  fallback: "Con gusto te ayudo. ¿Qué estudio necesitas o qué te gustaría saber? Puedes escribirme su nombre o, si prefieres, enviar una foto de tu receta.",
   handoff_confirmed: "Recibimos tu solicitud. Una persona del equipo la revisará y te escribirá por este chat.",
-  handoff_unavailable: "Recibimos tu consulta. Por ahora no puedo conectarte directamente con recepción desde este chat ni confirmar información que no tenga verificada. Si estás en el laboratorio, consulta con el personal de atención.",
+  handoff_unavailable: "Recibimos tu consulta. Un asesor la revisará y te atenderá lo antes posible por este chat.",
   medical_unavailable: "Recibimos tu mensaje. No puedo darte orientación médica por este chat. Si es una urgencia, comunícate con los servicios de emergencia de tu localidad.",
   medical_handoff_confirmed: "Recibimos tu mensaje. No puedo darte orientación médica por este chat. Si es una urgencia, comunícate con los servicios de emergencia de tu localidad. Una persona del equipo revisará tu mensaje y te escribirá por este chat."
 };

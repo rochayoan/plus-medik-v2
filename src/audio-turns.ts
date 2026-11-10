@@ -63,10 +63,12 @@ export function audioFailureProducer(turn: IncomingTurn, deps: QuoteDeps, texts:
       const errorCode = processingFailureCode("OTHER");
       deps.log("processing_failed", { messageId: turn.messageId, phone: maskPhone(turn.from), errorCode, ...(error instanceof SessionUnavailableError ? { stage: error.stage } : {}) });
       await ctx.persist("failure", (audit, runId, lease) => audit.recordFailure(runId, errorCode, lease));
-      return { kind: "reply", body: TECHNICAL_ISSUE_MESSAGE, result: "technical_issue", processingStatus: "FAILED", stale: "NEWER_TURN" };
+      // Un fallo técnico NO se le muestra al paciente si va solo: quien atiende ve el audio en el chat.
+      return { kind: "reply", body: TECHNICAL_ISSUE_MESSAGE, result: "technical_issue", processingStatus: "FAILED", stale: "NEWER_TURN", quiet: true };
     }
-    // Como el aviso de una foto ilegible: se envía siempre (no se descarta por obsoleto) y no cuenta como respuesta conversacional repetida.
-    return { kind: "reply", body: texts[key], result: "no_quote", processingStatus: "COMPLETED", stale: "NONE" };
+    // Un audio que no se pudo escuchar, SOLO, no genera mensaje: pedirle al paciente que lo reenvíe o lo escriba gasta un mensaje en vano (muchos audios son de laboratorios aliados o de
+    // conversaciones que ya atiende una persona). Si viaja con otro mensaje del paciente en el mismo lote, el aviso se conserva para que sepa que esa parte no se escuchó.
+    return { kind: "reply", body: texts[key], result: "no_quote", processingStatus: "COMPLETED", stale: "NONE", quiet: true };
   };
 }
 

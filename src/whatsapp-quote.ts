@@ -226,6 +226,7 @@ export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProduc
     let reply: string;
     let result: "quoted" | "no_quote" | "technical_issue";
     let processingStatus: "COMPLETED" | "FAILED" = "COMPLETED";
+    let quiet = false;
     const aiCalls: AiCallEvent[] = [];
     // Etapa en curso: el código de fallo de la auditoría sale de DÓNDE falló el flujo, no del texto del error.
     let phase: ProcessingPhase = "MEDIA_DOWNLOAD";
@@ -295,6 +296,11 @@ export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProduc
               ? STUDIES_UNRESOLVED_MESSAGE
               : instant ? NO_QUOTE_MESSAGE_INSTANT : NO_QUOTE_MESSAGE;
           result = "no_quote";
+          // Solo una imagen que SÍ parece una solicitud de estudios (receta, formulario o manuscrito) merece pedir una mejor foto. Si no es una solicitud, o no se sabe qué es, se calla: casi siempre es una
+          // imagen de una conversación interna (comprobantes, muestras, fotos de otros laboratorios) y el mensaje solo confunde. Un humano la ve en el chat.
+          const docType = analysis.internal?.document.type;
+          const looksLikeRequest = docType === "TEXT_EXPLICIT_REQUEST" || docType === "MARK_DEPENDENT_FORM" || docType === "HANDWRITTEN_REQUEST";
+          quiet = analysis.reasons.includes("not_a_request") || (docType !== undefined && !looksLikeRequest);
         }
       }
     } catch (error) {
@@ -307,9 +313,11 @@ export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProduc
       reply = TECHNICAL_ISSUE_MESSAGE;
       result = "technical_issue";
       processingStatus = "FAILED";
+      // No se sabe si era una receta: el aviso técnico no se envía solo (si era una receta, quien atiende la ve en el chat).
+      quiet = true;
     }
     // En modo turnos: una cotización o su pedido de otra foto NUNCA se descartan en silencio; solo el aviso técnico puede quedar obsoleto si el paciente ya escribió de nuevo.
-    return { kind: "reply", body: reply, result, processingStatus, stale: result === "technical_issue" ? "NEWER_TURN" : "NONE" };
+    return { kind: "reply", body: reply, result, processingStatus, stale: result === "technical_issue" ? "NEWER_TURN" : "NONE", ...(quiet ? { quiet: true as const } : {}) };
   };
 }
 

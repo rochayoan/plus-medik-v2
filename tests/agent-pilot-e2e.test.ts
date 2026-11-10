@@ -488,11 +488,11 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
       const w = setup({ pilot: { phones: [p.phone], model } });
       await switchTo(true);
       await say(w, p.phone, "hola, necesito cotizar vitamina b12");
-      await say(w, p.phone, "gracias");
+      await say(w, p.phone, "y también un hemograma");
       const secondPlan = model.plans[1]!;
       expect(secondPlan.recent.map((entry) => entry.from)).toEqual(["PATIENT", "ASSISTANT"]);
       expect(secondPlan.recent[0]!.text).toBe("hola, necesito cotizar vitamina b12");
-      expect(secondPlan.recent.map((entry) => entry.text).join(" ")).not.toContain("gracias");
+      expect(secondPlan.recent.map((entry) => entry.text).join(" ")).not.toContain("también un hemograma");
       expect(called(w, "plusmedik_history_recent")).toBeGreaterThanOrEqual(2);
     });
 

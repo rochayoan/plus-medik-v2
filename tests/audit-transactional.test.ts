@@ -251,7 +251,7 @@ describe("fail-open y envío a WhatsApp", () => {
   it("si el análisis falla, solo se registran las llamadas de IA que ocurrieron (sin resumen inventado) y una sola vez", async () => {
     const audit = spyAudit();
     const { deps } = flow(fakeSupabase(), { audit, analyze: vi.fn(async () => { throw new Error("IA caída"); }) });
-    await expect(handleImageMessage(image, deps)).resolves.toBe("technical_issue");
+    await expect(handleImageMessage(image, deps)).resolves.toBe("ignored");
     expect(vi.mocked(audit.recordEvidence)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(audit.recordEvidence).mock.calls[0]![1]).not.toHaveProperty("analysis");
     expect(vi.mocked(audit.recordFailure)).toHaveBeenCalledWith("run-1", "AI_PROCESSING_FAILED", LEASE);
@@ -267,7 +267,7 @@ describe("fail-open y envío a WhatsApp", () => {
       sendText: vi.fn(async () => ({ providerMessageId: "x" }))
     });
     Object.defineProperty(ok, "publicQuote", { get() { throw new Error("fallo al armar la respuesta"); } });
-    await expect(handleImageMessage(image, deps)).resolves.toBe("technical_issue");
+    await expect(handleImageMessage(image, deps)).resolves.toBe("ignored");
     expect(vi.mocked(audit.recordEvidence)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(audit.recordEvidence).mock.calls[0]![1]).toHaveProperty("analysis");
     expect(vi.mocked(audit.recordFailure)).toHaveBeenCalledWith("run-1", "UNEXPECTED_PROCESSING_FAILED", LEASE);
