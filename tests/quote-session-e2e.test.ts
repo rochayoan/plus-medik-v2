@@ -666,7 +666,7 @@ describe.skipIf(!bin)("sesiones de cotización de extremo a extremo contra Postg
       expect(last(w)).toContain("HEMOGRAMA COMPLETO — Bs 45");
     });
 
-    it("si falla el análisis de una foto, queda registrada como ilegible: «listo» pide reenviarla en vez de cotizar sin ella", async () => {
+    it("si falla el análisis de una foto, queda pendiente de revisión sin declararla ilegible: «listo» no cotiza sin ella", async () => {
       const p = patient();
       const w = setup();
       w.quote.analyze = vi.fn(async () => { throw new Error(`modelo caído ${SENTINEL}`); });
@@ -674,7 +674,7 @@ describe.skipIf(!bin)("sesiones de cotización de extremo a extremo contra Postg
       expect(last(w)).toBe(TECHNICAL_ISSUE_MESSAGE);
       await say(w, p.phone, "hemograma");
       await say(w, p.phone, "listo");
-      expect(last(w)).toBe(QUOTE_TEXTS.resend);
+      expect(last(w)).toBe(QUOTE_TEXTS.review);
     });
   });
 

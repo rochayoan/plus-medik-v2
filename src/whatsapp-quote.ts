@@ -124,7 +124,9 @@ export function formatQuoteMessage(quote: PublicQuote, options: { partial?: bool
 // Sin cotización automática (ningún estudio verificable, documento que no es una solicitud, etc.): se pide una mejor foto. No menciona estudios pendientes.
 export const NO_QUOTE_MESSAGE = "🩺 *PlusMedik*\n\nNo pudimos generar la cotización con esta imagen. ¿Puedes enviarnos una foto más clara de tu receta, completa y bien iluminada? 📸";
 const NO_QUOTE_MESSAGE_INSTANT = "🩺 *PlusMedik*\n\nNo pudimos identificar estudios con suficiente certeza en esta fotografía para generar una cotización. 📋";
-export const TECHNICAL_ISSUE_MESSAGE = "🩺 *PlusMedik*\n\nTuvimos un inconveniente al revisar tu receta. Por favor, intenta enviarla de nuevo en unos minutos. 🙏";
+export const TECHNICAL_ISSUE_MESSAGE = "🩺 *PlusMedik*\n\nHubo un inconveniente técnico al procesar tu solicitud. Esto no significa que la fotografía sea ilegible. Puedes intentar más tarde o escribir los estudios; no es necesario reenviar la misma foto de inmediato. 🙏";
+export const STUDIES_UNRESOLVED_MESSAGE = "🩺 *PlusMedik*\n\nNo pude identificar con certeza algunos estudios de la solicitud. Puedes escribir sus nombres completos para verificarlos; no te daré precios de estudios dudosos.";
+export const NOT_RECIPE_MESSAGE = "🩺 *PlusMedik*\n\nLa imagen no parece ser una solicitud de estudios. Si necesitas una cotización, escribe los estudios o envía una receta.";
 
 // ───────────────────────────── orquestación (con dependencias inyectables) ─────────────────────────────
 
@@ -287,7 +289,11 @@ export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProduc
           result = "quoted";
           deps.turns?.convState?.artifact({ from: image.from, key: image.messageId, kind: "QUOTE", studyIds: readIds });
         } else {
-          reply = instant ? NO_QUOTE_MESSAGE_INSTANT : NO_QUOTE_MESSAGE;
+          reply = analysis.reasons.includes("not_a_request")
+            ? NOT_RECIPE_MESSAGE
+            : analysis.reasons.some((reason) => reason.startsWith("catalog_") || reason.startsWith("semantic_") || reason === "package_alternative_unresolved")
+              ? STUDIES_UNRESOLVED_MESSAGE
+              : instant ? NO_QUOTE_MESSAGE_INSTANT : NO_QUOTE_MESSAGE;
           result = "no_quote";
         }
       }

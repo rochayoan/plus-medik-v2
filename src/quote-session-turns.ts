@@ -40,7 +40,18 @@ export function itemFromAnalysis(analysis: AnalysisResult): ItemResult {
   const lines = analysis.internal?.quoted.lines ?? analysis.quote?.lines ?? [];
   const studyIds = [...new Set(lines.map((line) => line.id))];
   const hasQuote = Boolean(analysis.publicQuote) || Boolean(analysis.quote);
-  if (analysis.outcome === "HUMAN_REVIEW" || !hasQuote || studyIds.length === 0) return UNREADABLE("UNREADABLE_IMAGE");
+  if (analysis.outcome === "HUMAN_REVIEW" || !hasQuote || studyIds.length === 0) {
+    // Una imagen legible puede contener estudios ausentes/ambiguos del catálogo:
+    // HUMAN_REVIEW NO equivale a "foto ilegible". Mantenerla pendiente de
+    // aclaración sin atribuir al paciente un error que no cometió.
+    const catalogue = analysis.reasons.some((reason) =>
+      reason.startsWith("catalog_") || reason.startsWith("semantic_") ||
+      reason === "package_alternative_unresolved" || reason === "line_service_not_covered"
+    );
+    return catalogue
+      ? { status: "UNRESOLVED", studyIds, ambiguous: [], unresolved: 1, reasons: ["UNRESOLVED_TEXT"] }
+      : UNREADABLE("UNREADABLE_IMAGE");
+  }
   const complete = analysis.outcome ? analysis.outcome === "AUTO_COMPLETE" : analysis.decision === "AUTO_SAFE";
   return complete
     ? { status: "RESOLVED", studyIds, ambiguous: [], unresolved: 0, reasons: [] }
@@ -149,7 +160,13 @@ export function sessionImageProducer(image: IncomingImage, deps: QuoteDeps, conf
       deps.log("processing_failed", { messageId: image.messageId, phone: who, errorCode, ...(error instanceof SessionUnavailableError ? { stage: error.stage } : {}), ...(aiFailures.length > 0 ? { aiFailures } : {}) });
       if (!evidenceAttempted) await ctx.persist("evidence", (audit, runId, lease) => audit.recordEvidence(runId, { aiCalls }, lease));
       // Si la foto ya estaba en la sesión «en proceso», se marca ilegible: «listo» pedirá otra en vez de quedarse esperando algo que no llegará.
-      if (began) await ctx.persist("quote_finish", async (audit, runId, lease) => { await needs(audit, "quoteFinish")(runId, lease, UNREADABLE("UNREADABLE_IMAGE")); });
+      if (began) {
+        // Un fallo de red/modelo/catálogo NO es prueba de una imagen ilegible.
+        // Se conserva pendiente de revisión y nunca se cotiza automáticamente.
+        await ctx.persist("quote_finish", async (audit, runId, lease) => {
+          await needs(audit, "quoteFinish")(runId, lease, { status: "UNCERTAIN", studyIds: [], ambiguous: [], unresolved: 0, reasons: ["ENGINE_PARTIAL"] });
+        });
+      }
       await ctx.persist("failure", (audit, runId, lease) => audit.recordFailure(runId, errorCode, lease));
       return failureReply();
     }

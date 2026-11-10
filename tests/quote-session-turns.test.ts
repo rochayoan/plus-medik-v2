@@ -61,6 +61,10 @@ describe("itemFromAnalysis: lo que el motor decidió, traducido a la sesión", (
   it("cotizada COMPLETA → identificada (sin repetidos)", () => {
     expect(itemFromAnalysis(analysis({ outcome: "AUTO_COMPLETE", publicQuote: {}, internal: lines(1, 2, 1) }))).toEqual({ status: "RESOLVED", studyIds: [uuid(1), uuid(2)], ambiguous: [], unresolved: 0, reasons: [] });
   });
+  it("la falta de coincidencia en el catálogo NO transforma una receta legible en imagen ilegible", () => {
+    expect(itemFromAnalysis(analysis({ reasons: ["catalog_unmatched"], outcome: "HUMAN_REVIEW" })))
+      .toMatchObject({ status: "UNRESOLVED", reasons: ["UNRESOLVED_TEXT"] });
+  });
   it("sin la bandera de AUTO parcial (sin outcome): AUTO_SAFE con cotización → identificada", () => {
     expect(itemFromAnalysis(analysis({ decision: "AUTO_SAFE", quote: { lines: [{ id: uuid(3) }] } }))).toMatchObject({ status: "RESOLVED", studyIds: [uuid(3)] });
   });
@@ -68,7 +72,7 @@ describe("itemFromAnalysis: lo que el motor decidió, traducido a la sesión", (
     expect(itemFromAnalysis(analysis({ outcome: "AUTO_PARTIAL", publicQuote: {}, internal: lines(1) }))).toMatchObject({ status: "UNCERTAIN", studyIds: [uuid(1)], reasons: ["ENGINE_PARTIAL"] });
   });
   it.each([
-    ["revisión humana", { outcome: "HUMAN_REVIEW", internal: lines(1) }],
+    ["revisión humana sin causa identificada", { outcome: "HUMAN_REVIEW", internal: lines(1) }],
     ["sin cotización", { outcome: "AUTO_COMPLETE", internal: lines() }],
     ["completa pero sin estudios", { outcome: "AUTO_COMPLETE", publicQuote: {}, internal: lines() }],
     ["sin nada", {}]
@@ -130,12 +134,12 @@ describe("foto en modo sesión", () => {
     expect(w.audit.reserveSend).toHaveBeenCalledWith("run-1", "conversation", LEASE, { stale: "NEWER_TURN" });
   });
 
-  it("si el análisis falla: aviso técnico, la foto queda ilegible en la sesión y el fallo se audita", async () => {
+  it("si el análisis falla: aviso técnico, la foto queda pendiente y NO se la marca ilegible", async () => {
     const w = setup();
     w.analyze.mockRejectedValueOnce(new Error("modelo caído"));
     await processTurns([image()], w.deps);
     expect(w.sends).toEqual([TECHNICAL_ISSUE_MESSAGE]);
-    expect(w.audit.quoteFinish).toHaveBeenCalledWith("run-1", LEASE, expect.objectContaining({ status: "UNREADABLE" }));
+    expect(w.audit.quoteFinish).toHaveBeenCalledWith("run-1", LEASE, expect.objectContaining({ status: "UNCERTAIN", reasons: ["ENGINE_PARTIAL"] }));
     expect(w.audit.recordFailure).toHaveBeenCalled();
   });
 

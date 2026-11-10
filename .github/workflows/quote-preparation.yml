@@ -3,6 +3,13 @@ name: Quote preparation checks
 on:
   pull_request:
     paths:
+      - "src/results-silence.ts"
+      - "tests/results-silence.test.ts"
+      - "src/turns.ts"
+      - "src/quote-session-turns.ts"
+      - "src/whatsapp-quote.ts"
+      - "tests/quote-session-turns.test.ts"
+      - "tests/whatsapp-quote.test.ts"
       - "src/agent/**"
       - "tests/agent*.test.ts"
       - "src/text-handler.ts"

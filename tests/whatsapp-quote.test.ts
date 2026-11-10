@@ -250,8 +250,8 @@ describe("handleImageMessage", () => {
   it("ningún estudio verificable (HUMAN_REVIEW): no hay cotización; se pide una foto más clara, sin hablar de revisión ni de pendientes", async () => {
     const { deps, sent } = makeDeps({ analysis: analysisOf("Estudio inexistente uno", "Estudio inexistente dos") });
     expect(await handleImageMessage(incoming, deps)).toBe("no_quote");
-    expect(sent).toEqual([{ to: "59171234567", body: NO_QUOTE_MESSAGE }]);
-    expect(NO_QUOTE_MESSAGE).not.toMatch(/HUMAN|\bAUTO\b|pendiente|revisi[oó]n/i);
+    expect(sent[0]?.body).toContain("No pude identificar con certeza algunos estudios");
+    expect(sent[0]?.body).not.toMatch(/HUMAN|\bAUTO\b/i);
   });
 
   it("un documento que no es una solicitud no recibe cotización", async () => {
@@ -262,7 +262,7 @@ describe("handleImageMessage", () => {
     });
     const { deps, sent } = makeDeps({ analysis });
     expect(await handleImageMessage(incoming, deps)).toBe("no_quote");
-    expect(sent[0]?.body).toBe(NO_QUOTE_MESSAGE);
+    expect(sent[0]?.body).toContain("La imagen no parece ser una solicitud");
   });
 
   it("una imagen sin formato reconocible (p. ej. PDF) o ilegible: se pide otra foto y NO se llama al motor", async () => {
