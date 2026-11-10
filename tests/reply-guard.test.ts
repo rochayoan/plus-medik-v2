@@ -265,7 +265,8 @@ describe("cableado con la máquina de turnos", () => {
   it("cada turno de un lote se evalúa por separado: el que pasa se envía y el limitado no", async () => {
     let call = 0;
     const w = setup({ replyGuard: guardConfig, handlers: handlers("GREETING"), audit: fakeAudit(async () => (++call === 1 ? "reserved" : "limited")) });
-    const reports = await processTurns([turn("m1"), turn("m2")], w.deps);
+    // dos entregas separadas del mismo contacto (un lote de Kapso sería UNA solicitud con UNA reserva)
+    const reports = [...(await processTurns([turn("m1")], w.deps)), ...(await processTurns([turn("m2")], w.deps))];
     expect(reports.map((r) => r.result)).toEqual(["conversation", "ignored"]);
     expect(w.sends).toHaveLength(1);
   });
@@ -334,7 +335,7 @@ describe("fronteras del código (análisis estático)", () => {
   });
 
   it("solo la reserva de envío, el manejador de texto, la auditoría, los turnos y el cableado de Vercel nombran la guarda", () => {
-    const allowed = new Set(["src/reply-guard.ts", "src/guarded-turn.ts", "src/text-handler.ts", "src/audit.ts", "src/turns.ts", "src/quote-session.ts", "src/quote-session-turns.ts", "api/kapso/webhook.ts"]);
+    const allowed = new Set(["src/reply-guard.ts", "src/guarded-turn.ts", "src/text-handler.ts", "src/audit.ts", "src/turns.ts", "src/quote-session.ts", "src/quote-session-turns.ts", "src/batch-execution.ts", "api/kapso/webhook.ts"]);
     for (const path of files) {
       if (allowed.has(rel(path))) continue;
       expect(source(path), rel(path)).not.toMatch(/reply[-_ ]?guard|loopProtection|replySignature|looksAutomated/i);

@@ -125,6 +125,9 @@ export interface CrmAttentionDeps {
   config: CrmControlConfig | undefined;
   // Se pide al primer uso real (así una base sin configurar no rompe al cargar el módulo).
   repository(): CrmAttentionRepository;
+  // Memoria estructurada en SOMBRA (la bandera del agente conversacional): anota que una persona reanudó al agente. Se carga solo si la bandera está encendida (apagada, esta ruta no importa nada nuevo). Mejor esfuerzo:
+  // nunca cambia la respuesta al CRM ni el estado de atención.
+  convState?: () => Promise<{ humanResume(input: { contactKey: string; operationId: string }): void; flush(timeoutMs?: number): Promise<void> } | undefined>;
   log(event: string, data: Record<string, unknown>): void;
 }
 
@@ -225,6 +228,16 @@ export async function handleCrmAttention(request: Request, route: "status" | "ac
     }
     const result = await repository.act({ operationId, action: action!, contactKey, reasonCode: REASON_FOR[action!], actor });
     deps.log("crm_attention", { route, action, outcome: result.outcome, replayed: result.replayed });
+    // Reanudación manual confirmada: la memoria en sombra reabre lo que esperaba por la pausa. Acotado (el CRM aborta a los 5 s) y sin efecto sobre la respuesta.
+    if (action === "resume" && deps.convState) {
+      try {
+        const recorder = await deps.convState();
+        recorder?.humanResume({ contactKey, operationId });
+        await recorder?.flush(1200);
+      } catch {
+        // la sombra nunca cambia lo que se le responde al CRM
+      }
+    }
     return json(200, { ok: true, confirmed: true, state: result.state, revision: result.revision, outcome: result.outcome, replayed: result.replayed });
   } catch (error) {
     // Nunca el texto del error ni datos del contacto. Una confirmación incierta jamás devuelve confirmed:true.
@@ -242,8 +255,11 @@ export function createCrmAttentionRoute(route: "status" | "action", env: Record<
   if (resolution.enabled && "error" in resolution) log("crm_attention_config_invalid", { error: resolution.error });
   const config = resolution.enabled && "config" in resolution ? resolution.config : undefined;
   let repository: CrmAttentionRepository | undefined;
+  let recorder: Awaited<ReturnType<NonNullable<CrmAttentionDeps["convState"]>>> | undefined;
+  const shadow = env.PLUSMEDIK_LLM_CONVERSATION?.trim().toLowerCase() === "on";
   const deps: CrmAttentionDeps = {
     config,
+    ...(shadow ? { convState: async () => (recorder ??= (await import("./conversation-state-store.js")).resolveConversationState(env, log, {})) } : {}),
     // Plazos cortos: el CRM aborta a los 5 s y no reintenta; la RPC repite una vez con el mismo cuerpo (es idempotente por operationId).
     repository: () => (repository ??= createCrmAttentionRepository({ requestTimeoutMs: 2000, retryDelayMs: 200 })),
     log

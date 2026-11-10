@@ -1,0 +1,373 @@
+import { createHash } from "node:crypto";
+import { describe, expect, it, vi } from "vitest";
+import type { AgentModel, HandoffReason, PlanOutput, RespondInput } from "../src/agent/contracts.js";
+import { createAgentPilot, createPilotSwitch, createRecentProvider, PILOT_LIMITS, type PilotSwitch } from "../src/agent/pilot.js";
+import { AGENT_SCENARIOS } from "../scripts/g7/lib/agent-scenarios.js";
+import { CONTACT_KEY, FIXTURE_CATALOG, fixtureAnswer, NOW, PHONE } from "../scripts/g7/lib/agent-scenarios.js";
+import type { ObservedTurn } from "../src/conversation-state-store.js";
+
+// Piloto del agente: los contactos elegibles, el interruptor de emergencia que falla cerrado, la decisión (y su respaldo, el modo esencial, ante CUALQUIER problema), el silencio y la derivación real.
+
+const turn = (id: string, text: string): ObservedTurn => ({ messageId: id, kind: "TEXT", text });
+const quoteScenario = AGENT_SCENARIOS.find((scenario) => scenario.id === "cotizar-por-nombre")!;
+
+interface ModelScript { calls?: Array<{ tool: string; input: unknown }>; plan?: Partial<PlanOutput>; text?: string; failPlan?: Error; hang?: boolean }
+function fakeModel(script: ModelScript = {}): AgentModel & { plans: number; responds: RespondInput[] } {
+  const model = {
+    plans: 0,
+    responds: [] as RespondInput[],
+    async plan() {
+      model.plans += 1;
+      if (script.hang) return new Promise<never>(() => undefined);
+      if (script.failPlan) throw script.failPlan;
+      return { toolCalls: script.calls ?? [], ...script.plan };
+    },
+    async respond(input: RespondInput) {
+      model.responds.push(input);
+      return { text: script.text ?? "¡Hola! ¿En qué te puedo ayudar?" };
+    }
+  };
+  return model;
+}
+const switchOf = (value: boolean | (() => Promise<boolean>)): PilotSwitch & { reads: number } => {
+  const s = { reads: 0, async enabled() { s.reads += 1; return typeof value === "function" ? value() : value; } };
+  return s;
+};
+
+function make(overrides: Partial<Parameters<typeof createAgentPilot>[0]> = {}, script: ModelScript = {}) {
+  const logs: Array<[string, Record<string, unknown>]> = [];
+  const model = fakeModel(script);
+  const pilotSwitch = switchOf(true);
+  const pilot = createAgentPilot({
+    model, modelName: "modelo-x", phones: new Set([PHONE]), switch: pilotSwitch,
+    context: { loadCatalog: async () => FIXTURE_CATALOG, answer: fixtureAnswer, contactKeyFor: (phone) => (phone.replace(/\D/g, "") === PHONE ? CONTACT_KEY : undefined) },
+    log: (event, data) => { logs.push([event, data]); }, now: () => NOW, ...overrides
+  });
+  return { pilot, model, logs, pilotSwitch: (overrides.switch as ReturnType<typeof switchOf> | undefined) ?? pilotSwitch };
+}
+const pilotLogs = (logs: Array<[string, Record<string, unknown>]>) => logs.filter(([event]) => event === "agent_pilot").map(([, data]) => data);
+
+describe("la lista de números", () => {
+  it("solo los teléfonos de la lista (por sus dígitos) son del piloto; cualquier otro ni consulta el interruptor ni el modelo", async () => {
+    const { pilot, model, pilotSwitch, logs } = make();
+    expect(pilot.isPilot(PHONE)).toBe(true);
+    expect(pilot.isPilot(`+${PHONE}`)).toBe(true);
+    expect(pilot.isPilot("59170000002")).toBe(false);
+    expect(pilot.isPilot("9170000001")).toBe(false);
+    expect(pilot.isPilot(`${PHONE}9`)).toBe(false);
+    expect(await pilot.produce({ from: "59170000002", turns: [turn("w1", "hola")] })).toBeUndefined();
+    expect(model.plans).toBe(0);
+    expect(pilotSwitch.reads).toBe(0);
+    expect(logs).toEqual([]);
+  });
+});
+
+describe("el interruptor falla cerrado y apaga de inmediato", () => {
+  it("apagado: responde la ruta de siempre y no se toca el modelo", async () => {
+    const { pilot, model, logs } = make({ switch: switchOf(false) });
+    expect(await pilot.produce({ from: PHONE, turns: [turn("w1", "hola")] })).toBeUndefined();
+    expect(model.plans).toBe(0);
+    expect(pilotLogs(logs)).toEqual([{ status: "FALLBACK", reason: "SWITCH_OFF" }]);
+  });
+
+  it("ilegible (la base falla): se trata como apagado", async () => {
+    const rpc = vi.fn(async () => { throw Object.assign(new Error("caído"), { kind: "UNAVAILABLE" }); });
+    const logs: Array<[string, Record<string, unknown>]> = [];
+    const pilotSwitch = createPilotSwitch({ rpc, log: (event, data) => { logs.push([event, data]); } });
+    expect(await pilotSwitch.enabled()).toBe(false);
+    expect(logs[0]![1]).toMatchObject({ enabled: false, unreadable: true });
+    expect(JSON.stringify(logs)).not.toContain("caído");
+  });
+
+  it("se lee con un vencimiento corto: dentro de él no se vuelve a consultar y al vencer un «apagado» de la base se aplica; un error NO reutiliza un «encendido» viejo", async () => {
+    let clock = 1_000;
+    let answer: boolean | Error = true;
+    const rpc = vi.fn(async () => { if (answer instanceof Error) throw answer; return { enabled: answer }; });
+    const pilotSwitch = createPilotSwitch({ rpc, ttlMs: 5000, now: () => clock, log: () => undefined });
+    expect(await pilotSwitch.enabled()).toBe(true);
+    clock += 4000; answer = false;
+    expect(await pilotSwitch.enabled()).toBe(true); // aún dentro del vencimiento
+    expect(rpc).toHaveBeenCalledTimes(1);
+    clock += 1500;
+    expect(await pilotSwitch.enabled()).toBe(false); // el apagado de la base se aplica en cuanto vence
+    clock += 6000; answer = true;
+    expect(await pilotSwitch.enabled()).toBe(true);
+    clock += 6000; answer = new Error("caído");
+    expect(await pilotSwitch.enabled()).toBe(false);
+    expect(await pilotSwitch.enabled()).toBe(false);
+  });
+
+  it("varias lecturas simultáneas comparten una sola consulta; solo el valor `true` exacto enciende", async () => {
+    const rpc = vi.fn(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); return { enabled: true }; });
+    const pilotSwitch = createPilotSwitch({ rpc, log: () => undefined });
+    expect(await Promise.all([pilotSwitch.enabled(), pilotSwitch.enabled(), pilotSwitch.enabled()])).toEqual([true, true, true]);
+    expect(rpc).toHaveBeenCalledTimes(1);
+    for (const value of ["true", 1, null, undefined, "yes"]) expect(await createPilotSwitch({ rpc: async () => ({ enabled: value }), log: () => undefined }).enabled(), String(value)).toBe(false);
+    expect(PILOT_LIMITS.switchTtlMs).toBeLessThanOrEqual(5000);
+  });
+});
+
+describe("la decisión", () => {
+  it("entrega la respuesta verificada con su resultado, firma y calidad; los registros llevan solo códigos", async () => {
+    const { pilot, logs } = make({}, { text: "¡Hola! Cuéntame qué necesitas y te ayudo." });
+    const reply = await pilot.produce({ from: PHONE, turns: [turn("wamid.A", "hola, soy Maria Perez 71234567")] });
+    expect(reply).toMatchObject({ body: "¡Hola! Cuéntame qué necesitas y te ayudo.", result: "conversation", processingStatus: "COMPLETED", stale: "NEWER_TURN", signature: "AGENT:ANSWER", quality: "ANSWER", quotedStudyIds: [] });
+    expect(reply).not.toHaveProperty("closes");
+    expect(reply).not.toHaveProperty("cap");
+    expect(pilotLogs(logs)[0]).toMatchObject({ status: "VERIFIED", model: "modelo-x", utterances: 1 });
+    expect(JSON.stringify(logs)).not.toMatch(/Maria|Perez|71234567|wamid|Cuéntame|59170000001/);
+  });
+
+  it("una cotización sale como «quoted» con los precios del catálogo agregados por el sistema y los ids de estudios para la memoria", async () => {
+    const { pilot, model } = make({}, { calls: [{ tool: "quote_studies", input: { studies: ["hemograma", "glucosa"] } }], text: "¡Claro! Abajo tienes el detalle de tu cotización." });
+    const reply = await pilot.produce({ from: PHONE, turns: [turn("w1", "cuanto cuesta un hemograma y una glucosa?")] });
+    expect(reply).toMatchObject({ result: "quoted", quality: "QUOTE", signature: "AGENT:QUOTE" });
+    expect(reply!.body).toMatch(/HEMOGRAMA COMPLETO[\s\S]*GLUCOSA EN AYUNAS[\s\S]*75[.,]5/);
+    expect(reply!.quotedStudyIds.sort()).toEqual(["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002"]);
+    expect(JSON.stringify(model.responds)).not.toMatch(/\b45\b|Bs/);
+    expect(quoteScenario.expect.quoteBlock).toBe(true);
+  });
+
+  it("una cotización PARCIAL (un estudio dudoso junto a uno seguro) se envía con los precios del seguro y deja lo dudoso a la vista (calidad UNRESOLVED)", async () => {
+    const { pilot } = make({}, { calls: [{ tool: "quote_studies", input: { studies: ["hemograma", "creatinina"] } }], text: "Te dejo abajo el hemograma; para la creatinina, ¿la quieres sérica o en orina?" });
+    const reply = await pilot.produce({ from: PHONE, turns: [turn("w1", "cuanto cuesta un hemograma y una creatinina?")] });
+    expect(reply).toMatchObject({ result: "quoted", quality: "UNRESOLVED" });
+    expect(reply!.body).toMatch(/HEMOGRAMA COMPLETO[\s\S]*45/);
+    expect(reply!.body).toMatch(/sérica o en orina/);
+    expect(reply!.quotedStudyIds).toEqual(["00000000-0000-4000-8000-000000000001"]);
+  });
+
+  it("«sin datos» no es un fallo: una pregunta sin dato aprobado se responde con honestidad y sale por el agente", async () => {
+    const { pilot, logs } = make({}, { calls: [{ tool: "lab_info", input: { question: "donde queda" } }], text: "Ahora mismo no tengo la dirección confirmada. ¿Te ayudo con algo más?" });
+    const reply = await pilot.produce({ from: PHONE, turns: [turn("w1", "donde queda el laboratorio?")] });
+    expect(reply).toMatchObject({ body: "Ahora mismo no tengo la dirección confirmada. ¿Te ayudo con algo más?", quality: "ANSWER" });
+    expect(pilotLogs(logs)[0]).toMatchObject({ status: "VERIFIED", tools: [{ tool: "lab_info", ok: false, error: "NO_DATA", why: "NO_APPROVED_DATA" }] });
+  });
+
+  it("un mensaje de salud sin pedir precio no se conversa con el modelo: responde el modo esencial (sin llamar al modelo)", async () => {
+    const { pilot, model, logs } = make({}, { text: "no debía usarse" });
+    expect(await pilot.produce({ from: PHONE, turns: [turn("w1", "me duele el pecho y tengo fiebre")] })).toBeUndefined();
+    expect(model.plans).toBe(0);
+    expect(pilotLogs(logs)[0]).toMatchObject({ status: "FALLBACK", reason: "MEDICAL" });
+  });
+
+  it("claramente ajeno al laboratorio y sin conversación previa: SILENCIO (sin respuesta, sin caer al modo esencial)", async () => {
+    const { pilot, model, logs } = make({}, { plan: { silent: true }, text: "no debía usarse" });
+    const reply = await pilot.produce({ from: PHONE, turns: [turn("w1", "jajaja viste el partido de anoche")] });
+    expect(reply).toMatchObject({ silent: true, body: "" });
+    expect(model.responds).toEqual([]);
+    expect(pilotLogs(logs)[0]).toMatchObject({ status: "SILENT" });
+  });
+});
+
+describe("la firma de la respuesta cumple lo que exige la base (regresión PT422)", () => {
+  // La guarda de repeticiones de la base solo acepta ^[A-Z0-9_.:-]{1,64}$: una firma en minúsculas rechazaba la reserva con PT422 y la respuesta de conversación no se enviaba.
+  const DB_SIGNATURE = /^[A-Z0-9_.:-]{1,64}$/;
+
+  it("toda firma del agente (respuesta, cotización, derivación) tiene la forma que acepta la base", async () => {
+    const answer = await make({}, { text: "¡Hola! ¿En qué te ayudo?" }).pilot.produce({ from: PHONE, turns: [turn("w1", "hola")] });
+    const quote = await make({}, { calls: [{ tool: "quote_studies", input: { studies: ["hemograma"] } }], text: "Abajo el detalle." }).pilot.produce({ from: PHONE, turns: [turn("w1", "cotiza hemograma")] });
+    const handoff = await make({ handoffEnabled: true }, { plan: { handoff: "HUMAN_REQUEST" }, text: "Te paso con una persona del laboratorio." }).pilot.produce({ from: PHONE, turns: [turn("w1", "quiero una persona")], handoff: async () => true });
+    for (const reply of [answer, quote, handoff]) expect(reply?.signature, JSON.stringify(reply?.signature)).toMatch(DB_SIGNATURE);
+  });
+
+  it("guardSignature normaliza cualquier firma a esa forma (minúsculas, caracteres raros, largo)", async () => {
+    const { guardSignature } = await import("../src/guarded-turn.js");
+    for (const raw of ["agent:ANSWER", "Agente respuesta/ñandú", "a".repeat(200), "ya:VALIDA_1.2-3"]) expect(guardSignature(raw), raw).toMatch(DB_SIGNATURE);
+    expect(guardSignature("agent:ANSWER")).toBe("AGENT:ANSWER");
+    expect(guardSignature("CONVERSATION:HOURS")).toBe("CONVERSATION:HOURS");
+  });
+});
+
+describe("ante cualquier problema responde el modo esencial (undefined)", () => {
+  it("modelo caído, verificación fallida (cifra inventada) y precio escrito por el modelo", async () => {
+    const quota = Object.assign(new Error("x"), { name: "RateLimitError", status: 429, code: "insufficient_quota" });
+    const failed = make({}, { failPlan: quota });
+    expect(await failed.pilot.produce({ from: PHONE, turns: [turn("w1", "hola")] })).toBeUndefined();
+    expect(pilotLogs(failed.logs)[0]).toMatchObject({ status: "MODEL_ERROR", modelError: { cause: "QUOTA_OR_BILLING" } });
+    const invented = make({}, { text: "Te respondemos en 24 horas sin falta." });
+    expect(await invented.pilot.produce({ from: PHONE, turns: [turn("w1", "hola")] })).toBeUndefined();
+    expect(pilotLogs(invented.logs)[0]).toMatchObject({ status: "REJECTED", violations: ["UNGROUNDED_FIGURE"], repairs: 1 });
+    const price = make({}, { text: "El hemograma cuesta Bs 45." });
+    expect(await price.pilot.produce({ from: PHONE, turns: [turn("w1", "cuanto cuesta un hemograma")] })).toBeUndefined();
+  });
+
+  it("un lote sin texto no se decide (sin llamar al modelo)", async () => {
+    const media = make();
+    expect(await media.pilot.produce({ from: PHONE, turns: [{ messageId: "i1", kind: "IMAGE" }] })).toBeUndefined();
+    expect(media.model.plans).toBe(0);
+    expect(pilotLogs(media.logs)[0]).toMatchObject({ status: "FALLBACK", reason: "NO_TEXT" });
+  });
+
+  it("el plazo vence: responde el modo esencial, el trabajo tardío ya no puede derivar a nadie", async () => {
+    const handoff = vi.fn(async () => true);
+    const hung = make({ deadlineMs: 40, handoffEnabled: true }, { hang: true });
+    expect(await hung.pilot.produce({ from: PHONE, turns: [turn("w1", "hola")], handoff })).toBeUndefined();
+    expect(pilotLogs(hung.logs).at(-1)).toMatchObject({ status: "FALLBACK", reason: "DEADLINE" });
+    // un modelo lento que termina DESPUÉS del plazo pidiendo una derivación: no se registra ningún caso tardío
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const slowModel: AgentModel = { async plan() { await gate; return { toolCalls: [], handoff: "HUMAN_REQUEST" }; }, async respond() { return { text: "Te paso con una persona del laboratorio." }; } };
+    const slow = make({ model: slowModel, deadlineMs: 30, handoffEnabled: true });
+    expect(await slow.pilot.produce({ from: PHONE, turns: [turn("w1", "quiero hablar con una persona")], handoff })).toBeUndefined();
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(handoff).not.toHaveBeenCalled();
+  });
+});
+
+describe("la derivación humana al CRM", () => {
+  const script: ModelScript = { plan: { handoff: "HUMAN_REQUEST" }, text: "Claro, te paso con una persona del laboratorio." };
+  const turns = [turn("w1", "quiero hablar con una persona")];
+
+  it("sin ejecutor (no hay cola al CRM) o sin habilitar, no existe: el texto que lo promete se rechaza y responde el modo esencial", async () => {
+    const none = make({ handoffEnabled: true }, script);
+    expect(await none.pilot.produce({ from: PHONE, turns })).toBeUndefined();
+    expect(pilotLogs(none.logs)[0]).toMatchObject({ status: "REJECTED", violations: ["UNREGISTERED_HANDOFF_PROMISE"] });
+    const disabled = make({ handoffEnabled: false }, script);
+    const handoff = vi.fn(async () => true);
+    expect(await disabled.pilot.produce({ from: PHONE, turns, handoff })).toBeUndefined();
+    expect(handoff).not.toHaveBeenCalled();
+    expect(disabled.model.responds.at(0)!.capabilities.handoff).toBe(false);
+  });
+
+  it("con la derivación habilitada y un ejecutor: el caso se registra UNA vez ANTES de entregar el mensaje, y el mensaje puede decir que una persona atenderá", async () => {
+    const order: string[] = [];
+    const handoff = vi.fn(async (reason: HandoffReason) => { order.push(`registrar:${reason}`); return true; });
+    const { pilot, logs, model } = make({ handoffEnabled: true }, script);
+    const reply = await pilot.produce({ from: PHONE, turns, handoff });
+    order.push("entregar");
+    expect(order).toEqual(["registrar:HUMAN_REQUEST", "entregar"]);
+    expect(handoff).toHaveBeenCalledTimes(1);
+    expect(reply).toMatchObject({ body: "Claro, te paso con una persona del laboratorio.", signature: "AGENT:HANDOFF" });
+    expect(pilotLogs(logs)[0]).toMatchObject({ status: "VERIFIED", handoff: "REGISTERED" });
+    expect(model.responds[0]!.capabilities.handoff).toBe(true);
+    expect(model.responds[0]!.handoff).toBe(true);
+  });
+
+  it("si el CRM no registra el caso (o falla), NO se promete nada: responde el modo esencial", async () => {
+    for (const executor of [async () => false, async () => { throw new Error("CRM caído"); }]) {
+      const { pilot, logs } = make({ handoffEnabled: true }, script);
+      expect(await pilot.produce({ from: PHONE, turns, handoff: executor })).toBeUndefined();
+      expect(pilotLogs(logs)[0]).toMatchObject({ status: "HANDOFF_FAILED" });
+      expect(JSON.stringify(logs)).not.toContain("CRM caído");
+    }
+  });
+});
+
+describe("mensajes recientes del historial", () => {
+  const rows = [
+    { direction: "IN", actor: "PATIENT", body: "hola, cuanto cuesta un hemograma?" },
+    { direction: "OUT", actor: "AGENT", body: "Aquí tienes la cotización." },
+    { direction: "OUT", actor: "HUMAN", body: "Le atiende recepción." },
+    { direction: "OUT", actor: "OTHER_APP", body: "mensaje de otra aplicación" },
+    { direction: "IN", actor: "PATIENT", body: "me duele el pecho y tengo fiebre" },
+    { direction: "IN", actor: "PATIENT", body: "mi médico me pidió vitamina B12" },
+    { direction: "IN", actor: "PATIENT", body: "   " },
+    "basura", null
+  ];
+
+  it("traduce quién habló, conserva el texto tal cual, ignora lo ilegible y pide solo lo necesario a la base", async () => {
+    const rpc = vi.fn(async () => ({ messages: rows }));
+    const recent = createRecentProvider({ rpc, now: () => NOW });
+    const entries = await recent({ from: PHONE, messageId: "w9", contactKey: CONTACT_KEY, excludeIds: ["w8", "w9"] });
+    expect(entries).toEqual([
+      { from: "PATIENT", text: "hola, cuanto cuesta un hemograma?" },
+      { from: "ASSISTANT", text: "Aquí tienes la cotización." },
+      { from: "STAFF", text: "Le atiende recepción." },
+      { from: "PATIENT", text: "me duele el pecho y tengo fiebre" },
+      { from: "PATIENT", text: "mi médico me pidió vitamina B12" }
+    ]);
+    expect(rpc).toHaveBeenCalledWith("plusmedik_history_recent", { p_contact_key: CONTACT_KEY, p_limit: PILOT_LIMITS.recentLimit, p_exclude: ["w8", "w9"], p_since: new Date(NOW - PILOT_LIMITS.recentWindowMs).toISOString() });
+  });
+
+  it("una respuesta de forma inesperada es vacía; un fallo de la base se propaga a quien llama (que sigue sin historial)", async () => {
+    expect(await createRecentProvider({ rpc: async () => ({ messages: "nada" }) })({ from: PHONE, messageId: "w", contactKey: CONTACT_KEY, excludeIds: [] })).toEqual([]);
+    await expect(createRecentProvider({ rpc: async () => { throw new Error("down"); } })({ from: PHONE, messageId: "w", contactKey: CONTACT_KEY, excludeIds: [] })).rejects.toThrow();
+  });
+});
+
+describe("alcance global: todos los contactos elegibles, exclusiones y corta-circuito", () => {
+  const keyOf = (phone: string): string => createHash("sha256").update(`clave-de-prueba:${phone.replace(/\D/g, "")}`).digest("hex");
+  const live = (options: { exclude?: string[]; clock?: { now: number }; script?: ModelScript; keyFor?: (phone: string) => string | undefined } = {}) => {
+    const logs: Array<[string, Record<string, unknown>]> = [];
+    const model = fakeModel(options.script ?? {});
+    const pilotSwitch = switchOf(true);
+    const clock = options.clock ?? { now: NOW };
+    const keyFor = options.keyFor ?? keyOf;
+    const pilot = createAgentPilot({
+      model, modelName: "modelo-x", switch: pilotSwitch,
+      everyone: { exclude: new Set(options.exclude ?? []), contactKeyFor: keyFor },
+      context: { loadCatalog: async () => FIXTURE_CATALOG, answer: fixtureAnswer, contactKeyFor: keyFor },
+      log: (event, data) => { logs.push([event, data]); }, now: () => clock.now
+    });
+    return { pilot, model, logs, pilotSwitch };
+  };
+  const phones = Array.from({ length: 400 }, (_, i) => `5917${String(1000000 + i)}`);
+
+  it("TODOS los contactos que se puedan identificar son elegibles (sin porcentajes ni listas); sin la clave del contacto NO entra nadie, ni se consulta el interruptor ni el modelo", async () => {
+    const { pilot } = live();
+    expect(phones.every((phone) => pilot.isPilot(phone))).toBe(true);
+    expect(pilot.mode).toBe("live");
+    const unidentified = live({ keyFor: () => undefined });
+    expect(phones.some((phone) => unidentified.pilot.isPilot(phone))).toBe(false);
+    expect(await unidentified.pilot.produce({ from: phones[0]!, turns: [turn("w1", "hola")] })).toBeUndefined();
+    expect(unidentified.model.plans).toBe(0);
+    expect(unidentified.pilotSwitch.reads).toBe(0);
+  });
+
+  it("los números excluidos siguen SIEMPRE con el agente de siempre; los demás no se ven afectados", async () => {
+    const { pilot, model, pilotSwitch } = live({ exclude: ["59170000009"] });
+    expect(pilot.isPilot("+59170000009")).toBe(false);
+    expect(await pilot.produce({ from: "59170000009", turns: [turn("w1", "hola")] })).toBeUndefined();
+    expect(model.plans).toBe(0);
+    expect(pilotSwitch.reads).toBe(0);
+    expect(pilot.isPilot("59170000010")).toBe(true);
+  });
+
+  it("un contacto elegible con el interruptor encendido recibe la decisión del agente nuevo", async () => {
+    const { pilot, model } = live({ script: { text: "¡Hola! Con gusto te ayudo, cuéntame qué necesitas." } });
+    const reply = await pilot.produce({ from: "59170000010", turns: [turn("w1", "hola")] });
+    expect(reply).toMatchObject({ body: "¡Hola! Con gusto te ayudo, cuéntame qué necesitas.", result: "conversation", quality: "ANSWER" });
+    expect(model.plans).toBe(1);
+  });
+
+  it("CORTA-CIRCUITO: tras 3 fallos seguidos del modelo deja de esperarlo un minuto (todos responden por la ruta de siempre al instante) y luego reintenta", async () => {
+    const clock = { now: NOW };
+    const quota = Object.assign(new Error("x"), { name: "RateLimitError", status: 429, code: "insufficient_quota" });
+    const { pilot, model, logs } = live({ clock, script: { failPlan: quota } });
+    const from = "59170000001";
+    for (let i = 0; i < 3; i++) expect(await pilot.produce({ from, turns: [turn(`w${i}`, "hola")] })).toBeUndefined();
+    expect(model.plans).toBe(3);
+    expect(logs.filter(([event]) => event === "agent_pilot_breaker")).toHaveLength(1);
+    // abierto: sin llamar al modelo
+    expect(await pilot.produce({ from, turns: [turn("w4", "hola")] })).toBeUndefined();
+    expect(model.plans).toBe(3);
+    expect(pilotLogs(logs).at(-1)).toMatchObject({ status: "FALLBACK", reason: "BREAKER_OPEN" });
+    clock.now += PILOT_LIMITS.breakerOpenMs + 1;
+    await pilot.produce({ from, turns: [turn("w5", "hola")] });
+    expect(model.plans).toBe(4);
+  });
+
+  it("el corta-circuito cuenta SOLO fallos del proveedor: un éxito lo reinicia y un rechazo del verificador no lo abre", async () => {
+    const quota = Object.assign(new Error("x"), { status: 429, code: "insufficient_quota" });
+    let fail = true;
+    const flaky: AgentModel = { async plan() { if (fail) throw quota; return { toolCalls: [] }; }, async respond() { return { text: "¡Hola! ¿En qué te ayudo?" }; } };
+    const logs: Array<[string, Record<string, unknown>]> = [];
+    const pilot = createAgentPilot({ model: flaky, modelName: "m", switch: switchOf(true), everyone: { exclude: new Set(), contactKeyFor: keyOf }, context: { loadCatalog: async () => FIXTURE_CATALOG, contactKeyFor: keyOf }, log: (event, data) => { logs.push([event, data]); }, now: () => NOW });
+    const from = "59170000001";
+    await pilot.produce({ from, turns: [turn("a", "hola")] });
+    await pilot.produce({ from, turns: [turn("b", "hola")] });
+    fail = false;
+    expect((await pilot.produce({ from, turns: [turn("c", "hola")] }))?.body).toBe("¡Hola! ¿En qué te ayudo?");
+    fail = true;
+    await pilot.produce({ from, turns: [turn("d", "hola")] });
+    await pilot.produce({ from, turns: [turn("e", "hola")] });
+    expect(logs.filter(([event]) => event === "agent_pilot_breaker")).toEqual([]);
+    // rechazos del verificador (el modelo FUNCIONÓ): nunca abren el corta-circuito
+    const rejecting = live({ script: { text: "Te respondemos en 24 horas sin falta." } });
+    for (let i = 0; i < 6; i++) await rejecting.pilot.produce({ from, turns: [turn(`r${i}`, "hola")] });
+    expect(rejecting.logs.filter(([event]) => event === "agent_pilot_breaker")).toEqual([]);
+    expect(rejecting.model.plans).toBe(6);
+  });
+});

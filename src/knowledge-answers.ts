@@ -31,7 +31,7 @@ const RESULTS = /\bresultado\w*\b/;
 const HOME = /\bdomicilio\w*\b/;
 const LOCATION = /\b(ubicaci\w*|ubicad\w*|direccion\w*|donde (esta|estan|queda|quedan|los encuentro|se encuentran)|sucursal\w*|como llego|como llegar|mapa)\b/;
 const PAYMENT = /\b(pago\w*|pagar|pagamos|tarjeta\w*|qr|transferencia\w*|efectivo|metodo\w* de pago)\b/;
-const RESULTS_DELIVERY = /\b(entreg\w*|recog\w*|retir\w*|recib\w*|demor\w*|tard\w*|listos?|salen|llegan|cuando)\b/;
+const RESULTS_DELIVERY = /\b(entreg\w*|recog\w*|retir\w*|recib\w*|demor\w*|tard\w*|listos?|salen|llegan|cuando|envi\w*|enlace\w*|link\w*|descarg\w*|consult\w*|linea)\b/;
 const INVOICING = /\bfactura\w*\b/;
 const CONVENIOS = /\b(convenio\w*|seguro\w*)\b/;
 const APPOINTMENTS = /\b(cita\w*|agendar|reservar|reserva|turno\w*)\b/;
@@ -241,6 +241,8 @@ export interface AnswerOptions {
   studyFacts?: StudyFactsQueries;
   // G4.1: ids de los estudios de la última cotización entregada a este contacto (si la hay y es reciente). Solo se pide cuando el mensaje pregunta por un estudio sin nombrarlo.
   contextStudyIds?: () => Promise<readonly string[]>;
+  // Métodos de pago en silencio (ausente = se responden como siempre): la respuesta no incluye nada sobre cómo pagar, ni siquiera «no hay información». Un mensaje solo de pagos se queda sin tema (sin respuesta).
+  skipPayment?: boolean;
 }
 
 interface Section {
@@ -270,7 +272,7 @@ function weeklyLines(weekly: Array<{ day: number; opens: string; closes: string 
 export async function answerFromKnowledge(text: string, options: AnswerOptions): Promise<KnowledgeAnswer | undefined> {
   const texts = options.texts ?? ANSWER_TEXTS;
   const now = options.now ?? (() => new Date());
-  const topics = detectTopics(text, Boolean(options.studyFacts));
+  const topics = detectTopics(text, Boolean(options.studyFacts)).filter((topic) => !(options.skipPayment && topic.kind === "PAYMENT"));
   const asksNow = NOW.test(plain(text.slice(0, 4000)));
   const sections: Section[] = [];
   // El estudio por el que se pregunta se resuelve una sola vez (y solo si algún tema lo necesita).

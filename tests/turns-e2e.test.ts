@@ -313,7 +313,8 @@ describe.skipIf(!bin)("turnos consecutivos de un contacto (extremo a extremo con
       expect((await w.hook(signedPost(payload, { ...RECEIVED, "x-webhook-batch": "true" }))).status).toBe(200);
       await w.settle();
       expect(await Promise.all([early, middle, late].map(async (m) => (await turnOf(m))!.seq))).toEqual([1, 2, 3]);
-      expect(w.sends.map((s) => s.body).sort()).toEqual(["primero", "segundo", "tercero"]);
+      // un lote del mismo contacto es UNA solicitud con UNA respuesta: los textos se leen juntos, en el orden en que se escribieron
+      expect(w.sends.map((s) => s.body)).toEqual(["primero\nsegundo\ntercero"]);
     });
 
     it("un mensaje de otro tipo (audio) solo se procesa si hay manejador; con él es un turno más de la secuencia", async () => {
