@@ -528,8 +528,14 @@ describe.skipIf(!bin)("sesiones de cotización de extremo a extremo contra Postg
       for (const text of ["¿qué es el hemograma?", "¿para qué sirve la glucosa?", "¿necesito ayuno para el hemograma?", "¿cuánto demora el resultado de la glucosa?", "quiero hablar con una persona"]) {
         const before = w.sends.length;
         await say(w, p.phone, text);
-        expect(w.sends).toHaveLength(before + 1);
-        expect(hasPrice(last(w))).toBe(false);
+        // La entrega/plazo de resultados pertenece a recepción: silencio;
+        // preparación, información general y solicitud humana siguen atendidas.
+        if (text === "¿cuánto demora el resultado de la glucosa?") {
+          expect(w.sends).toHaveLength(before);
+        } else {
+          expect(w.sends).toHaveLength(before + 1);
+          expect(hasPrice(last(w))).toBe(false);
+        }
       }
       expect(await sessionsOf(p.key)).toEqual([]);
       expect(await db.ok(`select count(*) from public.plusmedik_quote_items where contact_key = '${p.key}'`)).toBe("0");

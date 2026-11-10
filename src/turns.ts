@@ -1,5 +1,5 @@
 import { repeatCandidate } from "./attention-filter.js";
-import { isResultsOnlyRequest } from "./results-silence.js";
+import { routeResultsMessage } from "./results-silence.js";
 import { audioFailureProducer, resolveAudioTurns } from "./audio-turns.js";
 import type { AudioFailureCode } from "./audio/types.js";
 import { engineCanDecide, engineReply, instantPhotoReply, photoOutcomeOf, shadowAfter, shadowBefore } from "./batch-engine.js";
@@ -356,10 +356,21 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
   // Silencio SOLO si TODOS los turnos del contacto en este lote son texto y
   // la solicitud completa se refiere únicamente al estado/acceso a resultados.
   // Se evalúa ANTES de consultar modelos o catálogos y sin reservar envíos.
-  const resultsOnly = new Set([...perContact.entries()].filter(([, indices]) =>
-    indices.every((index) => turns[index]!.kind === "TEXT" && typeof turns[index]!.text === "string") &&
-    isResultsOnlyRequest(indices.map((index) => turns[index]!.text!).join("\n"))
-  ).map(([from]) => from));
+  const resultsRouting = new Map([...perContact.entries()].flatMap(([from, indices]) => {
+    if (!indices.every((index) => turns[index]!.kind === "TEXT" && typeof turns[index]!.text === "string")) return [];
+    const routing = routeResultsMessage(indices.map((index) => turns[index]!.text!).join("\n"));
+    return routing === "NORMAL" ? [] : [[from, routing] as const];
+  }));
+  const resultsOnly = new Set([...resultsRouting.entries()].filter(([, action]) => action === "SILENT").map(([from]) => from));
+  // Si también pregunta por el HORARIO GENERAL, procesar exclusivamente
+  // esa consulta. Nunca entregar al modelo ni al conocimiento el texto privado
+  // sobre resultados. Se conserva claim/lease y un solo envío por lote.
+  for (const [from, action] of resultsRouting) {
+    if (action !== "OFFICE_HOURS") continue;
+    const indices = perContact.get(from)!;
+    for (const index of indices) turns[index]!.text = index === indices[indices.length - 1] ? "¿Cuál es el horario de atención?" : "";
+    deps.log("results_query_filtered", { action: "OFFICE_HOURS" });
+  }
   const silenceProducer: TurnProducer = async (ctx) => {
     const done = await ctx.persist("close", (audit, runId, lease) => audit.recordIgnored(runId, "NO_REPLY", lease));
     return done ? { kind: "none" } : { kind: "none" };
