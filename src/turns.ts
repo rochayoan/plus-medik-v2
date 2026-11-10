@@ -680,7 +680,16 @@ async function processContactBatch(
           return { kind: "none" };
         }
         if (piloted.quotedStudyIds.length > 0) deps.turns?.convState?.artifact({ from, key: leadId, kind: "QUOTE", studyIds: piloted.quotedStudyIds });
-        return { kind: "reply", body: piloted.body, result: piloted.result, processingStatus: piloted.processingStatus, stale: piloted.stale, ...(piloted.signature ? { signature: piloted.signature } : {}), quality: piloted.quality };
+        // Una cotización del agente por texto lleva las mismas indicaciones que la de una foto (preparación y tiempo de entrega); si no se pueden añadir, sale tal cual.
+        let body = piloted.body;
+        if (piloted.result === "quoted" && piloted.quotedStudyIds.length > 0 && deps.quotePreparations) {
+          try {
+            body = await deps.quotePreparations(body, piloted.quotedStudyIds, await deps.loadCatalog(), ctx);
+          } catch {
+            deps.log("quote_preparation_skipped", { reason: "APPEND_FAILED" });
+          }
+        }
+        return { kind: "reply", body, result: piloted.result, processingStatus: piloted.processingStatus, stale: piloted.stale, ...(piloted.signature ? { signature: piloted.signature } : {}), quality: piloted.quality };
       };
     }
 

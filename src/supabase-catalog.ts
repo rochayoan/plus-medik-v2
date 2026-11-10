@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { parseTurnaround } from "./quote-turnaround.js";
 import type { CatalogStudy } from "./types.js";
 
 // Repositorio de catálogo en SOLO LECTURA (PostgREST). Solo emite GET; nunca escribe en Supabase.
@@ -11,7 +12,8 @@ const labTestRow = z.object({
   price_bs: z.number().finite(),
   active: z.boolean(),
   category: z.string().nullable().optional(),
-  sample_type: z.string().nullable().optional()
+  sample_type: z.string().nullable().optional(),
+  notes: z.string().nullable().optional()
 });
 
 const aliasRow = z.object({
@@ -62,7 +64,7 @@ export async function loadActiveCatalog(options: SupabaseCatalogOptions = {}): P
   const resolved = { baseUrl, serviceKey, fetchFn: options.fetchFn ?? fetch };
 
   const [testRows, aliasRows] = await Promise.all([
-    fetchAllRows(resolved, "lab_tests?select=id,code,name,normalized_name,price_bs,active,category,sample_type&active=eq.true&order=id.asc"),
+    fetchAllRows(resolved, "lab_tests?select=id,code,name,normalized_name,price_bs,active,category,sample_type,notes&active=eq.true&order=id.asc"),
     fetchAllRows(resolved, "lab_test_aliases?select=lab_test_id,normalized_alias&order=id.asc")
   ]);
 
@@ -79,7 +81,8 @@ export async function loadActiveCatalog(options: SupabaseCatalogOptions = {}): P
       priceBs: row.price_bs,
       active: true,
       category: row.category ?? null,
-      sampleType: row.sample_type ?? null
+      sampleType: row.sample_type ?? null,
+      turnaroundText: parseTurnaround(row.notes)
     });
   }
 

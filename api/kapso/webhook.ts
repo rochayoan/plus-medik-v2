@@ -24,6 +24,7 @@ import { resolveCrmOutbox } from "../../src/crm-outbox/config.js";
 import { createCrmHandoffSink } from "../../src/crm-outbox/handoff-sink.js";
 import { QUOTE_TEXTS } from "../../src/quote-session.js";
 import { appendApprovedQuotePreparations } from "../../src/quote-preparation.js";
+import { appendQuoteTurnaround } from "../../src/quote-turnaround.js";
 import { appendApprovedQuoteStudyDetails } from "../../src/quote-study-details.js";
 import { createSupabaseStudyFactsStore, StudyFactsService } from "../../src/study-facts/index.js";
 import { resolveQuoteSessionsConfig } from "../../src/quote-session-turns.js";
@@ -244,8 +245,9 @@ const realDeps: QuoteDeps = {
             }
           })
         });
-        if (!quoteStudyDetailsEnabled) return prepared;
-        return appendApprovedQuoteStudyDetails({
+        // El tiempo de entrega sale del catálogo (lab_tests.notes), no del marco de datos aprobados por estudio: se añade siempre que haya dato.
+        if (!quoteStudyDetailsEnabled) return appendQuoteTurnaround(prepared, studyIds, catalog);
+        return appendQuoteTurnaround(await appendApprovedQuoteStudyDetails({
           quote: prepared,
           studyIds,
           catalog,
@@ -255,7 +257,7 @@ const realDeps: QuoteDeps = {
               throw new Error("QUOTE_STUDY_DETAILS_TRACE_UNAVAILABLE");
             }
           })
-        });
+        }), studyIds, catalog);
       }
     : undefined,
   async sendText(to, body) {
