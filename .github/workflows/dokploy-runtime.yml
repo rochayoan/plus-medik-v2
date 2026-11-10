@@ -5,6 +5,14 @@ on:
     paths:
       - "server/**"
       - "tests/dokploy-router.test.ts"
+      - "tests/dokploy-inbox.test.ts"
+      - "tests/dokploy-local-inbox.test.ts"
+      - "docs/deploy/sql/plusmedik_dokploy_inbox.staging.sql"
+      - "docs/deploy/sql/plusmedik_dokploy_inbox.install.sql"
+      - "docs/deploy/sql/plusmedik_dokploy_existing_db_preflight.readonly.sql"
+      - "docs/deploy/sql/plusmedik_dokploy_existing_db_postflight.readonly.sql"
+      - "tests/support/dokploy-inbox-postgres.sql"
+      - "api/kapso/webhook.ts"
       - "Dockerfile.dokploy"
       - ".dockerignore"
       - "tsconfig.dokploy.json"
@@ -32,7 +40,44 @@ jobs:
       - name: Build Dokploy Node server
         run: npm run build:dokploy
       - name: Check closed webhook and health endpoints
-        run: npx vitest run tests/dokploy-router.test.ts
+        run: npx vitest run tests/dokploy-router.test.ts tests/dokploy-inbox.test.ts tests/dokploy-local-inbox.test.ts
+      - name: Validate inbox SQL against isolated PostgreSQL 16
+        run: |
+          docker run --rm -d --name plusmedik-inbox-pg -e POSTGRES_PASSWORD=local-only -p 127.0.0.1:54339:5432 postgres:16-alpine
+          trap 'docker rm -f plusmedik-inbox-pg || true' EXIT
+          # Postgres initdb briefly starts an interim server and restarts it.
+          # Two actual SQL probes, separated by 2 seconds, avoid that race.
+          for i in $(seq 1 50); do
+            if docker exec plusmedik-inbox-pg psql -U postgres -Atc "select 1" >/dev/null 2>&1; then
+              sleep 2
+              if docker exec plusmedik-inbox-pg psql -U postgres -Atc "select 1" >/dev/null 2>&1; then break; fi
+            fi
+            sleep 1
+          done
+          docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "create role anon; create role authenticated; create role service_role bypassrls;"
+          # The installer must abort atomically before the original 16 migrations exist.
+          if docker exec -i plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres < docs/deploy/sql/plusmedik_dokploy_inbox.install.sql > /dev/null 2>&1; then
+            echo "ERROR: installer unexpectedly succeeded without PlusMedik base schema" >&2
+            exit 1
+          fi
+          docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -Atc "select to_regclass('public.plusmedik_dokploy_inbox') is null" | grep -qx 't'
+          # Synthetic prerequisites for the guarded installer; CI does not use patient data.
+          docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "create table public.plusmedik_audit_runs (id uuid); create table public.plusmedik_quote_sessions (id uuid); create table public.plusmedik_guard_rate_ledger (id uuid);"
+          docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "create function public.plusmedik_turn_reserve_send_guarded(uuid,text,bigint,text,integer,text,jsonb) returns boolean language sql as 'select true';"
+          docker exec -i plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -At < docs/deploy/sql/plusmedik_dokploy_existing_db_preflight.readonly.sql > /dev/null
+          docker exec -i plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres < docs/deploy/sql/plusmedik_dokploy_inbox.install.sql
+          # A second attempt must fail rather than replace existing queue objects.
+          if docker exec -i plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres < docs/deploy/sql/plusmedik_dokploy_inbox.install.sql > /dev/null 2>&1; then
+            echo "ERROR: repeat install unexpectedly succeeded" >&2
+            exit 1
+          fi
+          # Full preflight for the original sixteen migrations is checked in the
+          # separate quote-preparation workflow. This ephemeral DB has no base
+          # PlusMedik migrations, so only queue-specific postflight rows < 30
+          # are required here.
+          docker exec -i plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -At < docs/deploy/sql/plusmedik_dokploy_existing_db_postflight.readonly.sql | awk -F '|' '$1 + 0 < 30 && $3 == "BLOCK" { bad=1 } END { if (bad) exit 1 }'
+          docker exec plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -c "set role service_role; select public.plusmedik_dokploy_health();"
+          docker exec -i plusmedik-inbox-pg psql -v ON_ERROR_STOP=1 -U postgres -At < tests/support/dokploy-inbox-postgres.sql | tail -n 1 | grep -qx '0'
       - name: Build Docker runtime
         run: docker build -f Dockerfile.dokploy -t plusmedik-dokploy:ci .
       - name: Docker smoke test (no patient traffic)

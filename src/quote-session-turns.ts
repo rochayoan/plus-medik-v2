@@ -2,11 +2,12 @@ import { createHash } from "node:crypto";
 import type { AnalysisResult } from "./analyze.js";
 import { catalogFingerprint, processingFailureCode, type AuditLease, type AuditRepository, type ProcessingPhase } from "./audit.js";
 import { withAiCallObserver, type AiCallEvent } from "./cache.js";
-import type { Produced, TurnContext, TurnProducer } from "./guarded-turn.js";
+import type { PhotoReport, Produced, TurnContext, TurnProducer } from "./guarded-turn.js";
 import {
-  assertSafeQuoteTexts, DEFAULT_QUOTE_SESSIONS, evaluateSession, extractStudyRequests, formatAck, formatSessionQuote, formatTextReply, isGeneralQuestion, optionsOf, parseSessionCommand, parseSessionReply, QUOTE_TEXTS,
-  summarizeSession, type ItemResult, type QuoteBeginResult, type QuoteCloseInput, type QuoteCloseResult, type QuoteReadResult, type QuoteSessionsConfig, type QuoteTexts, type SessionItem, type SessionReply, type TextDoubt
+  assertSafeInterpreterTexts, assertSafeQuoteTexts, DEFAULT_QUOTE_SESSIONS, evaluateSession, extractStudyRequests, formatAck, formatInterpretationNote, formatSessionQuote, formatTextReply, isGeneralQuestion, mergeInterpretation, optionsOf, parseSessionCommand, parseSessionReply, QUOTE_TEXTS,
+  summarizeSession, withNote, compactQuote, type ItemResult, type QuoteBeginResult, type QuoteCloseInput, type QuoteCloseResult, type QuoteReadResult, type QuoteSessionsConfig, type QuoteTexts, type SessionItem, type SessionReply, type TextDoubt
 } from "./quote-session.js";
+import { summarizeAiFailures } from "./provider-error.js";
 import { looksAutomated, looksLikeOwnReply } from "./reply-guard.js";
 import { asksForPrice, classifyText } from "./text-handler.js";
 import type { CatalogStudy } from "./types.js";
@@ -16,7 +17,7 @@ import { buildAnalysisLog, detectImageMime, MAX_IMAGE_BYTES, maskPhone, TECHNICA
 // solo cuando el paciente escribe «listo». Todo lo demás (claim con lease, reserva de envío, pausa humana, guarda antibucles, un envío incierto jamás se reenvía) sigue siendo
 // la máquina común de guarded-turn.ts. Con sesiones apagadas este archivo no se usa y el flujo de imágenes (whatsapp-quote.ts) queda exactamente como estaba.
 
-class SessionUnavailableError extends Error {
+export class SessionUnavailableError extends Error {
   constructor(readonly stage: string) {
     super(`quote session unavailable: ${stage}`);
     this.name = "SessionUnavailableError";
@@ -39,19 +40,30 @@ export function itemFromAnalysis(analysis: AnalysisResult): ItemResult {
   const lines = analysis.internal?.quoted.lines ?? analysis.quote?.lines ?? [];
   const studyIds = [...new Set(lines.map((line) => line.id))];
   const hasQuote = Boolean(analysis.publicQuote) || Boolean(analysis.quote);
-  if (analysis.outcome === "HUMAN_REVIEW" || !hasQuote || studyIds.length === 0) return UNREADABLE("UNREADABLE_IMAGE");
+  if (analysis.outcome === "HUMAN_REVIEW" || !hasQuote || studyIds.length === 0) {
+    // Una imagen legible puede contener estudios ausentes/ambiguos del catálogo:
+    // HUMAN_REVIEW NO equivale a "foto ilegible". Mantenerla pendiente de
+    // aclaración sin atribuir al paciente un error que no cometió.
+    const catalogue = analysis.reasons.some((reason) =>
+      reason.startsWith("catalog_") || reason.startsWith("semantic_") ||
+      reason === "package_alternative_unresolved" || reason === "line_service_not_covered"
+    );
+    return catalogue
+      ? { status: "UNRESOLVED", studyIds, ambiguous: [], unresolved: 1, reasons: ["UNRESOLVED_TEXT"] }
+      : UNREADABLE("UNREADABLE_IMAGE");
+  }
   const complete = analysis.outcome ? analysis.outcome === "AUTO_COMPLETE" : analysis.decision === "AUTO_SAFE";
   return complete
     ? { status: "RESOLVED", studyIds, ambiguous: [], unresolved: 0, reasons: [] }
     : { status: "UNCERTAIN", studyIds, ambiguous: [], unresolved: 0, reasons: ["ENGINE_PARTIAL"] };
 }
 
-const namesOf = (ids: readonly string[], catalog: readonly CatalogStudy[]): string[] => {
+export const namesOf = (ids: readonly string[], catalog: readonly CatalogStudy[]): string[] => {
   const byId = new Map(catalog.map((study) => [study.id, study.name]));
   return ids.map((id) => byId.get(id)).filter((name): name is string => Boolean(name));
 };
 
-function needs<K extends "quoteBegin" | "quoteFinish" | "quoteRead" | "quoteClose">(audit: AuditRepository, method: K): NonNullable<AuditRepository[K]> {
+export function needs<K extends "quoteBegin" | "quoteFinish" | "quoteRead" | "quoteClose">(audit: AuditRepository, method: K): NonNullable<AuditRepository[K]> {
   const fn = audit[method];
   if (!fn) throw new SessionUnavailableError(method);
   return fn.bind(audit) as NonNullable<AuditRepository[K]>;
@@ -59,7 +71,7 @@ function needs<K extends "quoteBegin" | "quoteFinish" | "quoteRead" | "quoteClos
 
 // Ejecuta una operación de sesión con el lease de ESTA ejecución y devuelve su resultado. Un fallo (base caída, migración sin aplicar, lease perdido) no se oculta: el turno sigue por
 // la ruta de fallo técnico y NUNCA se responde como si se hubiera anotado algo.
-async function withSession<T>(ctx: TurnContext, stage: string, action: (audit: AuditRepository, runId: string, lease: AuditLease) => Promise<T>): Promise<T> {
+export async function withSession<T>(ctx: TurnContext, stage: string, action: (audit: AuditRepository, runId: string, lease: AuditLease) => Promise<T>): Promise<T> {
   if (!ctx.guarded) throw new SessionUnavailableError(stage);
   let value: { v: T } | undefined;
   const ok = await ctx.persist(stage, async (audit, runId, lease) => {
@@ -69,6 +81,8 @@ async function withSession<T>(ctx: TurnContext, stage: string, action: (audit: A
   return value.v;
 }
 
+// Anota en la respuesta de una foto lo que aportó a la solicitud (ver PhotoReport); el texto y el envío no cambian.
+const withPhoto = (produced: Produced, photo: PhotoReport): Produced => (produced.kind === "reply" ? { ...produced, photo } : produced);
 const failureReply = (): Produced => ({ kind: "reply", body: TECHNICAL_ISSUE_MESSAGE, result: "technical_issue", processingStatus: "FAILED", stale: "NEWER_TURN" });
 const plain = (body: string): Produced => ({ kind: "reply", body, result: "no_quote", processingStatus: "COMPLETED", stale: "NONE" });
 // Pregunta al paciente (una duda por aclarar, o si ya terminó): su firma lleva la cantidad de mensajes, así dos preguntas distintas no cuentan como una repetición para la guarda antibucles.
@@ -77,6 +91,7 @@ const ack = (body: string, position: number): Produced => ({ kind: "reply", body
 
 export function resolveQuoteSessionsConfig(config?: Partial<QuoteSessionsConfig>): QuoteSessionsConfig {
   assertSafeQuoteTexts(QUOTE_TEXTS);
+  assertSafeInterpreterTexts();
   return { ...DEFAULT_QUOTE_SESSIONS, ...config };
 }
 
@@ -121,7 +136,8 @@ export function sessionImageProducer(image: IncomingImage, deps: QuoteDeps, conf
       const catalog = await deps.loadCatalog();
       if (begun.status === "exists" && begun.itemStatus !== "PROCESSING") {
         // Una ejecución anterior ya terminó el análisis de ESTA foto (reclamó el lease tras una caída): no se vuelve a analizar.
-        return ack(formatAck({ texts, kind: "IMAGE", names: namesOf(begun.studyIds, catalog), position: begun.position, hasDoubt: begun.itemStatus !== "RESOLVED", repeated: 0 }), begun.position);
+        const known: PhotoReport["status"] = begun.itemStatus === "RESOLVED" ? "RESOLVED" : begun.itemStatus === "UNREADABLE" ? "UNREADABLE" : "UNCERTAIN";
+        return withPhoto(ack(formatAck({ texts, kind: "IMAGE", names: namesOf(begun.studyIds, catalog), position: begun.position, hasDoubt: begun.itemStatus !== "RESOLVED", repeated: 0 }), begun.position), { status: known, studyIds: begun.studyIds });
       }
       phase = "AI_ANALYSIS";
       const analysis = await withAiCallObserver(
@@ -133,15 +149,24 @@ export function sessionImageProducer(image: IncomingImage, deps: QuoteDeps, conf
       evidenceAttempted = true;
       await ctx.persist("evidence", (audit, runId, lease) => audit.recordEvidence(runId, { analysis, aiCalls, catalog: catalogFingerprint(catalog) }, lease));
       const item = itemFromAnalysis(analysis);
+      // Memoria en sombra (memoria del agente): la receta leída por ids; nunca precios ni texto.
+      deps.turns?.convState?.artifact({ from: image.from, key: image.messageId, kind: "RECIPE", studyIds: item.studyIds, unrecognized: analysis.internal?.pending.length ?? 0 });
       await withSession(ctx, "quote_finish", (audit, runId, lease) => needs(audit, "quoteFinish")(runId, lease, item));
-      if (item.status === "UNREADABLE") return plain(texts.unreadable_image);
-      return ack(formatAck({ texts, kind: "IMAGE", names: namesOf(item.studyIds, catalog), position: begun.position, hasDoubt: item.status !== "RESOLVED", repeated: 0 }), begun.position);
+      if (item.status === "UNREADABLE") return withPhoto(plain(texts.unreadable_image), { status: "UNREADABLE", studyIds: [] });
+      return withPhoto(ack(formatAck({ texts, kind: "IMAGE", names: namesOf(item.studyIds, catalog), position: begun.position, hasDoubt: item.status !== "RESOLVED", repeated: 0 }), begun.position), { status: item.status === "RESOLVED" ? "RESOLVED" : "UNCERTAIN", studyIds: item.studyIds });
     } catch (error) {
       const errorCode = processingFailureCode(error instanceof SessionUnavailableError ? "OTHER" : phase);
-      deps.log("processing_failed", { messageId: image.messageId, phone: who, errorCode, ...(error instanceof SessionUnavailableError ? { stage: error.stage } : {}) });
+      const aiFailures = summarizeAiFailures(aiCalls);
+      deps.log("processing_failed", { messageId: image.messageId, phone: who, errorCode, ...(error instanceof SessionUnavailableError ? { stage: error.stage } : {}), ...(aiFailures.length > 0 ? { aiFailures } : {}) });
       if (!evidenceAttempted) await ctx.persist("evidence", (audit, runId, lease) => audit.recordEvidence(runId, { aiCalls }, lease));
       // Si la foto ya estaba en la sesión «en proceso», se marca ilegible: «listo» pedirá otra en vez de quedarse esperando algo que no llegará.
-      if (began) await ctx.persist("quote_finish", async (audit, runId, lease) => { await needs(audit, "quoteFinish")(runId, lease, UNREADABLE("UNREADABLE_IMAGE")); });
+      if (began) {
+        // Un fallo de red/modelo/catálogo NO es prueba de una imagen ilegible.
+        // Se conserva pendiente de revisión y nunca se cotiza automáticamente.
+        await ctx.persist("quote_finish", async (audit, runId, lease) => {
+          await needs(audit, "quoteFinish")(runId, lease, { status: "UNCERTAIN", studyIds: [], ambiguous: [], unresolved: 0, reasons: ["ENGINE_PARTIAL"] });
+        });
+      }
       await ctx.persist("failure", (audit, runId, lease) => audit.recordFailure(runId, errorCode, lease));
       return failureReply();
     }
@@ -247,19 +272,21 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
     return read && read.state !== "pending" ? read : undefined;
   }
 
-  async function finalize(ctx: TurnContext, command: CloseCommand, whenNone?: () => Promise<Produced>): Promise<Produced> {
+  // `note`: lo que el intérprete le avisa al paciente (qué interpretó y qué estudios no existen en el catálogo); acompaña a la cotización o a la pregunta, nunca la reemplaza.
+  async function finalize(ctx: TurnContext, command: CloseCommand, whenNone?: () => Promise<Produced>, note?: string): Promise<Produced> {
     const read = await readSession(ctx, true);
     if (!read) return plain(texts.waiting);
     if (read.state === "replay") {
       if (read.outcome !== "NEEDS_REVIEW") {
         const reply = replayReply(read, texts);
+        if (reply.kind === "reply" && reply.result === "quoted" && !(read.lines && deps.quotePreparations)) return { ...reply, body: compactQuote(reply.body) };
         if (reply.kind !== "reply" || reply.result !== "quoted" || !read.lines || !deps.quotePreparations) return reply;
         try {
           const catalog = await deps.loadCatalog();
           const body = await deps.quotePreparations(reply.body, read.lines.map((line) => line.studyId), catalog, ctx);
-          return { ...reply, body };
+          return { ...reply, body: compactQuote(body) };
         } catch {
-          return reply;
+          return { ...reply, body: compactQuote(reply.body) };
         }
       }
       // Ejecución que reclama el turno tras el cierre: el caso se vuelve a presentar (idempotente) para decidir con el estado REAL del CRM qué texto corresponde.
@@ -290,7 +317,7 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
     if (command === "AUTO" && evaluation.kind === "REVIEW" && !evaluation.reasons.some((reason) => reason === "STUDY_UNAVAILABLE" || reason === "PRICE_INVALID")) {
       const asked = describeSession(read.items, catalog);
       deps.log("quote_session", { event: "clarify", doubt: asked.doubt, reasons: evaluation.reasons });
-      return ask(formatTextReply({ texts, names: asked.names, options: asked.options, doubt: asked.doubt === "NONE" ? "UNRESOLVED" : asked.doubt, repeated: 0 }), read.items.length);
+      return ask(formatTextReply({ texts, names: asked.names, options: asked.options, doubt: asked.doubt === "NONE" ? "UNRESOLVED" : asked.doubt, repeated: 0, ...(note ? { note } : {}) }), read.items.length);
     }
     const input: QuoteCloseInput =
       evaluation.kind === "QUOTE" ? { sessionId: read.sessionId, outcome: "QUOTED", lines: evaluation.lines, totalBs: evaluation.totalBs, catalogFingerprint: catalogFingerprint(catalog).hash }
@@ -300,7 +327,8 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
     if (closed.status === "pending") return plain(texts.waiting);
     if (closed.status === "not_open") return plain(texts.empty);
     if (evaluation.kind === "QUOTE") {
-      let body = formatSessionQuote(evaluation.lines, evaluation.duplicates, texts);
+      deps.turns?.convState?.artifact({ from: turn.from, key: read.sessionId, kind: "QUOTE", studyIds: evaluation.lines.map((line) => line.studyId) });
+      let body = withNote(formatSessionQuote(evaluation.lines, evaluation.duplicates, texts), note);
       if (deps.quotePreparations) {
         try {
           body = await deps.quotePreparations(body, evaluation.lines.map((line) => line.studyId), catalog, ctx);
@@ -308,7 +336,7 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
           deps.log("quote_preparation_skipped", { reason: "APPEND_FAILED" });
         }
       }
-      return { kind: "reply", body, result: "quoted", processingStatus: "COMPLETED", stale: "NONE" };
+      return { kind: "reply", body: compactQuote(body), result: "quoted", processingStatus: "COMPLETED", stale: "NONE" };
     }
     if (evaluation.kind === "REVIEW") return reviewReply(ctx, read.sessionId, catalog);
     return plain(texts.resend);
@@ -317,7 +345,7 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
   // Responde a un estudio escrito que ya quedó anotado: qué hay en la solicitud hasta ahora y, si hay una duda, la pregunta; si no, si eso es todo. Una sola lectura (sin esperar): si hay mensajes
   // anteriores aún en proceso se responde solo con lo de este mensaje. Con el agrupamiento de mensajes seguidos (G6.0) sí se espera, acotado, a que terminen los anteriores (están por cerrar sin respuesta):
   // el que confirma debe ver TODOS los estudios.
-  async function replyAfterAdd(ctx: TurnContext, begun: Exclude<QuoteBeginResult, { status: "full" }>, own: ItemResult, catalog: readonly CatalogStudy[], repeated: number): Promise<Produced> {
+  async function replyAfterAdd(ctx: TurnContext, begun: Exclude<QuoteBeginResult, { status: "full" }>, own: ItemResult, catalog: readonly CatalogStudy[], repeated: number, note?: string): Promise<Produced> {
     // G6.0: varios mensajes seguidos. Se espera un instante antes de confirmar; si llegó uno más nuevo, este calla (su estudio ya quedó anotado) y el más nuevo confirma todo junto.
     if (attention && attention.settleMs > 0) {
       await sleep(attention.settleMs);
@@ -332,7 +360,7 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
     const items: SessionItem[] = read && read.state === "ready" ? read.items : [{ id: begun.itemId, seq: 1, kind: "TEXT", ...own }];
     const described = describeSession(items, catalog);
     deps.log("quote_session", { event: "text_reply", doubt: described.doubt, studies: described.names.length, summary: read?.state === "ready" });
-    return ack(formatTextReply({ texts, head: texts.added_text, names: described.names, options: described.options, doubt: described.doubt, repeated }), begun.position);
+    return ack(formatTextReply({ texts, head: texts.added_text, names: described.names, options: described.options, doubt: described.doubt, repeated, ...(note ? { note } : {}) }), begun.position);
   }
 
   // «sí», «no» o el número de una opción: solo significan algo con una solicitud abierta; sin ella es un mensaje cualquiera.
@@ -392,7 +420,30 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
         deps.log("quote_session", { event: "catalog_unavailable_for_text" });
         return await handOver(ctx);
       }
-      const extraction = extractStudyRequests(text, catalog);
+      let extraction = extractStudyRequests(text, catalog);
+      // Intérprete de estudios (apagado si falta): solo cuando el resolvedor exacto no basta (no reconoció nada, o algo quedó sin resolver). Lo que devuelve ya está validado contra el catálogo; si falla, sigue
+      // el resultado exacto de siempre.
+      let note: string | undefined;
+      if (config.interpreter && (!extraction || extraction.result.unresolved > 0)) {
+        let interpreted: Awaited<ReturnType<NonNullable<typeof config.interpreter>>>;
+        try {
+          interpreted = await config.interpreter(text, catalog, { hasDoubt: extraction !== undefined });
+        } catch {
+          interpreted = undefined;
+          deps.log("quote_session", { event: "interpreter_failed" });
+        }
+        if (interpreted) {
+          const merged = mergeInterpretation(text, extraction, interpreted);
+          extraction = merged.extraction;
+          note = formatInterpretationNote(merged.notes);
+          deps.log("quote_session", { event: "interpreted", matched: merged.extraction?.matched.length ?? 0, notFound: merged.notes.notFound.length, interpretedAs: merged.notes.interpreted.length, ambiguous: merged.extraction?.result.ambiguous.length ?? 0, unclear: merged.extraction?.result.unresolved ?? 0 });
+          // Pidió solo estudios que el catálogo no tiene: se le dice cuáles y no se toca la solicitud.
+          if (!extraction && merged.notes.notFound.length > 0 && note) {
+            retire();
+            return ask(note, 0);
+          }
+        }
+      }
       if (!extraction) {
         // «¿cuánto es en total?» sin estudios nuevos: pide el precio de lo que ya está anotado. Sin una solicitud abierta es un mensaje cualquiera.
         if (asksForPrice(text)) return await finalize(ctx, "AUTO", () => handOver(ctx));
@@ -404,8 +455,8 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
       deps.log("quote_session", { event: "text_item", status: begun.status, itemStatus: extraction.result.status, studies: extraction.matched.length, ambiguous: extraction.result.ambiguous.length, unresolved: extraction.result.unresolved, wantsQuote: extraction.wantsQuote });
       if (begun.status === "full") return plain(texts.full);
       // Una lista CLARA (todo identificado con certeza) con un pedido explícito de cotizar se cotiza ya, junto con lo que la solicitud tuviera acumulado; con cualquier duda se pregunta.
-      if (extraction.wantsQuote && extraction.result.status === "RESOLVED") return await finalize(ctx, "AUTO");
-      return await replyAfterAdd(ctx, begun, extraction.result, catalog, extraction.repeatedInMessage);
+      if (extraction.wantsQuote && extraction.result.status === "RESOLVED") return await finalize(ctx, "AUTO", undefined, note);
+      return await replyAfterAdd(ctx, begun, extraction.result, catalog, extraction.repeatedInMessage, note);
     } catch (error) {
       const errorCode = processingFailureCode("OTHER");
       deps.log("processing_failed", { messageId: turn.messageId, phone: who, errorCode, ...(error instanceof SessionUnavailableError ? { stage: error.stage } : {}) });

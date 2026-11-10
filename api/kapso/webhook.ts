@@ -2,6 +2,9 @@ import { resolveTextPilotGate } from "../../src/text-pilot-gate.js";
 import { WhatsAppClient } from "@kapso/whatsapp-cloud-api";
 import { waitUntil } from "@vercel/functions";
 import { analyzeImage } from "../../src/analyze.js";
+import { resolveAudio } from "../../src/audio/config.js";
+import type { MediaFetcher } from "../../src/audio/media.js";
+import { resolveBatchEngine } from "../../src/batch-engine.js";
 import { resolveAttentionFilter } from "../../src/attention-filter.js";
 import { createSupabaseAuditRepository, type AuditRepository } from "../../src/audit.js";
 import { loadActiveCatalog } from "../../src/supabase-catalog.js";
@@ -9,12 +12,19 @@ import { resolveScopedContactControl } from "../../src/crm-attention.js";
 import { contactKeyOf, createAttentionRepository, type AttentionRepository } from "../../src/human-control.js";
 import { handleKapsoWebhook } from "../../src/kapso-webhook.js";
 import { createSupabaseKnowledgeStore, KnowledgeService } from "../../src/knowledge/index.js";
-import { ANSWER_TEXTS, detectTopics, lazyKnowledge, ttlCache } from "../../src/knowledge-answers.js";
-import { resolveConversationModel } from "../../src/conversation-openai.js";
+import { ANSWER_TEXTS, answerFromKnowledge, detectTopics, lazyKnowledge, ttlCache } from "../../src/knowledge-answers.js";
+import { resolveAgentSettings } from "../../src/agent/openai.js";
+import { createAgentPilot, createPilotSwitch, createRecentProvider } from "../../src/agent/pilot.js";
+import { resolveAgentMode } from "../../src/agent/pipeline.js";
+import { createConversationReader, createSupabaseConversationStore, resolveConversationState } from "../../src/conversation-state-store.js";
+import { resolveDailyReplyCap } from "../../src/daily-reply-cap.js";
+import { resolveMessageHistory } from "../../src/message-history.js";
+import { resolveStudyInterpreter } from "../../src/study-interpreter-openai.js";
 import { resolveCrmOutbox } from "../../src/crm-outbox/config.js";
 import { createCrmHandoffSink } from "../../src/crm-outbox/handoff-sink.js";
 import { QUOTE_TEXTS } from "../../src/quote-session.js";
 import { appendApprovedQuotePreparations } from "../../src/quote-preparation.js";
+import { appendApprovedQuoteStudyDetails } from "../../src/quote-study-details.js";
 import { createSupabaseStudyFactsStore, StudyFactsService } from "../../src/study-facts/index.js";
 import { resolveQuoteSessionsConfig } from "../../src/quote-session-turns.js";
 import { resolveReplyGuard } from "../../src/reply-guard.js";
@@ -55,6 +65,9 @@ const replyGuardInvalid = replyGuard.enabled && "error" in replyGuard;
 // nadie podría escribir «listo» y las fotos quedarían sin cotización: por eso, sin él, las fotos siguen cotizándose una por una como siempre). Exige la ONCEAVA migración aplicada;
 // sin ella las fotos y los textos de cotización responden con el aviso técnico (falla cerrado). Los estudios y precios son SIEMPRE los de lab_tests al momento de cotizar.
 const quoteSessionsEnabled = on("PLUSMEDIK_QUOTE_SESSIONS") && turnsEnabled && textHandlerEnabled;
+// Piloto opt-in: cada foto entrega SU propia cotización, sin pedir LISTO. No desactiva las cotizaciones por texto ni cambia el ruteo de otros pacientes.
+// Sirve igual con la puerta del piloto encendida (solo el piloto) o apagada (todos los contactos usan la misma ruta de turnos).
+const instantPhotoQuotesEnabled = on("PLUSMEDIK_INSTANT_PHOTO_QUOTES") && quoteSessionsEnabled && textPilotGate.ready;
 // Opt-in: anexar preparaciones clínicas aprobadas a la cotización, sin llamadas al modelo.
 // Exige turnos auditables, respuesta de texto y conocimiento (falla cerrado si falta cualquiera).
 const quotePreparationsEnabled = on("PLUSMEDIK_QUOTE_PREPARATIONS") && turnsEnabled && textHandlerEnabled && knowledgeAnswersEnabled && replyGuard.enabled && !replyGuardInvalid;
@@ -62,6 +75,8 @@ const quotePreparationsEnabled = on("PLUSMEDIK_QUOTE_PREPARATIONS") && turnsEnab
 // Permite consultar el plazo de entrega (en horas o días según el estudio) y el tipo de muestra/requisitos SOLO con datos aprobados y vigentes. Exige la DOCEAVA migración; sin ella
 // o sin datos aprobados el bot dice que no tiene el dato (nunca inventa un plazo). Los estudios salen de la última cotización o del nombre que escriba el paciente.
 const studyInfoEnabled = on("PLUSMEDIK_STUDY_INFO") && turnsEnabled && textHandlerEnabled && knowledgeAnswersEnabled;
+// Opt-in independiente: se añaden muestra, requisitos y tiempos aprobados a la cotización después de anexar la preparación.
+const quoteStudyDetailsEnabled = on("PLUSMEDIK_QUOTE_STUDY_DETAILS") && quotePreparationsEnabled && studyInfoEnabled;
 // Derivación segura de casos al CRM (G5.0, APAGADA por defecto): PLUSMEDIK_CRM_HANDOFF=on solo tiene efecto con PLUSMEDIK_TURNS=on y PLUSMEDIK_TEXT_HANDLER=on y con TODA la configuración
 // (PLUSMEDIK_CRM_REVIEW_URL, PLUSMEDIK_CRM_REVIEW_TOKEN, PLUSMEDIK_OUTBOX_KEY, KAPSO_PHONE_NUMBER_ID). Exige la TRECEAVA migración. Con ella, la derivación a una persona deja de estar
 // bloqueada, pero SOLO se le confirma al paciente cuando el CRM ya registró el caso. Con cualquier configuración incompleta la derivación sigue BLOQUEADA (y se registra un código).
@@ -70,10 +85,24 @@ const studyFacts = () => (studyFactsService ??= new StudyFactsService({ store: c
 const logLine = (event: string, data: Record<string, unknown>) => console.log(JSON.stringify({ app: "plusmedik", event, ...data }));
 const crmOutbox = turnsEnabled && textHandlerEnabled ? resolveCrmOutbox(process.env, logLine) : undefined;
 if (replyGuard.enabled && "error" in replyGuard) logLine("reply_guard_config_invalid", { error: replyGuard.error });
-// Conversación natural con OpenAI (G5.3, APAGADA por defecto): PLUSMEDIK_LLM_CONVERSATION=on solo tiene efecto con PLUSMEDIK_TURNS=on, PLUSMEDIK_TEXT_HANDLER=on y PLUSMEDIK_REPLY_GUARD=on (válida), con
-// OPENAI_API_KEY y OPENAI_CONVERSATION_MODEL (obligatorio; sin valor por defecto). El modelo solo conversa y clasifica: precios, preparación, resultados y datos del laboratorio siguen saliendo SOLO del
-// catálogo y del conocimiento aprobado, y lo médico, la derivación a una persona y la información nunca dependen de él. Cualquier configuración incompleta la deja apagada (y se registra un código).
-const conversationModel = turnsEnabled && textHandlerEnabled ? resolveConversationModel(process.env, logLine, { responseGuardActive: replyGuard.enabled && !("error" in replyGuard) }) : undefined;
+// Capa conversacional ÚNICA: el agente de src/agent (abajo). La antigua capa «conversación con modelo» (G5.3), su memoria corta y sus variables PLUSMEDIK_LLM_* ya no se conectan.
+const agentActive = resolveAgentMode(process.env) === "live";
+// Tope de respuestas del agente por contacto (APAGADO por defecto; ver .env.example y src/daily-reply-cap.ts): 5 cada 24 horas, aplicado por la base al reservar el envío.
+const dailyReplyCap = resolveDailyReplyCap(process.env, logLine, { turnsActive: turnsEnabled, conversationActive: agentActive });
+// Motor global de lotes (APAGADO por defecto; ver docs/g6/03-conexion-del-motor-de-lotes.md): PLUSMEDIK_BATCH_ENGINE=shadow compara en los registros la decisión del motor nuevo con la ruta de siempre SIN cambiar
+// ninguna respuesta ni escribir nada propio; =on hace que el motor nuevo atienda el texto de los lotes de Kapso (varios mensajes de un contacto) con la ruta de siempre de respaldo. Solo tiene efecto con las sesiones de
+// cotización activas. Cualquier otro valor lo deja apagado (y se registra un código).
+const batchEngineResolution = resolveBatchEngine(process.env);
+if ("error" in batchEngineResolution && batchEngineResolution.error) logLine("batch_engine_config_invalid", { error: batchEngineResolution.error });
+const batchEngineMode = quoteSessionsEnabled && !replyGuardInvalid ? batchEngineResolution.mode : undefined;
+if (batchEngineResolution.mode && !batchEngineMode) logLine("batch_engine_inactive", { reason: "QUOTE_SESSIONS_REQUIRED" });
+// Alcance real del agente, sin números de teléfono: permite comprobar en los registros de Vercel, tras cada cambio de variables, quién usa la ruta de turnos y si el tope cubre a todos.
+const allContactsOnTurns = turnsEnabled && !textPilotGate.enabled;
+logLine("agent_scope", { turns: turnsEnabled, textHandler: textHandlerEnabled, pilotGate: textPilotGate.enabled, allContactsOnTurns, allowedPhonesRestricted: Boolean(process.env.ALLOWED_PHONES?.trim()), dailyCap: dailyReplyCap !== undefined, instantPhotoQuotes: instantPhotoQuotesEnabled, humanControl: humanControlEnabled, batchEngine: batchEngineMode ?? "off" });
+// Con la puerta del piloto encendida, los demás contactos siguen por la ruta anterior de fotos, que no pasa por los turnos y por tanto NO tiene el tope: el tope no cubre a todos.
+if (dailyReplyCap && textPilotGate.enabled) logLine("daily_cap_partial_scope", { reason: "PILOT_GATE_ON" });
+// Intérprete de estudios escritos (APAGADO por defecto; ver .env.example y src/study-interpreter.ts): errores de ortografía, abreviaturas y pedidos en lenguaje natural; el backend valida todo contra el catálogo.
+const studyInterpreter = resolveStudyInterpreter(process.env, logLine, { textQuotesActive: quoteSessionsEnabled && !replyGuardInvalid });
 // Atención selectiva (G6.0, APAGADA por defecto): PLUSMEDIK_ATTENTION_FILTER=on solo tiene efecto con PLUSMEDIK_TURNS=on y PLUSMEDIK_TEXT_HANDLER=on. NO ignora lo médico, pedir a una persona ni nada que pueda ser una
 // solicitud: solo saludos aislados, cortesías, mensajes sin letras y repeticiones literales (sin responder, sin modelo y sin consultas), y agrupa las confirmaciones de varios mensajes seguidos. Con las sesiones de cotización
 // y la conversación con modelo, el modelo recibe además el ESTADO de la conversación (cantidades, no textos). Opcionales: PLUSMEDIK_ATTENTION_REPEAT_SECONDS (5-600) y PLUSMEDIK_ATTENTION_SETTLE_MS (0-10000). Un valor inválido
@@ -85,6 +114,14 @@ if (attentionFilter.enabled && "error" in attentionFilter) logLine("attention_fi
 // de contacto y respetan la pausa manual del CRM; los demás pacientes siguen el flujo de siempre. No toca la pausa automática por mensajes humanos (eso es PLUSMEDIK_HUMAN_CONTROL) ni ALLOWED_PHONES.
 const scopedContactControl = humanControlEnabled ? undefined : resolveScopedContactControl(process.env);
 const contactKeyFor = (phone: string) => contactKeyOf({ hmacKey: process.env.PLUSMEDIK_CONTACT_HMAC_KEY, labPhoneNumberId: process.env.KAPSO_PHONE_NUMBER_ID, contactPhone: phone });
+// Historial de TODOS los mensajes (ENCENDIDO por defecto, sin variables nuevas; ver docs/g6/05-historial-de-mensajes.md y src/message-history.ts): guarda en Supabase lo que escriben los pacientes, las respuestas del agente
+// y los mensajes de la recepción humana, para conservarlos y usarlos desde otros proyectos. Exige las migraciones 21 y 22 aplicadas (sin ellas la escritura falla sin afectar al agente), PLUSMEDIK_CONTACT_HMAC_KEY y
+// KAPSO_PHONE_NUMBER_ID. PLUSMEDIK_HISTORY=off lo apaga; PLUSMEDIK_HISTORY_KEY (opcional) lo guarda cifrado. Es independiente de la memoria conversacional y del resto del agente.
+const messageHistory = resolveMessageHistory(process.env, logLine, { contactKeyFor });
+logLine("history_scope", { enabled: messageHistory !== undefined, encrypted: Boolean(process.env.PLUSMEDIK_HISTORY_KEY?.trim()) });
+// Memoria persistente de la conversación: parte NORMAL del agente (se enciende con PLUSMEDIK_LLM_CONVERSATION=on, sin variables propias; migración 24). Registra peticiones, respuestas, mensajes humanos y recetas por ids para calcular lo pendiente; no cambia ninguna respuesta, lease, envío ni la pausa humana.
+const convState = resolveConversationState(process.env, logLine, { contactKeyFor });
+if (convState) logLine("conv_state_scope", { mode: convState.mode });
 
 // El sistema de archivos de Vercel es de solo lectura: sin caché local (el registro de uso, si se escribe, va a /tmp).
 process.env.AI_CACHE ??= "off";
@@ -119,6 +156,64 @@ const quotePreparationReader = () => (quotePreparationKnowledge ??= new Knowledg
   maxStaleMs: 0
 }));
 
+const quoteFactsReader = () => new StudyFactsService({
+  store: createSupabaseStudyFactsStore({ requestTimeoutMs: 3000, retryDelayMs: 200 }),
+  revisionCheckMs: 0,
+  maxStaleMs: 5_000 // lector nuevo por cotización; se comparte solo durante esta lectura, nunca entre pacientes
+});
+
+// Audios (APAGADOS por defecto; ver docs/g6/04-audios.md): PLUSMEDIK_AUDIO=on solo tiene efecto con PLUSMEDIK_TURNS=on y PLUSMEDIK_TEXT_HANDLER=on, y exige OPENAI_API_KEY y OPENAI_TRANSCRIPTION_MODEL (sin valor
+// por defecto). No necesita migraciones. Los audios se bajan SOLO de los enlaces de Kapso (o por el id del medio con el SDK oficial); la credencial de Kapso solo viaja a servidores de Kapso.
+const audioFetcher: MediaFetcher = {
+  rawFetch: (url, init) => kapsoClient().rawFetch(url, init),
+  authedFetch: (url, init) => kapsoClient().fetch(url, init),
+  async sdkDownload(mediaId) {
+    return (await kapsoClient().media.download({ mediaId, phoneNumberId: phoneNumberId(), as: "arrayBuffer" })) as ArrayBuffer;
+  }
+};
+const audioRequested = on("PLUSMEDIK_AUDIO");
+const audioPipeline = audioRequested && turnsEnabled && textHandlerEnabled ? resolveAudio(process.env, logLine, { fetcher: audioFetcher }) : undefined;
+if (audioRequested && !(turnsEnabled && textHandlerEnabled)) logLine("audio_inactive", { reason: "TURNS_AND_TEXT_HANDLER_REQUIRED" });
+// Con la bandera apagada no se escribe NI UNA línea nueva en el registro (el arranque es idéntico al de antes).
+if (audioRequested) logLine("audio_scope", { enabled: audioPipeline !== undefined });
+// Los audios solo se activan si están realmente encendidos (turnos, manejador de texto y guarda de respuestas válida).
+const audioActive = Boolean(audioPipeline && turnsEnabled && textHandlerEnabled && !replyGuardInvalid);
+
+// Conocimiento aprobado del laboratorio: el servicio se crea al primer uso; el catálogo (solo para identificar el estudio por el que se pregunta) se pide únicamente ante preguntas de preparación y se guarda 5 min.
+// Lo usan el manejador de texto de siempre y, en sombra, el núcleo conversacional (herramienta lab_info).
+const knowledgeOptions = knowledgeAnswersEnabled
+  ? { skipPayment: true, service: lazyKnowledge(() => new KnowledgeService({ store: createSupabaseKnowledgeStore({ requestTimeoutMs: 3000, retryDelayMs: 200 }) })), loadCatalog: ttlCache(() => loadActiveCatalog(), 5 * 60_000), studyFacts: studyInfoEnabled ? { getSample: (...args: Parameters<ReturnType<typeof studyFacts>["getSample"]>) => studyFacts().getSample(...args), getTurnaround: (...args: Parameters<ReturnType<typeof studyFacts>["getTurnaround"]>) => studyFacts().getTurnaround(...args) } : undefined }
+  : undefined;
+
+// AGENTE CONVERSACIONAL ÚNICO (ver docs/g7/19 y src/agent/): PLUSMEDIK_LLM_CONVERSATION=on + OPENAI_CONVERSATION_MODEL (la única variable del modelo) + OPENAI_API_KEY; razonamiento medio por defecto
+// (OPENAI_CONVERSATION_REASONING lo cambia). Atiende a TODOS los contactos elegibles por la MISMA máquina de envío de siempre (lease, reserva, pausa humana, un solo envío por lote, idempotencia y tope de 6
+// respuestas cada 24 h). Contexto: los mensajes recientes del historial (24 h) y la memoria persistente (pendientes y última cotización; migración 24). Herramientas: catálogo, cotización, recetas (las fotos las
+// lee el motor de siempre), conocimiento aprobado y derivación al CRM (solo si la cola al CRM está configurada y encendida).
+// INTERRUPTOR DE EMERGENCIA: select plusmedik_agent_pilot_set(false, 'motivo') (migración 25) lo apaga en segundos sin redesplegar; nace apagado y falla cerrado. Apagado, o si el modelo no puede responder, atiende el
+// MODO ESENCIAL (textos fijos, catálogo, cotización y derivación deterministas): el funcionamiento básico no se pierde.
+const agentSettings = resolveAgentSettings(process.env, logLine);
+if (agentSettings && !(turnsEnabled && textHandlerEnabled)) logLine("agent_config_invalid", { error: "TURNS_AND_TEXT_HANDLER_REQUIRED" });
+const agentPilot = agentSettings && turnsEnabled && textHandlerEnabled
+  ? createAgentPilot({
+      model: agentSettings.model,
+      modelName: agentSettings.modelName,
+      everyone: { exclude: new Set<string>(), contactKeyFor },
+      switch: createPilotSwitch({ log: logLine }),
+      // La derivación a una persona usa la cola al CRM de siempre: solo existe si esa cola está configurada y encendida (PLUSMEDIK_CRM_HANDOFF).
+      handoffEnabled: crmOutbox !== undefined,
+      context: {
+        loadCatalog: ttlCache(() => loadActiveCatalog(), 60_000),
+        ...(knowledgeOptions ? { answer: (question: string) => answerFromKnowledge(question, knowledgeOptions) } : {}),
+        ...(convState ? { reader: createConversationReader({ store: createSupabaseConversationStore() }) } : {}),
+        contactKeyFor,
+        recent: createRecentProvider({}),
+        capabilities: { handoff: false, quote: true }
+      },
+      log: logLine
+    })
+  : undefined;
+if (agentPilot) logLine("agent_scope", { mode: agentPilot.mode, model: agentSettings!.modelName, everyone: true, handoff: crmOutbox !== undefined, memory: convState !== undefined });
+
 const realDeps: QuoteDeps = {
   async downloadImage(image: IncomingImage) {
     const client = kapsoClient();
@@ -137,17 +232,31 @@ const realDeps: QuoteDeps = {
   analyze: ({ imageBase64, mimeType, catalog }) =>
     analyzeImage({ imageBase64, mimeType, catalog, ...ENGINE_FLAGS }),
   quotePreparations: quotePreparationsEnabled
-    ? (quote, studyIds, catalog, ctx) => appendApprovedQuotePreparations({
-        quote,
-        studyIds,
-        catalog,
-        knowledge: quotePreparationReader(),
-        trace: (refs) => ctx.persist("quote_preparation", async (repo, runId, lease) => {
-          if ((await repo.recordKnowledgeRefs?.(runId, refs, lease)) !== "recorded") {
-            throw new Error("QUOTE_PREPARATION_TRACE_UNAVAILABLE");
-          }
-        })
-      })
+    ? async (quote, studyIds, catalog, ctx) => {
+        const prepared = await appendApprovedQuotePreparations({
+          quote,
+          studyIds,
+          catalog,
+          knowledge: quotePreparationReader(),
+          trace: (refs) => ctx.persist("quote_preparation", async (repo, runId, lease) => {
+            if ((await repo.recordKnowledgeRefs?.(runId, refs, lease)) !== "recorded") {
+              throw new Error("QUOTE_PREPARATION_TRACE_UNAVAILABLE");
+            }
+          })
+        });
+        if (!quoteStudyDetailsEnabled) return prepared;
+        return appendApprovedQuoteStudyDetails({
+          quote: prepared,
+          studyIds,
+          catalog,
+          facts: quoteFactsReader(),
+          trace: (refs) => ctx.persist("quote_study_details", async (repo, runId, lease) => {
+            if ((await repo.recordFactRefs?.(runId, refs, lease)) !== "recorded") {
+              throw new Error("QUOTE_STUDY_DETAILS_TRACE_UNAVAILABLE");
+            }
+          })
+        });
+      }
     : undefined,
   async sendText(to, body) {
     const response = await kapsoClient().messages.sendText({ phoneNumberId: phoneNumberId(), to, body });
@@ -164,33 +273,36 @@ const realDeps: QuoteDeps = {
     recordReply: (...args) => audit().recordReply(...args),
     // Operaciones opcionales del repositorio: sin ellas aquí, el modo turnos / conocimiento / sesiones no podría registrar su rastro y fallaría cerrado (una prueba verifica que no falte ninguna).
     releaseTurn: (...args) => audit().releaseTurn?.(...args) ?? Promise.resolve(),
+    foldTurn: (...args) => audit().foldTurn!(...args),
     recordKnowledgeRefs: (...args) => audit().recordKnowledgeRefs!(...args),
     recordFactRefs: (...args) => audit().recordFactRefs!(...args),
     quoteLastStudies: (...args) => audit().quoteLastStudies!(...args),
     quoteBegin: (...args) => audit().quoteBegin!(...args),
     quoteFinish: (...args) => audit().quoteFinish!(...args),
     quoteRead: (...args) => audit().quoteRead!(...args),
-    quoteClose: (...args) => audit().quoteClose!(...args)
+    quoteClose: (...args) => audit().quoteClose!(...args),
+    quoteShadowPeek: (...args) => audit().quoteShadowPeek!(...args)
   },
   log: logLine,
+  ...(messageHistory ? { history: messageHistory } : {}),
   requireAuditGuard: humanControlEnabled || turnsEnabled || on("REQUIRE_AUDIT_GUARD"),
   humanControl: humanControlEnabled ? { contactKeyFor } : undefined,
   scopedControl: scopedContactControl ? { contactKeyFor, covers: scopedContactControl.covers } : undefined,
-  turns: turnsEnabled ? { contactKeyFor, replyGuard: replyGuardConfig, attention: attentionConfig,
+  turns: turnsEnabled ? { contactKeyFor, replyGuard: replyGuardConfig, attention: attentionConfig, instantPhotoQuotes: instantPhotoQuotesEnabled, dailyCap: dailyReplyCap, ...(convState ? { convState } : {}), ...(agentPilot ? { agentPilot } : {}),
     crmHandoff: crmOutbox,
+    // Métodos de pago ignorados hasta que se implementen (decisión del dueño): ni agente de siempre ni agente nuevo dicen nada de pagos; el resto del mensaje se atiende.
+    ignorePayment: true,
+    ...(batchEngineMode ? { batchEngine: { mode: batchEngineMode } } : {}),
+    ...(audioActive ? { audio: audioPipeline } : {}),
     quoteSessions: quoteSessionsEnabled && !replyGuardInvalid
-      ? resolveQuoteSessionsConfig({ catalogForText: ttlCache(() => loadActiveCatalog(), 60_000), loopProtection: replyGuard.enabled, attention: attentionConfig ? { gate: attentionConfig.gate, settleMs: attentionConfig.settleMs } : undefined, ownTexts: [...Object.values(DRAFT_TEXTS), ...Object.values(ANSWER_TEXTS), ...Object.values(QUOTE_TEXTS)], isInfoQuestion: knowledgeAnswersEnabled ? (text) => detectTopics(text, studyInfoEnabled).length > 0 : undefined })
+      ? resolveQuoteSessionsConfig({ interpreter: studyInterpreter, catalogForText: ttlCache(() => loadActiveCatalog(), 60_000), loopProtection: replyGuard.enabled, attention: attentionConfig ? { gate: attentionConfig.gate, settleMs: attentionConfig.settleMs } : undefined, ownTexts: [...Object.values(DRAFT_TEXTS), ...Object.values(ANSWER_TEXTS), ...Object.values(QUOTE_TEXTS)], isInfoQuestion: knowledgeAnswersEnabled ? (text) => detectTopics(text, studyInfoEnabled).length > 0 : undefined })
       : undefined,
     handlers: textHandlerEnabled && !replyGuardInvalid ? { text: createTextHandler({
     handoff: crmOutbox ? createCrmHandoffSink() : BLOCKED_HANDOFF,
     log: logLine,
     loopProtection: replyGuard.enabled,
     attention: attentionConfig !== undefined,
-    conversation: conversationModel,
-    // El servicio se crea al primer uso; el catálogo (solo para identificar el estudio por el que se pregunta) se pide únicamente ante preguntas de preparación y se guarda 5 min.
-    knowledge: knowledgeAnswersEnabled
-      ? { service: lazyKnowledge(() => new KnowledgeService({ store: createSupabaseKnowledgeStore({ requestTimeoutMs: 3000, retryDelayMs: 200 }) })), loadCatalog: ttlCache(() => loadActiveCatalog(), 5 * 60_000), studyFacts: studyInfoEnabled ? { getSample: (...args) => studyFacts().getSample(...args), getTurnaround: (...args) => studyFacts().getTurnaround(...args) } : undefined }
-      : undefined
+    knowledge: knowledgeOptions
   }) } : undefined } : undefined
 };
 
@@ -205,19 +317,27 @@ const attentionProxy: AttentionRepository = {
   resume: (...args) => attention().resume(...args)
 };
 
-export async function POST(request: Request): Promise<Response> {
+export async function POSTWithScheduler(request: Request, schedule: (task: Promise<unknown>) => void): Promise<Response> {
   return handleKapsoWebhook(request, {
     secret: process.env.WEBHOOK_SECRET,
     allowedPhones: process.env.ALLOWED_PHONES,
     quote: realDeps,
     textPilotPhone: textPilotGate.enabled && textPilotGate.ready ? textPilotGate.pilotPhone : undefined,
+    textPilotExtraPhones: textPilotGate.enabled && textPilotGate.ready ? textPilotGate.extraPhones : undefined,
     legacyQuote: textPilotGate.enabled && textPilotGate.ready && turnsEnabled
       ? { ...realDeps, turns: undefined, requireAuditGuard: humanControlEnabled || on("REQUIRE_AUDIT_GUARD") }
       : undefined,
-    schedule: (task) => waitUntil(task),
+    schedule,
+    ...(messageHistory ? { history: messageHistory } : {}),
+    ...(convState ? { convState } : {}),
     humanControl: humanControlEnabled ? { labPhoneNumberId: process.env.KAPSO_PHONE_NUMBER_ID, contactKeyFor, attention: attentionProxy } : undefined,
     log: realDeps.log
   });
+}
+
+// Vercel mantiene el mecanismo waitUntil; Dokploy inyecta su propio scheduler.
+export async function POST(request: Request): Promise<Response> {
+  return POSTWithScheduler(request, (task) => waitUntil(task));
 }
 
 export function GET(): Response {

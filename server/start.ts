@@ -1,5 +1,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { routeDokployRequest } from "./router.js";
+import { resolveInboxConfig } from "./inbox.js";
+import { createInboxStorage } from "./inbox-storage.js";
+import { startInboxWorker } from "./worker.js";
 
 const DEFAULT_PORT = 3000;
 const MAX_BODY_BYTES = 1024 * 1024; // Kapso batches are not accepted in phase 1.
@@ -29,7 +32,7 @@ async function serve(request: IncomingMessage, response: ServerResponse): Promis
       return;
     }
     // Reject a live Kapso webhook *before* reading potentially sensitive data.
-    if (pathname === "/api/kapso/webhook") {
+    if (pathname === "/api/kapso/webhook" && !resolveInboxConfig(process.env)) {
       response.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
       response.end(JSON.stringify({ ok: false, reason: "DURABLE_WEBHOOK_QUEUE_NOT_IMPLEMENTED" }));
       return;
@@ -63,12 +66,23 @@ async function serve(request: IncomingMessage, response: ServerResponse): Promis
 const portRaw = process.env.PORT ?? String(DEFAULT_PORT);
 const port = Number(portRaw);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid PORT");
+const inboxConfig = resolveInboxConfig(process.env);
+const worker = inboxConfig ? startInboxWorker(
+  createInboxStorage(inboxConfig),
+  inboxConfig,
+  async (req, schedule) => {
+    const api = await import("../api/kapso/webhook.js");
+    return api.POSTWithScheduler(req, schedule);
+  },
+  (event) => console.log(JSON.stringify({ service: "plusmedik-dokploy", event }))
+) : undefined;
 const server = createServer((req, res) => { void serve(req, res); });
 server.listen(port, "0.0.0.0", () => {
   console.log(JSON.stringify({ service: "plusmedik-dokploy", event: "listening", port, webhookReady: false }));
 });
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
   process.on(signal, () => {
+    worker?.stop();
     server.close(() => process.exit(0));
   });
 }

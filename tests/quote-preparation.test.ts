@@ -43,6 +43,8 @@ describe("apéndice clínico de la cotización (fail-closed)", () => {
     const output = await appendApprovedQuotePreparations(args);
     expect(output).toContain("Glucosa — Bs 25");
     expect(output).toContain("Ayuno indicado por el laboratorio.");
+    expect(output).toContain("🧪 *PREPARACIÓN Y AYUNO*");
+    expect(output).toContain("▫️ *Glucosa*\n• Ayuno indicado por el laboratorio.");
     expect(output.endsWith("Respóndenos por este chat para continuar. 😊")).toBe(true);
     expect(args.trace).toHaveBeenCalledWith([{ kind: "STUDY_PREPARATION", key: "study:a", version: 1, contentHash: "a".repeat(64) }]);
   });
@@ -53,7 +55,7 @@ describe("apéndice clínico de la cotización (fail-closed)", () => {
       [study("a", "Glucosa"), study("b", "Hemograma")], ["a", "b"]
     );
     const output = await appendApprovedQuotePreparations(args);
-    expect(output).toContain("*Glucosa / Hemograma*\nInstrucción igual.");
+    expect(output).toContain("▫️ *Glucosa / Hemograma*\n• Instrucción igual.");
     expect(output.match(/Instrucción igual\./g)).toHaveLength(1);
     expect(args.trace.mock.calls[0]?.[0]).toHaveLength(2);
   });

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { AnalysisResult } from "./analyze.js";
 import type { AiCallEvent } from "./cache.js";
-import type { QuoteBeginResult, QuoteCloseInput, QuoteCloseResult, QuoteReadResult, ItemResult } from "./quote-session.js";
+import type { QuoteBeginResult, QuoteCloseInput, QuoteCloseResult, QuoteReadResult, ShadowPeekResult, ItemResult } from "./quote-session.js";
 import type { ReplyGuardRequest } from "./reply-guard.js";
 import type { CatalogStudy } from "./types.js";
 import type { IncomingImage, QuoteResult } from "./whatsapp-quote.js";
@@ -69,13 +69,16 @@ export interface AuditRepository {
   // Reserva de envío bajo bloqueo de fila: debe concederse ANTES de llamar a Kapso y es la comprobación de pausa (ver block_send en la migración).
   // options.stale (modo turnos) usa plusmedik_turn_reserve_send: además un solo envío en vuelo por contacto y el descarte de respuestas obsoletas.
   // options.guard (G3.2) usa plusmedik_turn_reserve_send_guarded: además el tope por contacto y ventana y las señales de bucle, atómicos con la reserva.
-  reserveSend(runId: string, kind: SendableResult, lease: AuditLease, options?: { stale: StalePolicy; guard?: ReplyGuardRequest }): Promise<SendReservation>;
+  reserveSend(runId: string, kind: SendableResult, lease: AuditLease, options?: { stale: StalePolicy; guard?: ReplyGuardRequest; cap?: { max: number; windowSeconds: number } }): Promise<SendReservation>;
   // Comprobación final, lo más cerca posible de la llamada a Kapso: si el contacto se pausó, la reserva (aún sin usar) se libera. No elimina la carrera residual
   // entre esta respuesta y la llamada externa.
   confirmSend(runId: string, lease: AuditLease): Promise<SendConfirmation>;
   // Modo turnos: desiste de esperar un envío en vuelo (BUSY_TIMEOUT). Vence el lease del turno y lo marca para atención, de modo que un reenvío del mensaje pueda
   // reclamarlo de nuevo; NUNCA envía, reserva ni cierra nada. Opcional: un repositorio que no lo implemente deja el comportamiento anterior (el lease vence solo).
   releaseTurn?(runId: string, reason: "BUSY_TIMEOUT", lease: AuditLease): Promise<void>;
+  // Buffering de Kapso (migración 19): da por atendido un turno de un lote cuyo contenido viajó dentro de la respuesta de otro (COMPLETED, sin envío, sin contar para el tope). Es la única forma de
+  // terminar una corrida con evidencia sin enviar. Opcional: sin él se cierra como «sin respuesta» (solo posible para corridas sin análisis registrado).
+  foldTurn?(runId: string, lease: AuditLease): Promise<void>;
   // Modo turnos: registra, ANTES de reservar el envío, qué versiones aprobadas de conocimiento respaldan la respuesta. 'closed' = ya no se puede (el envío se reservó o el turno se
   // cerró). Opcional: sin él, una respuesta basada en conocimiento no se puede enviar (no hay rastro).
   recordKnowledgeRefs?(runId: string, refs: readonly KnowledgeRefRecord[], lease: AuditLease): Promise<"recorded" | "closed">;
@@ -88,6 +91,8 @@ export interface AuditRepository {
   quoteFinish?(runId: string, lease: AuditLease, result: ItemResult): Promise<void>;
   quoteRead?(runId: string, lease: AuditLease): Promise<QuoteReadResult>;
   quoteClose?(runId: string, lease: AuditLease, input: QuoteCloseInput): Promise<QuoteCloseResult>;
+  // Modo sombra del motor de lotes (migración 20): la solicitud abierta visible para el turno y si hubo una cotización reciente, SIN escribir, bloquear filas ni vencer sesiones (función STABLE en la base).
+  quoteShadowPeek?(runId: string, lease: AuditLease, recentSeconds: number): Promise<ShadowPeekResult>;
   recordReply(runId: string, reply: { state: ReplyAuditState; result: SendableResult; processingStatus: "COMPLETED" | "FAILED"; providerMessageId?: string }, lease: AuditLease): Promise<void>;
 }
 
@@ -145,10 +150,36 @@ export interface AnalysisEvidence {
 //   LEASE_LOST       la ejecución ya no posee el lease (HTTP 410): no debe escribir ni enviar nada más.
 export type AuditWriteErrorKind = "REJECTED" | "CONFLICT" | "UNKNOWN_OUTCOME" | "LEASE_LOST";
 export class AuditWriteError extends Error {
-  constructor(readonly kind: AuditWriteErrorKind, readonly httpStatus?: number) {
+  // `serverCode`: código del error de la base/PostgREST (PT422, PGRST202, 23505…) y `requestId`: identificador de la petición en Supabase, ambos validados con un patrón estricto. Nunca el mensaje ni el cuerpo del servidor.
+  constructor(readonly kind: AuditWriteErrorKind, readonly httpStatus?: number, readonly detail: { serverCode?: string; requestId?: string } = {}) {
     super(`audit_write_${kind.toLowerCase()}`);
     this.name = "AuditWriteError";
   }
+}
+
+// Campos para el registro cuando falla una escritura de auditoría: tipo, estado HTTP y código del servidor. Sin texto del servidor, sin contenido, sin claves.
+export function auditErrorFields(error: unknown): { kind?: AuditWriteErrorKind; httpStatus?: number; serverCode?: string; requestId?: string } {
+  if (!(error instanceof AuditWriteError)) return {};
+  return { kind: error.kind, ...(error.httpStatus !== undefined ? { httpStatus: error.httpStatus } : {}), ...(error.detail.serverCode ? { serverCode: error.detail.serverCode } : {}), ...(error.detail.requestId ? { requestId: error.detail.requestId } : {}) };
+}
+
+// Del cuerpo de un rechazo del servidor SOLO se extrae `code` (si cumple el patrón de los códigos de PostgREST/PostgreSQL/PT) y del encabezado el id de la petición. El resto (mensaje, detalles, pistas, que pueden traer filas o contenido)
+// se descarta sin guardarse. Nunca lanza.
+const SERVER_CODE = /^(PT\d{3}|PGRST\d{3}|[0-9A-Z]{5})$/;
+const REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9-]{7,63}$/;
+async function rejectionDetail(response: Response): Promise<{ serverCode?: string; requestId?: string }> {
+  const detail: { serverCode?: string; requestId?: string } = {};
+  try {
+    const header = typeof response.headers?.get === "function" ? (response.headers.get("sb-request-id") ?? response.headers.get("x-request-id")) : null;
+    if (header && REQUEST_ID.test(header)) detail.requestId = header;
+    if (typeof response.text === "function") {
+      const parsed = JSON.parse((await response.text()).slice(0, 4096)) as { code?: unknown };
+      if (typeof parsed?.code === "string" && SERVER_CODE.test(parsed.code)) detail.serverCode = parsed.code;
+    }
+  } catch {
+    // cuerpo ausente, truncado o que no es JSON: no hay código
+  }
+  return detail;
 }
 
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
@@ -405,7 +436,7 @@ export function createSupabaseRpc(options: SupabaseRpcOptions = {}): (name: stri
   // Llamada a una función transaccional e IDEMPOTENTE de la base. El cuerpo se serializa una vez: si una petición termina sin respuesta (timeout, red caída,
   // 5xx) no se sabe si la transacción se confirmó; se repite UNA vez con exactamente el mismo contenido (todas las funciones usadas aquí responden igual ante
   // el mismo contenido y el mismo owner/fence). Si tampoco hay respuesta, el resultado queda DESCONOCIDO (UNKNOWN_OUTCOME): no se reintenta más. Nunca se lee
-  // ni se propaga el cuerpo de un error del servidor. 410 = lease perdido (no se reintenta), 409 = conflicto, otros 4xx = rechazo.
+  // ni se propaga el cuerpo de un error del servidor: en un 409 o un 4xx solo se extrae `code` (patrón estricto de PostgREST/PostgreSQL/PT) y el id de la petición, y todo lo demás se descarta (ver rejectionDetail). 410 = lease perdido (no se reintenta), 409 = conflicto, otros 4xx = rechazo.
   return async function rpc(name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
     const body = JSON.stringify(args);
     const attempts = 2;
@@ -421,8 +452,8 @@ export function createSupabaseRpc(options: SupabaseRpcOptions = {}): (name: stri
         return typeof result === "object" && result !== null && !Array.isArray(result) ? (result as Record<string, unknown>) : {};
       }
       if (response && response.status === 410) throw new AuditWriteError("LEASE_LOST", 410);
-      if (response && response.status === 409) throw new AuditWriteError("CONFLICT", 409);
-      if (response && response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429) throw new AuditWriteError("REJECTED", response.status);
+      if (response && response.status === 409) throw new AuditWriteError("CONFLICT", 409, await rejectionDetail(response));
+      if (response && response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429) throw new AuditWriteError("REJECTED", response.status, await rejectionDetail(response));
       if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
     }
     throw new AuditWriteError("UNKNOWN_OUTCOME");
@@ -501,14 +532,17 @@ export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}
       try {
         // Modo turnos: la función de turnos envuelve a la de siempre (misma pausa humana y mismo fencing) y agrega 'busy' y 'superseded'.
         const turnArgs = { ...leaseArgs(runId, lease), p_kind: kind, p_lease_seconds: sendLeaseSeconds, p_stale_policy: reserveOptions?.stale };
-        const result = reserveOptions?.guard
+        const guardArg = reserveOptions?.guard ? { ...reserveOptions.guard.config, ...(reserveOptions.guard.signature ? { signature: reserveOptions.guard.signature } : {}) } : null;
+        const result = reserveOptions?.cap
+          ? await rpc("plusmedik_turn_reserve_send_capped", { ...turnArgs, p_guard: guardArg, p_cap: reserveOptions.cap })
+          : reserveOptions?.guard
           ? await rpc("plusmedik_turn_reserve_send_guarded", { ...turnArgs, p_guard: { ...reserveOptions.guard.config, ...(reserveOptions.guard.signature ? { signature: reserveOptions.guard.signature } : {}) } })
           : reserveOptions
             ? await rpc("plusmedik_turn_reserve_send", turnArgs)
             : await rpc("plusmedik_audit_reserve_send", { ...leaseArgs(runId, lease), p_kind: kind, p_lease_seconds: sendLeaseSeconds });
         if (result.status === "reserved" || result.status === "blocked") return result.status;
         if (reserveOptions && (result.status === "busy" || result.status === "superseded")) return result.status;
-        if (reserveOptions?.guard && result.status === "limited") return "limited";
+        if ((reserveOptions?.guard || reserveOptions?.cap) && result.status === "limited") return "limited";
         return "lost";
       } catch (error) {
         if (error instanceof AuditWriteError && error.kind === "LEASE_LOST") return "lost";
@@ -581,6 +615,15 @@ export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}
       }
       throw new AuditWriteError("REJECTED");
     },
+    async quoteShadowPeek(runId, lease, recentSeconds) {
+      const result = await rpc("plusmedik_quote_shadow_peek", { ...leaseArgs(runId, lease), p_recent_seconds: recentSeconds });
+      const state = str(result.state);
+      const recent = result.recent === true;
+      if (state === "none" || state === "replay" || state === "unavailable" || state === "lease_lost") return { state, recent };
+      if (state === "pending") return { state, pending: Number(result.pending ?? 1), recent };
+      if (state === "ready" && Array.isArray(result.items)) return { state, items: result.items as never, recent };
+      throw new AuditWriteError("REJECTED");
+    },
     async quoteClose(runId, lease, input) {
       const result = await rpc("plusmedik_quote_session_close", {
         ...leaseArgs(runId, lease),
@@ -606,6 +649,9 @@ export function createSupabaseAuditRepository(options: SupabaseAuditOptions = {}
     },
     async releaseTurn(runId, reason, lease) {
       await rpc("plusmedik_turn_release", { ...leaseArgs(runId, lease), p_reason: reason });
+    },
+    async foldTurn(runId, lease) {
+      await rpc("plusmedik_turn_fold", leaseArgs(runId, lease));
     },
     async recoverStale(recovery = {}) {
       const result = await rpc("plusmedik_audit_recover_stale", {

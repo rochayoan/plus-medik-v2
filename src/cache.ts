@@ -4,6 +4,7 @@ import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertModelCallsAllowed, OfflineViolation } from "./offline.js";
+import { describeProviderError, type ProviderErrorInfo } from "./provider-error.js";
 
 // Cambiar este número invalida todo el cache existente (formato de clave/entrada).
 export const CACHE_VERSION = 1;
@@ -49,6 +50,8 @@ export interface AiCallEvent {
   reasoningEffort?: string;
   paramsHash?: string;
   errorKind?: AiErrorKind;
+  // Causa del fallo con códigos de lista blanca (cuota vs. tasa, estado HTTP, retry-after…). Solo en memoria, para el registro de Vercel: NO se guarda en la auditoría (serializeAiCalls elige sus campos).
+  failure?: ProviderErrorInfo;
 }
 
 export type AiCallObserver = (event: AiCallEvent) => void;
@@ -106,7 +109,7 @@ function beginCall(identity: { label: string; provider: string; model: string },
 }
 
 // Emite el evento de un intento y avanza la frontera de tiempo (el siguiente intento se mide desde aquí).
-function emitAttempt(call: CallTelemetry, attempt: Pick<AiCallEvent, "cacheHit" | "outcome" | "usage" | "value" | "errorKind" | "reasoningEffort">, endedPerfMs = performance.now()): void {
+function emitAttempt(call: CallTelemetry, attempt: Pick<AiCallEvent, "cacheHit" | "outcome" | "usage" | "value" | "errorKind" | "reasoningEffort"> & { failure?: ProviderErrorInfo }, endedPerfMs = performance.now()): void {
   const event: AiCallEvent = {
     label: call.label,
     provider: call.provider,
@@ -122,7 +125,8 @@ function emitAttempt(call: CallTelemetry, attempt: Pick<AiCallEvent, "cacheHit" 
     durationMs: Math.max(0, Math.round(endedPerfMs - call.boundaryPerfMs)),
     reasoningEffort: attempt.reasoningEffort ?? call.reasoningEffort,
     paramsHash: call.paramsHash,
-    errorKind: attempt.errorKind
+    errorKind: attempt.errorKind,
+    ...(attempt.failure ? { failure: attempt.failure } : {})
   };
   if (attempt.outcome === "INVALID") call.invalidAttempts++;
   call.boundaryEpochMs = Date.now();
@@ -316,7 +320,7 @@ export async function cachedAiCall<T>(options: {
     await realCallGate?.({ label, provider, model });
     ({ value, usage, reasoningEffort: attemptEffort } = await (telemetry ? callScope.run(telemetry, () => options.call()) : options.call()));
   } catch (error) {
-    if (telemetry) emitAttempt(telemetry, { cacheHit: false, outcome: "FAILED", errorKind: classifyAiError(error, { invalidAttempts: telemetry.invalidAttempts }) });
+    if (telemetry) emitAttempt(telemetry, { cacheHit: false, outcome: "FAILED", errorKind: classifyAiError(error, { invalidAttempts: telemetry.invalidAttempts }), failure: describeProviderError(error) });
     throw error;
   }
   const endedPerfMs = performance.now();

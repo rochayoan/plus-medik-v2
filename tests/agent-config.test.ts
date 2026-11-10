@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { checkSource, dateProblems, renderTextsDoc } from "../scripts/agent-config.js";
 import { buildPromptSource } from "../src/conversation-openai.js";
-import { DATA_SECTION_IDS, validateBusinessData, type BusinessData, type DataSectionId } from "../src/conversation-facts.js";
+import { DATA_SECTION_IDS, renderFacts, validateBusinessData, type BusinessData, type DataSectionId } from "../src/conversation-facts.js";
+import { guardModelReply } from "../src/conversation-model.js";
 import { BUSINESS_DATA, SYSTEM_PROMPT } from "../src/system-prompt.js";
 import { DRAFT_TEXTS } from "../src/text-handler.js";
 
-// Configuración del agente conversacional (src/system-prompt.ts): SYSTEM_PROMPT y BUSINESS_DATA se importan como código (sin archivos ni generación). El real NO tiene datos inventados
-// (las siete secciones están POR_COMPLETAR); una sección confirmada exige fuente, vigencia y datos completos sin importes; lo pendiente nunca llega al modelo. Datos de PRUEBA; sin red.
+// Configuración del agente conversacional (src/system-prompt.ts): SYSTEM_PROMPT y BUSINESS_DATA se importan como código (sin archivos ni generación). El horario general de 24 horas fue informado por el usuario;
+// las otras seis secciones siguen POR_COMPLETAR. Una sección confirmada exige fuente, vigencia y datos sin importes. Datos de PRUEBA; sin red.
 
 const NOW = new Date("2026-10-26T12:00:00Z");
 
@@ -24,19 +25,23 @@ const check = (data: BusinessData, now = NOW) => {
 describe("src/system-prompt.ts real de PlusMedik", () => {
   const report = validateBusinessData(BUSINESS_DATA);
 
-  it("no inventa nada: las siete secciones están POR_COMPLETAR, sin errores, y no llega ningún dato al modelo", () => {
+  it("confirma negocio, horario y servicios; deja pendientes datos no verificados", () => {
     expect(report.problems).toEqual([]);
     expect(report.sections.map((section) => section.id)).toEqual([...DATA_SECTION_IDS]);
-    for (const section of report.sections) expect(section, section.id).toMatchObject({ status: "PENDING", text: "", source: null, validUntil: null });
+    for (const section of report.sections.filter((item) => !["NEGOCIO", "HORARIOS", "SERVICIOS"].includes(item.id))) {
+      expect(section, section.id).toMatchObject({ status: "PENDING", text: "", source: null, validUntil: null });
+    }
+    for (const id of ["NEGOCIO", "HORARIOS", "SERVICIOS"]) {
+      expect(report.sections.find((section) => section.id === id)).toMatchObject({ status: "CONFIRMED", validUntil: "2026-12-31" });
+    }
+    expect(report.sections.find((section) => section.id === "HORARIOS")?.text).toContain("las 24 horas, todos los días");
   });
 
-  it("lista lo que falta con el nombre de cada dato (nombre comercial, direcciones, horarios, teléfonos, servicios, pagos, políticas)", () => {
+  it("solo señala como pendientes las secciones no confirmadas", () => {
     const missing = Object.fromEntries(report.pending.map((item) => [item.section, item.missing]));
-    expect(missing.NEGOCIO).toContain("Nombre comercial");
+    expect(Object.keys(missing).sort()).toEqual(["METODOS_DE_PAGO", "POLITICAS", "SUCURSALES", "TELEFONOS"]);
     expect(missing.SUCURSALES).toContain("Sucursal 1 — Dirección");
-    expect(missing.HORARIOS).toContain("Feriados y cierres");
     expect(missing.TELEFONOS).toContain("WhatsApp de atención");
-    expect(missing.SERVICIOS).toContain("Toma de muestras a domicilio");
     expect(missing.METODOS_DE_PAGO).toContain("Métodos aceptados");
     expect(missing.POLITICAS).toContain("Facturación");
     expect(check(BUSINESS_DATA).complete).toBe(false);
@@ -48,8 +53,24 @@ describe("src/system-prompt.ts real de PlusMedik", () => {
     expect(SYSTEM_PROMPT).toMatch(/Tú NUNCA das, estimas ni comentas un precio/);
     expect(SYSTEM_PROMPT).toMatch(/Tú NUNCA los dices/);
     expect(SYSTEM_PROMPT).toMatch(/Tú NUNCA prometes que alguien/);
+    expect(SYSTEM_PROMPT).toContain("recepcionista virtual");
+    expect(SYSTEM_PROMPT).toContain("👋");
+    expect(SYSTEM_PROMPT).toContain("¿Sobre qué te gustaría saber más?");
+    expect(SYSTEM_PROMPT).toContain("precio final");
+    expect(SYSTEM_PROMPT).toContain("requisitos");
+    expect(SYSTEM_PROMPT).toContain("cotización");
     // el prompt no trae ningún dato comercial: ni teléfonos, ni enlaces, ni importes
     expect(SYSTEM_PROMPT).not.toMatch(/https?:\/\/|@|\+?\d[\d ]{6,}\d|\b(bs|bob|usd)\b|\$/i);
+  });
+
+  it("permite los datos confirmados sin inventar plazos ni horarios específicos", () => {
+    const facts = renderFacts(report.sections, new Date("2026-10-30T12:00:00Z"));
+    expect(facts.included).toEqual(["NEGOCIO", "HORARIOS", "SERVICIOS"]);
+    expect(facts.block).toContain("las 24 horas, todos los días");
+    expect(facts.block).toContain("https://maps.app.goo.gl/oj24D8D3fCiofd9R8");
+    expect(guardModelReply("Abrimos a las 08:00.", facts.context)).toMatchObject({ ok: false });
+    expect(guardModelReply("El resultado del hemograma tarda 24 horas.", facts.context)).toMatchObject({ ok: false });
+    expect(renderFacts(report.sections, new Date("2027-01-01T12:00:00Z")).included).not.toContain("HORARIOS");
   });
 
   it("orienta cotización escrita o por foto sin ceder la cotización al modelo", () => {

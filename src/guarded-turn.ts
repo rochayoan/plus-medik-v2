@@ -1,5 +1,10 @@
-import { AuditWriteError, type AuditLease, type AuditRepository, type SendableResult, type SendConfirmation, type SendReservation, type StalePolicy, type TurnKind } from "./audit.js";
+import { AuditWriteError, auditErrorFields, type AuditLease, type AuditRepository, type SendableResult, type SendConfirmation, type SendReservation, type StalePolicy, type TurnKind } from "./audit.js";
 import type { AttentionConfig } from "./attention-filter.js";
+import type { AudioPipeline } from "./audio/service.js";
+import type { ConversationMemory } from "./conversation-memory.js";
+import type { AgentPilot } from "./agent/pilot.js";
+import type { ReplyQuality } from "./conversation-state.js";
+import type { ConversationRecorder } from "./conversation-state-store.js";
 import type { CrmHandoff } from "./crm-outbox/types.js";
 import type { QuoteSessionsConfig } from "./quote-session.js";
 import type { ReplyGuardConfig } from "./reply-guard.js";
@@ -33,6 +38,9 @@ export interface TurnsConfig {
   // G4.0 (apagado si falta): sesiones de cotización. Las fotos y los estudios escritos se agregan a la sesión del contacto y solo se cotiza cuando el paciente escribe «listo».
   // Exige el manejador de texto (sin él nadie podría escribir «listo»). Con esto ausente el flujo de imágenes es exactamente el de siempre.
   quoteSessions?: QuoteSessionsConfig;
+  // Opt-in para que CADA fotografía se cotice inmediatamente con el motor original, sin entrar a la sesión ni pedir LISTO.
+  // Las listas escritas siguen usando quoteSessions; no cambia el comportamiento de otros contactos.
+  instantPhotoQuotes?: boolean;
   // G4.1: cuánto tiempo después de una cotización entregada se considera «la última cotización» del contacto para responder por sus estudios sin que los nombre (por defecto 24 h).
   studyInfoContextSeconds?: number;
   // G5.0 (apagado si falta): derivación segura de casos al CRM (cola de salida persistente e idempotente). Sin esto la derivación a una persona sigue bloqueada.
@@ -40,8 +48,27 @@ export interface TurnsConfig {
   // G6.0 (apagado si falta): atención selectiva. Descarta las repeticiones literales ANTES de reclamar el turno y, con las sesiones de cotización, agrupa las confirmaciones de varios mensajes seguidos.
   // El resto del filtro (saludos, cortesías y ruido) lo aplica el manejador de texto. Ver src/attention-filter.ts.
   attention?: AttentionConfig;
+  // Tope de respuestas del agente por contacto en una ventana móvil (apagado si falta; ver src/daily-reply-cap.ts). Lo aplica la base dentro de la reserva de envío y cuenta TODO lo que el agente envía
+  // (texto, cotizaciones y fotos); los mensajes humanos de recepción no se cuentan.
+  dailyCap?: { max: number; windowSeconds: number };
+  // Memoria conversacional corta (apagada si falta; ver src/conversation-memory.ts): se guardan los mensajes de texto del paciente y las respuestas conversacionales confirmadas como enviadas.
+  memory?: ConversationMemory;
+  // Memoria estructurada en SOMBRA (la bandera del agente conversacional; apagada si falta; ver src/conversation-state-store.ts): solo observa y registra; nunca cambia una respuesta, un lease ni un envío.
+  convState?: ConversationRecorder;
+  // AGENTE CONVERSACIONAL ÚNICO (apagado si falta; ver src/agent/pilot.ts): mientras el interruptor de emergencia de la base esté encendido, decide la respuesta de un lote de
+  // texto; la ENVÍA esta misma máquina (lease, reserva, pausa humana, un envío por lote, tope). Si no puede o no debe responder, responde la ruta de siempre.
+  agentPilot?: AgentPilot;
+  // Métodos de pago IGNORADOS (ausente = como siempre): un mensaje que solo trata de cómo pagar no se atiende (ni se reclama), y en los demás se quitan las frases de pago antes de entenderlos. Ver src/payment-talk.ts.
+  ignorePayment?: boolean;
   // Quién responde a los mensajes que no son imágenes. Sin manejador, ese tipo de mensaje ni se reclama ni se responde.
   handlers?: TurnHandlers;
+  // Motor global de lotes (apagado si falta; ver src/batch-engine.ts). Solo actúa en un lote de Kapso (varios mensajes de un contacto) y exige las sesiones de cotización y el manejador de texto.
+  //   shadow: la ruta de siempre responde y escribe como hoy; el motor nuevo solo decide en paralelo y deja una línea de registro con códigos para comparar (no ejecuta ni envía nada).
+  //   on: el motor nuevo atiende el texto del lote; la ruta de siempre queda de respaldo si falla antes de tocar nada.
+  batchEngine?: { mode: "shadow" | "on" };
+  // Audios (notas de voz) de WhatsApp (apagado si falta; ver src/audio): se transcriben con OpenAI dentro del mismo procesamiento del turno y entran al agente como un texto más del paciente, en su lugar
+  // del lote. Exige el manejador de texto. Sin esto, un audio se ignora como hasta ahora.
+  audio?: AudioPipeline;
 }
 
 export interface TurnRef {
@@ -56,7 +83,17 @@ export interface TurnRef {
 // Lo que el trabajo de un turno decide: nada que enviar (el trabajo ya cerró la corrida si hacía falta) o una respuesta.
 export type Produced =
   | { kind: "none" }
-  | { kind: "reply"; body: string; result: SendableResult; processingStatus: "COMPLETED" | "FAILED"; stale?: StalePolicy; signature?: string };
+  | { kind: "reply"; body: string; result: SendableResult; processingStatus: "COMPLETED" | "FAILED"; stale?: StalePolicy; signature?: string; generic?: true; photo?: PhotoReport; quality?: ReplyQuality; closes?: string[]; cap?: { max: number; windowSeconds: number } };
+
+// Lo que dejó el análisis de UNA foto en la solicitud (solo estado e ids de lab_tests; nunca precios ni texto). Lo informa el productor de las fotos para que el motor de lotes sepa qué aportó cada una sin
+// tener que leerlo de la base: una foto con un número de turno posterior al del texto que anota el lote no es visible para él. No altera ningún envío.
+export interface PhotoReport {
+  status: "RESOLVED" | "UNCERTAIN" | "UNREADABLE";
+  studyIds: readonly string[];
+}
+
+// La base solo acepta firmas de la guarda con la forma ^[A-Z0-9_.:-]{1,64}$ (si no, rechaza la reserva con PT422 y la respuesta NO se envía). Cualquier productor queda a salvo: se normaliza aquí.
+export const guardSignature = (signature: string): string => signature.toUpperCase().replace(/[^A-Z0-9_.:-]/g, "_").slice(0, 64);
 
 export interface TurnContext {
   // Número del turno dentro de su contacto, en el orden de llegada a la base (solo en modo turnos).
@@ -73,14 +110,23 @@ export type TurnOutcome = SendableResult | "ignored";
 
 export interface ClaimedTurn {
   run(produce: TurnProducer): Promise<TurnOutcome>;
+  // Lote de Kapso (buffering de 15 s): varios mensajes del MISMO contacto se atienden como una sola solicitud con UNA sola respuesta, enviada por el turno que responde (`run`).
+  // `absorb` hace el trabajo de este turno (sesión de cotización, análisis de la foto, etc., con su propio lease) pero NO reserva ni envía nada: devuelve lo que habría respondido para que
+  // el turno que responde lo integre, y cierra esta corrida como «sin respuesta propia». Las escrituras de las etapas `redirectStages` (rastro de las versiones aprobadas
+  // usadas en la respuesta) se hacen en la corrida que SÍ envía (`into`), para que ese rastro sea el de la corrida que envió el mensaje.
+  absorb(produce: TurnProducer, into: TurnContext, redirectStages: ReadonlySet<string>): Promise<Produced>;
+  // Mensaje del lote cuyo contenido ya viaja dentro de otro turno (varios textos seguidos se leen como uno): se reclama (deduplicación) y se cierra sin respuesta ni trabajo.
+  skip(): Promise<void>;
 }
 
-const writeErrorKind = (error: unknown) => (error instanceof AuditWriteError ? { kind: error.kind } : {});
+// Tipo, estado HTTP y código del servidor del fallo de auditoría (sin texto del servidor ni contenido): ver auditErrorFields.
+const writeErrorKind = (error: unknown) => auditErrorFields(error);
 const realSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 // Fase 1: el claim. En un lote se llama UNO por UNO, en el orden de los mensajes, para que la numeración del contacto respete ese orden; el trabajo (fase 2) puede
 // luego correr en paralelo. Si el turno no debe procesarse (duplicado, pausa humana, sin clave de contacto, base caída con la guarda obligatoria) devuelve ended.
-export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claimed: ClaimedTurn } | { ended: "ignored" }> {
+// inFlight: el mensaje ya lo está atendiendo OTRA ejecución (lease vigente o envío en curso). Lo usa processTurns para no repartirse con ella los demás mensajes del mismo lote.
+export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claimed: ClaimedTurn } | { ended: "ignored"; inFlight?: true; paused?: true }> {
   // Atención humana / turnos: sin una clave estable del contacto, o sin la auditoría que concede los leases y las reservas, no hay forma de comprobar la pausa -> no se responde.
   // Control acotado: solo los contactos de la lista explícita se tratan como con control humano; los demás siguen el flujo de siempre (ni clave de contacto ni guarda obligatoria).
   const scoped = !deps.humanControl && !deps.turns && deps.scopedControl?.covers(ref.from) ? deps.scopedControl : undefined;
@@ -103,7 +149,8 @@ export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claime
       const claim = deps.turns ? await deps.audit.claim(claimRef, { contactKey: contactKey!, turnKind: ref.kind }) : contactKey ? await deps.audit.claim(claimRef, { contactKey }) : await deps.audit.claim(claimRef);
       if (claim.kind === "duplicate") {
         deps.log("duplicate_ignored", { processingStatus: claim.processingStatus, ...(claim.reason ? { reason: claim.reason } : {}) });
-        return { ended: "ignored" };
+        // `paused`: una persona tiene la palabra; el mensaje no se atiende solo pero la memoria en sombra lo registra como pendiente.
+        return { ended: "ignored", ...(claim.reason === "BUSY" || claim.reason === "IN_DOUBT" ? { inFlight: true as const } : {}), ...(claim.reason === "HUMAN_PAUSED" ? { paused: true as const } : {}) };
       }
       auditRunId = claim.runId;
       lease = claim.lease;
@@ -164,8 +211,8 @@ export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claime
       for (;;) {
         try {
           // La guarda (G3.2) solo acompaña a lo conversacional; la base lo vuelve a comprobar (una imagen o una cotización nunca se limitan).
-          const guard = deps.turns?.replyGuard && ref.kind !== "IMAGE" && (result === "conversation" || result === "technical_issue") ? { config: deps.turns.replyGuard, ...(produced.signature ? { signature: produced.signature } : {}) } : undefined;
-          reservation = deps.turns ? await deps.audit!.reserveSend(auditRunId!, result, lease!, guard ? { stale, guard } : { stale }) : await deps.audit!.reserveSend(auditRunId!, result, lease!);
+          const guard = deps.turns?.replyGuard && ref.kind !== "IMAGE" && (result === "conversation" || result === "technical_issue") ? { config: deps.turns.replyGuard, ...(produced.signature ? { signature: guardSignature(produced.signature) } : {}) } : undefined;
+          reservation = deps.turns ? await deps.audit!.reserveSend(auditRunId!, result, lease!, { stale, ...(guard ? { guard } : {}), ...(produced.cap ? { cap: produced.cap } : deps.turns.dailyCap ? { cap: deps.turns.dailyCap } : {}) }) : await deps.audit!.reserveSend(auditRunId!, result, lease!);
         } catch (error) {
           reservation = "unavailable";
           deps.log("audit_unavailable", { stage: "reserve", ...writeErrorKind(error) });
@@ -209,8 +256,10 @@ export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claime
       }
     }
 
+    let delivered: { providerMessageId?: string } | undefined;
     try {
       const sent = await deps.sendText(ref.from, reply);
+      delivered = sent ?? {};
       deps.log("reply_sent", { messageId: ref.messageId, phone: ref.who, result });
       await context.persist("reply", (audit, runId, held) => audit.recordReply(runId, { state: "ACCEPTED", result, processingStatus, providerMessageId: sent?.providerMessageId }, held));
     } catch (error) {
@@ -218,6 +267,23 @@ export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claime
       // No se reintenta: un error de transporte no demuestra que Kapso no aceptó el mensaje.
       await context.persist("reply", (audit, runId, held) => audit.recordReply(runId, { state: "UNKNOWN", result, processingStatus }, held));
     }
+    // Memoria conversacional: SOLO una respuesta que Kapso aceptó (un envío incierto no se guarda) y solo lo conversacional (las cotizaciones y las fotos no). Fuera del try: una falla de la memoria nunca altera el resultado del envío.
+    if (delivered && result === "conversation" && contactKey && deps.turns?.memory) {
+      await deps.turns.memory.rememberReply({ contactKey, messageId: delivered.providerMessageId ?? `reply:${ref.messageId}`, text: reply });
+    }
+    // Historial de auditoría: la respuesta que Kapso aceptó (o cuyo envío quedó incierto). Va después del envío y de su registro: una falla del historial nunca altera el resultado.
+    if (deps.history) {
+      await deps.history.recordAgentReply({
+        to: ref.from,
+        messageId: delivered ? delivered.providerMessageId ?? `reply:${ref.messageId}` : `uncertain:${ref.messageId}`,
+        replyTo: ref.messageId,
+        text: reply,
+        state: delivered ? "ACCEPTED" : "UNCERTAIN",
+        ...(auditRunId ? { auditRunId } : {})
+      });
+    }
+    // Memoria en sombra: solo una respuesta que Kapso ACEPTÓ (nunca un envío incierto o retenido). Mejor esfuerzo: no espera ni lanza.
+    if (delivered) deps.turns?.convState?.agentReply({ from: ref.from, messageId: delivered.providerMessageId ?? `reply:${ref.messageId}`, replyTo: ref.messageId, reply: { body: reply, result, ...(produced.generic ? { generic: true } : {}), ...(produced.quality ? { quality: produced.quality } : {}), ...(produced.closes ? { closes: produced.closes } : {}) } });
     return result;
   }
 
@@ -227,6 +293,44 @@ export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claime
         try {
           const produced = await produce(context);
           return produced.kind === "none" ? "ignored" : await deliver(produced);
+        } finally {
+          if (heartbeat) clearInterval(heartbeat);
+        }
+      },
+      async absorb(produce, into, redirectStages) {
+        // Si el trabajo dejó un fallo registrado (etapa "failure"), esa marca se conserva tal cual: es la verdad de la auditoría y no bloquea nada (no es un estado pendiente).
+        let failed = false;
+        const redirected: TurnContext = {
+          ...context,
+          persist(stage, action) {
+            if (stage === "failure") failed = true;
+            return redirectStages.has(stage) ? into.persist(stage, action) : context.persist(stage, action);
+          }
+        };
+        let produced: Produced;
+        let crashed = false;
+        try {
+          produced = await produce(redirected);
+        } catch {
+          // Los productores atrapan sus propios errores; esto es solo una red de seguridad. Nunca se registra el texto del error.
+          deps.log("turn_failed", { stage: "batch_absorb", kind: ref.kind });
+          produced = { kind: "none" };
+          crashed = true;
+        }
+        try {
+          // Todo productor que devuelve «none» ya cerró su corrida (sin respuesta, foto descartada...). Solo si devolvió una respuesta —que se enviará dentro del mensaje del lote, desde OTRA corrida— o
+          // si falló a medias, esta corrida se cierra aquí como «sin respuesta propia»: así no queda «en proceso» (las sesiones de cotización esperan a los turnos anteriores en proceso) ni se
+          // puede reclamar de nuevo y repetir la foto o el mensaje.
+          // Con evidencia del análisis registrada (ANALYZED) la base solo permite terminar la corrida sin enviar con foldTurn; sin él (repositorio sin la migración) se intenta el cierre «sin respuesta».
+          if ((produced.kind === "reply" && !failed) || crashed) await context.persist("fold", (audit, runId, held) => (audit.foldTurn ? audit.foldTurn(runId, held) : audit.recordIgnored(runId, "NO_REPLY", held)));
+        } finally {
+          if (heartbeat) clearInterval(heartbeat);
+        }
+        return produced;
+      },
+      async skip() {
+        try {
+          await context.persist("close", (audit, runId, held) => audit.recordIgnored(runId, "NO_REPLY", held));
         } finally {
           if (heartbeat) clearInterval(heartbeat);
         }
