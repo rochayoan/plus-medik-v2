@@ -161,8 +161,13 @@ describe("G5.8: el prompt es código TypeScript (src/system-prompt.ts) y se desp
     expect(readdirSync(join(root, "agent-config")).filter((name) => /system-prompt/.test(name))).toEqual([]);
     expect(readdirSync(join(root, "src")).filter((name) => /conversation-source|generated/.test(name))).toEqual([]);
     for (const path of [...files, join(root, "scripts/agent-config.ts"), join(root, ".env.example"), join(root, "vercel.json"), join(root, ".vercelignore")]) {
-      expect(source(path), rel(path)).not.toMatch(/PLUSMEDIK_AGENT_PROMPT_FILE|conversation-source|system-prompt\.es\.md|includeFiles|PROMPT:BEGIN/);
+      expect(source(path), rel(path)).not.toMatch(/PLUSMEDIK_AGENT_PROMPT_FILE|conversation-source|system-prompt\.es\.md|PROMPT:BEGIN/);
     }
+  });
+
+  it("Vercel empaqueta la imagen publica, pero NO un archivo Markdown de prompt", () => {
+    const config = JSON.parse(source(join(root, "vercel.json"))) as { functions?: Record<string, { includeFiles?: string }> };
+    expect(config.functions?.["api/kapso/webhook.ts"]?.includeFiles).toBe("assets/ubicacion-plusmedik.png");
   });
 
   it("ningún script de instalación ni de compilación necesita generar nada (Docker con package.json copiado antes, Dokku, Railway, Vercel y Node a secas funcionan igual)", () => {
