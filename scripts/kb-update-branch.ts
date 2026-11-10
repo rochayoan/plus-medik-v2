@@ -49,7 +49,8 @@ async function main(): Promise<void> {
   const editorId = text(flags.get("editor-id"));
   const approverId = text(flags.get("approver-id"));
   if (!editorId || !approverId || editorId === approverId) fail("--apply exige --editor-id y --approver-id, y deben ser personas distintas.");
-  const editor: KnowledgeActor = { id: editorId!, type: "HUMAN", role: "EDITOR" };
+  // --editor-type AI declara que quien redacta es una IA (queda así en el rastro de la base); quien aprueba siempre es una persona.
+  const editor: KnowledgeActor = { id: editorId!, type: text(flags.get("editor-type")) === "AI" ? "AI" : "HUMAN", role: "EDITOR" };
   const approver: KnowledgeActor = { id: approverId!, type: "HUMAN", role: "ADMIN_APPROVER" };
   const draft = await repo.createDraft({ kind: "BRANCH", key: "central", payload, sourceRef: "actualización de ubicación 2026-11-10" }, editor);
   await repo.submit(draft.versionId, editor);

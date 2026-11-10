@@ -89,8 +89,8 @@ describe("el arnés de evaluación", () => {
     const runs = [];
     for (const scenario of AGENT_SCENARIOS) runs.push(...await runAll(scriptedModel(scenario.good[0]!, { inputTokens: 100, outputTokens: 20 }), { scenarios: [scenario] }));
     const summary = summarize(runs, { inputPerMTok: 2, outputPerMTok: 10 });
-    // salud sin precio no llama al modelo (0 llamadas) y fuera de tema solo planifica (1 llamada): el resto, plan + redacción
-    const calls = 2 * (AGENT_SCENARIOS.length - 2) + 1;
+    // salud sin precio y el agradecimiento (se calla sin modelo) no llaman al modelo (0 llamadas) y fuera de tema solo planifica (1 llamada): el resto, plan + redacción
+    const calls = 2 * (AGENT_SCENARIOS.length - 3) + 1;
     expect(summary).toMatchObject({ scenarios: AGENT_SCENARIOS.length, passed: AGENT_SCENARIOS.length, rejected: 0, modelErrors: 0, skipped: 1, rejectedList: [], failedList: [] });
     expect(summary.usage).toMatchObject({ inputTokens: 100 * calls, outputTokens: 20 * calls, calls });
     expect(summary.costUsd).toBeCloseTo((100 * calls * 2 + 20 * calls * 10) / 1_000_000, 4);

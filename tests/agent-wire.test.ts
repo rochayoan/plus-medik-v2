@@ -69,8 +69,8 @@ describe("el adaptador real contra un servidor local de Responses", () => {
     }
     const summary = summarize(runs);
     expect(summary).toMatchObject({ scenarios: AGENT_SCENARIOS.length, passed: AGENT_SCENARIOS.length, rejected: 0, modelErrors: 0, failedList: [] });
-    // salud sin precio no llama al modelo; fuera de tema solo planifica; el resto, plan + redacción. Tokens leídos del cable (output_tokens_details.reasoning_tokens incluido)
-    const calls = 2 * (AGENT_SCENARIOS.length - 2) + 1;
+    // salud sin precio y el agradecimiento (se calla sin modelo) no llaman al modelo; fuera de tema solo planifica; el resto, plan + redacción. Tokens leídos del cable (output_tokens_details.reasoning_tokens incluido)
+    const calls = 2 * (AGENT_SCENARIOS.length - 3) + 1;
     expect(captured.length).toBe(calls);
     expect(summary.usage).toMatchObject({ inputTokens: 120 * calls, outputTokens: 30 * calls, reasoningTokens: 10 * calls });
     for (const request of captured) {
