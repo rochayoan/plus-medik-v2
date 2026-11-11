@@ -30,6 +30,10 @@ export interface TurnsConfig {
   contactKeyFor(phone: string): string | undefined;
   // Se llama justo antes de reclamar el turno: si la pausa humana del contacto ya venció, la reanuda (src/pause-expiry.ts). Nunca lanza ni bloquea la atención.
   pauseExpiry?(contactKey: string): Promise<unknown>;
+  // ¿Se le pidió hace poco el dato de un resultado (nombre o comprobante) y está esperando a una persona? Mientras sea así, lo que parezca ese dato (nombre, foto) no se contesta (src/results-follow-up.ts). Nunca lanza.
+  awaitingPerson?(contactKey: string): Promise<boolean>;
+  // Espera de contexto de una foto dudosa que se atiende sola (src/photo-context-wait.ts): sin ella, la foto responde de inmediato.
+  photoContextWait?: { waitMs: number; pollMs?: number; newerTurn(contactKey: string, seq: number): Promise<boolean>; sleep?(ms: number): Promise<void> };
   // Cuántas veces se reintenta una reserva 'busy' (otro envío del contacto en vuelo) y cuánto se espera entre intentos. Superado el tope no se envía.
   busyRetries?: number;
   busyDelayMs?: number;

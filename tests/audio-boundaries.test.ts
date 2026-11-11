@@ -43,7 +43,8 @@ describe("audios: SIN cola, sin base de datos, sin cron y sin migración", () =>
   it("no hay ruta de reproceso, ni flujo programado, ni cron de Vercel, ni migraciones de audios, ni variables de clave o de cron para audios", () => {
     expect(existsSync(join(root, "api/audio"))).toBe(false);
     expect(existsSync(join(root, ".github/workflows/audio-drain.yml"))).toBe(false);
-    expect((JSON.parse(source(join(root, "vercel.json"))) as { crons?: unknown[]; functions?: Record<string, unknown> }).crons).toBeUndefined();
+    // Ningún cron es de audios: el único programado es el reintento del CRM.
+    expect(((JSON.parse(source(join(root, "vercel.json"))) as { crons?: Array<{ path: string }> }).crons ?? []).map((cron) => cron.path)).toEqual(["/api/outbox/drain"]);
     expect(Object.keys((JSON.parse(source(join(root, "vercel.json"))) as { functions: Record<string, unknown> }).functions)).toEqual(["api/kapso/webhook.ts"]);
     expect(readdirSync(join(root, "supabase/migrations")).filter((name) => /audio/i.test(name))).toEqual([]);
     for (const name of [".env.example", "README.md"]) expect(source(join(root, name)), name).not.toMatch(/PLUSMEDIK_AUDIO_KEY|audio\/drain|audio_jobs/);

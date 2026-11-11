@@ -39,17 +39,18 @@ export function createPauseExpiry(options: PauseExpiryOptions): (contactKey: str
     // La clave es un HMAC hexadecimal de 64 caracteres; cualquier otra cosa no se consulta.
     if (!baseUrl || !serviceKey || !/^[0-9a-f]{64}$/.test(contactKey)) return "UNKNOWN";
     try {
-      const response = await fetchFn(`${baseUrl}/rest/v1/plusmedik_attention_contacts?contact_key=eq.${contactKey}&select=state,last_human_event_at&limit=1`, {
+      const response = await fetchFn(`${baseUrl}/rest/v1/plusmedik_attention_contacts?contact_key=eq.${contactKey}&select=state,last_human_event_at,paused_at&limit=1`, {
         headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
         signal: AbortSignal.timeout(options.timeoutMs ?? 2500)
       });
       if (!response.ok) return "UNKNOWN";
       const rows = (await response.json().catch(() => undefined)) as unknown;
-      const row = Array.isArray(rows) ? (rows[0] as { state?: unknown; last_human_event_at?: unknown } | undefined) : undefined;
+      const row = Array.isArray(rows) ? (rows[0] as { state?: unknown; last_human_event_at?: unknown; paused_at?: unknown } | undefined) : undefined;
       if (!row || row.state !== "HUMAN_PAUSED") return "NOT_PAUSED";
-      const last = typeof row.last_human_event_at === "string" ? Date.parse(row.last_human_event_at) : Number.NaN;
-      // Sin fecha de la última actividad humana no se asume nada: la pausa se conserva.
-      if (!Number.isFinite(last) || now() - last < limitMs) return "KEPT";
+      // El plazo cuenta desde lo MÁS RECIENTE entre la última actividad humana y el momento en que se pausó (una pausa puesta por el agente o el CRM no trae actividad humana nueva).
+      const dates = [row.last_human_event_at, row.paused_at].map((value) => (typeof value === "string" ? Date.parse(value) : Number.NaN)).filter((value) => Number.isFinite(value));
+      // Sin ninguna fecha no se asume nada: la pausa se conserva.
+      if (dates.length === 0 || now() - Math.max(...dates) < limitMs) return "KEPT";
       const result = await options.attention.resume(contactKey, "AUTO_PAUSE_EXPIRED", "agent");
       options.log?.("pause_expired", { result, hours: options.hours });
       return result === "RESUMED" ? "RESUMED" : "NOT_PAUSED";
@@ -58,3 +59,4 @@ export function createPauseExpiry(options: PauseExpiryOptions): (contactKey: str
     }
   };
 }
+

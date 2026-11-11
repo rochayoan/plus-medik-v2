@@ -51,3 +51,11 @@ export function boliviaGreeting(date: Date): string {
 export function resultsCheckMessage(date: Date): string {
   return `${boliviaGreeting(date)}, gracias por preferirnos 😊 Verifico. Ve pasándome el nombre completo del paciente o el comprobante de pago, por favor (con uno de los dos me basta).`;
 }
+
+// Un mensaje corto que parece el dato pedido (nombre del paciente, número de orden, comprobante): sin preguntas ni pedidos propios (cotizar, precio, hablar con una persona, ubicación, horario).
+const OWN_REQUEST = /\b(cotiz\w*|cotic\w*|precio\w*|cuesta\w*|costo\w*|cuanto\w*|persona|asesor\w*|humano|ubicacion|direccion|horario\w*|abren|atienden|resultado\w*|domicilio)\b/;
+export function looksLikeIdentification(text: string): boolean {
+  const message = plain(text.slice(0, 500));
+  if (!message || text.includes("?") || text.includes("¿")) return false;
+  return message.split(/\s+/).length <= 8 && !OWN_REQUEST.test(message);
+}

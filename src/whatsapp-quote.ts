@@ -296,11 +296,11 @@ export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProduc
               ? STUDIES_UNRESOLVED_MESSAGE
               : instant ? NO_QUOTE_MESSAGE_INSTANT : NO_QUOTE_MESSAGE;
           result = "no_quote";
-          // Solo una imagen que SÍ parece una solicitud de estudios (receta, formulario o manuscrito) merece pedir una mejor foto. Si no es una solicitud, o no se sabe qué es, se calla: casi siempre es una
+          // Solo una imagen que SÍ parece una solicitud de estudios (receta, formulario o manuscrito) merece pedir una mejor foto. Si no es una solicitud, o no se sabe qué es (documento sin clasificar), se calla: casi siempre es una
           // imagen de una conversación interna (comprobantes, muestras, fotos de otros laboratorios) y el mensaje solo confunde. Un humano la ve en el chat.
           const docType = analysis.internal?.document.type;
           const looksLikeRequest = docType === "TEXT_EXPLICIT_REQUEST" || docType === "MARK_DEPENDENT_FORM" || docType === "HANDWRITTEN_REQUEST";
-          quiet = analysis.reasons.includes("not_a_request") || (docType !== undefined && !looksLikeRequest);
+          quiet = analysis.reasons.includes("not_a_request") || !looksLikeRequest;
         }
       }
     } catch (error) {

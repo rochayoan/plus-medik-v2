@@ -4,5 +4,11 @@
       "maxDuration": 300,
       "includeFiles": "assets/ubicacion-plusmedik.png"
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/outbox/drain",
+      "schedule": "* * * * *"
+    }
+  ]
 }

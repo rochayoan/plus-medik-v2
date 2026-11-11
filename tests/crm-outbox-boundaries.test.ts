@@ -117,12 +117,11 @@ describe("G5.0: apagado por defecto y cableado", () => {
     expect(config).toMatch(/KAPSO_PHONE_NUMBER_ID/);
   });
 
-  it("la ruta de reintentos es inerte sin configuración y exige el secreto del cron; vercel.json NO programa nada (activarlo es un paso humano explícito)", () => {
+  it("la ruta de reintentos es inerte sin configuración y exige el secreto del cron; vercel.json programa SOLO el reintento del CRM (activado por decisión explícita del dueño, 11-nov)", () => {
     const route = code(join(root, "api/outbox/drain.ts"));
     expect(route).toMatch(/CRON_SECRET/);
     const vercel = JSON.parse(source(join(root, "vercel.json"))) as { crons?: unknown[] };
-    expect(vercel.crons ?? []).toEqual([]);
-    expect(source(join(root, "vercel.json"))).not.toMatch(/outbox/);
+    expect(vercel.crons).toEqual([{ path: "/api/outbox/drain", schedule: "* * * * *" }]);
   });
 
   it(".env.example define una sola bandera, en blanco, y credenciales vacías", () => {

@@ -1,5 +1,6 @@
 import { repeatCandidate } from "./attention-filter.js";
-import { resultsCheckMessage, routeResultsMessage } from "./results-silence.js";
+import { withPhotoContextWait } from "./photo-context-wait.js";
+import { looksLikeIdentification, resultsCheckMessage, routeResultsMessage } from "./results-silence.js";
 import { audioFailureProducer, resolveAudioTurns } from "./audio-turns.js";
 import type { AudioFailureCode } from "./audio/types.js";
 import { engineCanDecide, engineReply, instantPhotoReply, photoOutcomeOf, shadowAfter, shadowBefore } from "./batch-engine.js";
@@ -369,6 +370,20 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
   const readyCheck = new Set([...resultsRouting.entries()].filter(([, action]) => action === "READY_CHECK").map(([from]) => from));
   const readyResponder = new Map([...perContact.entries()].filter(([from]) => readyCheck.has(from)).map(([from, indices]) => [from, indices[indices.length - 1]!] as const));
   const resultsOnly = new Set([...resultsRouting.entries()].filter(([, action]) => action === "SILENT").map(([from]) => from));
+  // Ya se le pidió el dato de un resultado y espera a una persona: lo que llega ahora y parece ese dato (un nombre, un comprobante, una foto) no se contesta; la persona de recepción lo atiende.
+  const awaitingPerson = deps.turns?.awaitingPerson;
+  if (awaitingPerson) {
+    for (const [from, indices] of perContact) {
+      if (resultsRouting.has(from)) continue;
+      if (!indices.every((index) => turns[index]!.kind === "IMAGE" || (turns[index]!.kind === "TEXT" && typeof turns[index]!.text === "string" && looksLikeIdentification(turns[index]!.text!)))) continue;
+      const contactKey = deps.turns!.contactKeyFor(from);
+      if (!contactKey) continue;
+      if (await Promise.resolve(awaitingPerson(contactKey)).catch(() => false)) {
+        resultsOnly.add(from);
+        deps.log("results_follow_up_silenced", {});
+      }
+    }
+  }
   // Si también pregunta por el HORARIO GENERAL, procesar exclusivamente
   // esa consulta. Nunca entregar al modelo ni al conocimiento el texto privado
   // sobre resultados. Se conserva claim/lease y un solo envío por lote.
@@ -456,7 +471,11 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
       await resolveFor([index]);
       const turn = turns[index]!;
       try {
-        const result = await claimed.run(readyCheck.has(turn.from) ? (readyResponder.get(turn.from) === index ? readyProducer(turn) : silenceProducer) : resultsOnly.has(turn.from) ? silenceProducer : producerFor(turn, deps)!);
+        const base = readyCheck.has(turn.from) ? (readyResponder.get(turn.from) === index ? readyProducer(turn) : silenceProducer) : resultsOnly.has(turn.from) ? silenceProducer : producerFor(turn, deps)!;
+        // Una foto que se atiende SOLA y que no se pudo cotizar espera un rato a que llegue el texto del paciente (ver src/photo-context-wait.ts); sin la configuración, responde de inmediato.
+        const photoWait = deps.turns?.photoContextWait;
+        const producer = turn.kind === "IMAGE" && !readyCheck.has(turn.from) && !resultsOnly.has(turn.from) && photoWait ? withPhotoContextWait(base, turn.from, { ...photoWait, contactKeyFor: deps.turns!.contactKeyFor, log: deps.log }) : base;
+        const result = await claimed.run(producer);
         reports[index] = { messageId: turn.messageId, result };
         if (resultsOnly.has(turn.from)) deps.log("results_query_silenced", { kind: "RESULTS_ONLY", sent: false });
         // Un mensaje que no llegó a buen término (falla técnica, respuesta retenida) se puede repetir y debe procesarse.

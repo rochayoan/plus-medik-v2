@@ -322,11 +322,18 @@ describe.skipIf(!bin)("recuperación de procesamientos interrumpidos (extremo a 
       expect(stored.send_state).not.toBe("ACCEPTED");
     });
 
-    it("sin cotización se pide una foto más clara (texto de siempre) y una imagen de tipo no soportado también; una demasiado grande no recibe respuesta", async () => {
+    it("sin cotización: una solicitud que no se pudo leer pide una foto más clara; un documento sin clasificar se calla; una imagen de tipo no soportado también pide foto; una demasiado grande no recibe respuesta", async () => {
       const noQuote = newImage();
-      const a = setup({ analyze: async () => ({ ...okAnalysis(), publicQuote: undefined, outcome: "HUMAN_REVIEW" }) as AnalysisResult });
+      const request = { document: { type: "TEXT_EXPLICIT_REQUEST", zones: [] }, quoted: { lines: [] }, pending: [], recipeStops: [], advisories: [] };
+      const a = setup({ analyze: async () => ({ ...okAnalysis(), publicQuote: undefined, outcome: "HUMAN_REVIEW", internal: request }) as unknown as AnalysisResult });
       await handleImageMessage(noQuote, a.deps);
       expect(a.sends).toEqual([NO_QUOTE_MESSAGE]);
+
+      // Sin saber qué documento es (sin clasificar) y sin texto: silencio (decisión del dueño, 11-nov).
+      const unclassified = newImage();
+      const u = setup({ analyze: async () => ({ ...okAnalysis(), publicQuote: undefined, outcome: "HUMAN_REVIEW" }) as AnalysisResult });
+      await handleImageMessage(unclassified, u.deps);
+      expect(u.sends).toEqual([]);
 
       const wrongType = newImage();
       const b = setup({ downloadImage: async () => ({ bytes: Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]) }) });

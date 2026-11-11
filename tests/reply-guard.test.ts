@@ -336,7 +336,8 @@ describe("fronteras del código (análisis estático)", () => {
   });
 
   it("solo la reserva de envío, el manejador de texto, la auditoría, los turnos y el cableado de Vercel nombran la guarda", () => {
-    const allowed = new Set(["src/reply-guard.ts", "src/guarded-turn.ts", "src/text-handler.ts", "src/audit.ts", "src/turns.ts", "src/quote-session.ts", "src/quote-session-turns.ts", "src/batch-execution.ts", "api/kapso/webhook.ts"]);
+    // results-follow-up.ts solo LEE (select) las marcas de firma para saber si se le pidió un dato de resultado al paciente; no escribe ni levanta supresiones.
+    const allowed = new Set(["src/reply-guard.ts", "src/guarded-turn.ts", "src/text-handler.ts", "src/audit.ts", "src/turns.ts", "src/quote-session.ts", "src/quote-session-turns.ts", "src/batch-execution.ts", "api/kapso/webhook.ts", "src/results-follow-up.ts"]);
     for (const path of files) {
       if (allowed.has(rel(path))) continue;
       expect(source(path), rel(path)).not.toMatch(/reply[-_ ]?guard|loopProtection|replySignature|looksAutomated/i);

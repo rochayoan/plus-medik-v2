@@ -20,6 +20,8 @@ import { createConversationReader, createSupabaseConversationStore, resolveConve
 import { resolveDailyReplyCap } from "../../src/daily-reply-cap.js";
 import { resolveMessageHistory } from "../../src/message-history.js";
 import { createPauseExpiry, resolvePauseExpiryHours } from "../../src/pause-expiry.js";
+import { createAwaitingPersonCheck } from "../../src/results-follow-up.js";
+import { createNewerTurnCheck, resolvePhotoContextWaitMs } from "../../src/photo-context-wait.js";
 import { resolveStudyInterpreter } from "../../src/study-interpreter-openai.js";
 import { resolveCrmOutbox } from "../../src/crm-outbox/config.js";
 import { createCrmHandoffSink } from "../../src/crm-outbox/handoff-sink.js";
@@ -123,6 +125,10 @@ const scopedContactControl = humanControlEnabled ? undefined : resolveScopedCont
 const pauseExpiryHours = resolvePauseExpiryHours(process.env);
 let pauseExpiryFn: ((contactKey: string) => Promise<unknown>) | undefined;
 const pauseExpiry = pauseExpiryHours === undefined ? undefined : (contactKey: string) => (pauseExpiryFn ??= createPauseExpiry({ hours: pauseExpiryHours, attention: { resume: (...args) => attentionProxy.resume(...args) }, log: (event, fields) => logLine(event, fields) }))(contactKey);
+// Tras pedir el nombre/comprobante de un resultado el agente calla ante el dato que llega (hasta 6 h); y una foto dudosa espera N segundos (45 por defecto) a que llegue el texto del paciente.
+const awaitingPerson = createAwaitingPersonCheck();
+const photoWaitMs = resolvePhotoContextWaitMs(process.env);
+const photoContextWait = photoWaitMs > 0 ? { waitMs: photoWaitMs, newerTurn: createNewerTurnCheck() } : undefined;
 const contactKeyFor = (phone: string) => contactKeyOf({ hmacKey: process.env.PLUSMEDIK_CONTACT_HMAC_KEY, labPhoneNumberId: process.env.KAPSO_PHONE_NUMBER_ID, contactPhone: phone });
 // Historial de TODOS los mensajes (ENCENDIDO por defecto, sin variables nuevas; ver docs/g6/05-historial-de-mensajes.md y src/message-history.ts): guarda en Supabase lo que escriben los pacientes, las respuestas del agente
 // y los mensajes de la recepción humana, para conservarlos y usarlos desde otros proyectos. Exige las migraciones 21 y 22 aplicadas (sin ellas la escritura falla sin afectar al agente), PLUSMEDIK_CONTACT_HMAC_KEY y
@@ -323,7 +329,7 @@ const realDeps: QuoteDeps = {
   requireAuditGuard: humanControlEnabled || turnsEnabled || on("REQUIRE_AUDIT_GUARD"),
   humanControl: humanControlEnabled ? { contactKeyFor, ...(pauseExpiry ? { pauseExpiry } : {}) } : undefined,
   scopedControl: scopedContactControl ? { contactKeyFor, covers: scopedContactControl.covers } : undefined,
-  turns: turnsEnabled ? { contactKeyFor, ...(pauseExpiry ? { pauseExpiry } : {}), replyGuard: replyGuardConfig, attention: attentionConfig, instantPhotoQuotes: instantPhotoQuotesEnabled, dailyCap: dailyReplyCap, ...(convState ? { convState } : {}), ...(agentPilot ? { agentPilot } : {}),
+  turns: turnsEnabled ? { contactKeyFor, ...(pauseExpiry ? { pauseExpiry } : {}), awaitingPerson, ...(photoContextWait ? { photoContextWait } : {}), replyGuard: replyGuardConfig, attention: attentionConfig, instantPhotoQuotes: instantPhotoQuotesEnabled, dailyCap: dailyReplyCap, ...(convState ? { convState } : {}), ...(agentPilot ? { agentPilot } : {}),
     crmHandoff: crmOutbox,
     // Métodos de pago ignorados hasta que se implementen (decisión del dueño): ni agente de siempre ni agente nuevo dicen nada de pagos; el resto del mensaje se atiende.
     ignorePayment: true,
