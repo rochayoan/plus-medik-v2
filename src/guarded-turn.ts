@@ -28,6 +28,8 @@ export const DEFAULT_BUSY_DELAY_MS = 1500;
 export interface TurnsConfig {
   // Clave estable (HMAC) del contacto; SIN ella el modo turnos no responde (falla cerrado).
   contactKeyFor(phone: string): string | undefined;
+  // Se llama justo antes de reclamar el turno: si la pausa humana del contacto ya venció, la reanuda (src/pause-expiry.ts). Nunca lanza ni bloquea la atención.
+  pauseExpiry?(contactKey: string): Promise<unknown>;
   // Cuántas veces se reintenta una reserva 'busy' (otro envío del contacto en vuelo) y cuánto se espera entre intentos. Superado el tope no se envía.
   busyRetries?: number;
   busyDelayMs?: number;
@@ -139,6 +141,10 @@ export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claime
       return { ended: "ignored" };
     }
   }
+
+  // La pausa humana vencida se reanuda ANTES del claim (que es quien la aplica).
+  const expire = deps.turns?.pauseExpiry ?? deps.humanControl?.pauseExpiry;
+  if (expire && contactKey) await Promise.resolve(expire(contactKey)).catch(() => undefined);
 
   let auditRunId: string | undefined;
   let lease: AuditLease | undefined;

@@ -19,6 +19,7 @@ import { resolveAgentMode } from "../../src/agent/pipeline.js";
 import { createConversationReader, createSupabaseConversationStore, resolveConversationState } from "../../src/conversation-state-store.js";
 import { resolveDailyReplyCap } from "../../src/daily-reply-cap.js";
 import { resolveMessageHistory } from "../../src/message-history.js";
+import { createPauseExpiry, resolvePauseExpiryHours } from "../../src/pause-expiry.js";
 import { resolveStudyInterpreter } from "../../src/study-interpreter-openai.js";
 import { resolveCrmOutbox } from "../../src/crm-outbox/config.js";
 import { createCrmHandoffSink } from "../../src/crm-outbox/handoff-sink.js";
@@ -118,6 +119,10 @@ if (attentionFilter.enabled && "error" in attentionFilter) logLine("attention_fi
 // Control acotado a una lista explícita de contactos (APAGADO por defecto): con PLUSMEDIK_AGENT_CONTROL=on y PLUSMEDIK_AGENT_CONTROL_PHONES (y SIN PLUSMEDIK_HUMAN_CONTROL), solo esos números se reclaman con su clave
 // de contacto y respetan la pausa manual del CRM; los demás pacientes siguen el flujo de siempre. No toca la pausa automática por mensajes humanos (eso es PLUSMEDIK_HUMAN_CONTROL) ni ALLOWED_PHONES.
 const scopedContactControl = humanControlEnabled ? undefined : resolveScopedContactControl(process.env);
+// La pausa por atención humana vence tras N horas sin actividad humana (12 por defecto; PLUSMEDIK_PAUSE_EXPIRY_HOURS=off la desactiva). Ver src/pause-expiry.ts.
+const pauseExpiryHours = resolvePauseExpiryHours(process.env);
+let pauseExpiryFn: ((contactKey: string) => Promise<unknown>) | undefined;
+const pauseExpiry = pauseExpiryHours === undefined ? undefined : (contactKey: string) => (pauseExpiryFn ??= createPauseExpiry({ hours: pauseExpiryHours, attention: { resume: (...args) => attentionProxy.resume(...args) }, log: (event, fields) => logLine(event, fields) }))(contactKey);
 const contactKeyFor = (phone: string) => contactKeyOf({ hmacKey: process.env.PLUSMEDIK_CONTACT_HMAC_KEY, labPhoneNumberId: process.env.KAPSO_PHONE_NUMBER_ID, contactPhone: phone });
 // Historial de TODOS los mensajes (ENCENDIDO por defecto, sin variables nuevas; ver docs/g6/05-historial-de-mensajes.md y src/message-history.ts): guarda en Supabase lo que escriben los pacientes, las respuestas del agente
 // y los mensajes de la recepción humana, para conservarlos y usarlos desde otros proyectos. Exige las migraciones 21 y 22 aplicadas (sin ellas la escritura falla sin afectar al agente), PLUSMEDIK_CONTACT_HMAC_KEY y
@@ -316,9 +321,9 @@ const realDeps: QuoteDeps = {
   log: logLine,
   ...(messageHistory ? { history: messageHistory } : {}),
   requireAuditGuard: humanControlEnabled || turnsEnabled || on("REQUIRE_AUDIT_GUARD"),
-  humanControl: humanControlEnabled ? { contactKeyFor } : undefined,
+  humanControl: humanControlEnabled ? { contactKeyFor, ...(pauseExpiry ? { pauseExpiry } : {}) } : undefined,
   scopedControl: scopedContactControl ? { contactKeyFor, covers: scopedContactControl.covers } : undefined,
-  turns: turnsEnabled ? { contactKeyFor, replyGuard: replyGuardConfig, attention: attentionConfig, instantPhotoQuotes: instantPhotoQuotesEnabled, dailyCap: dailyReplyCap, ...(convState ? { convState } : {}), ...(agentPilot ? { agentPilot } : {}),
+  turns: turnsEnabled ? { contactKeyFor, ...(pauseExpiry ? { pauseExpiry } : {}), replyGuard: replyGuardConfig, attention: attentionConfig, instantPhotoQuotes: instantPhotoQuotesEnabled, dailyCap: dailyReplyCap, ...(convState ? { convState } : {}), ...(agentPilot ? { agentPilot } : {}),
     crmHandoff: crmOutbox,
     // Métodos de pago ignorados hasta que se implementen (decisión del dueño): ni agente de siempre ni agente nuevo dicen nada de pagos; el resto del mensaje se atiende.
     ignorePayment: true,

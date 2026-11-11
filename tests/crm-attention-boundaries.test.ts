@@ -151,7 +151,7 @@ describe("Fase 2.3: el control acotado no amplía la exigencia ni el alcance del
   });
   it("no cambia la guarda obligatoria ni la pausa automática: requireAuditGuard y humanControl dependen solo de sus banderas de siempre", () => {
     expect(webhook).toContain('requireAuditGuard: humanControlEnabled || turnsEnabled || on("REQUIRE_AUDIT_GUARD"),');
-    expect(webhook).toContain("humanControl: humanControlEnabled ? { contactKeyFor } : undefined,");
+    expect(webhook).toContain("humanControl: humanControlEnabled ? { contactKeyFor, ...(pauseExpiry ? { pauseExpiry } : {}) } : undefined,");
     expect(webhook).toContain("humanControl: humanControlEnabled ? { labPhoneNumberId: process.env.KAPSO_PHONE_NUMBER_ID, contactKeyFor, attention: attentionProxy } : undefined,");
     expect(webhook).not.toMatch(/requireAuditGuard:.*scoped/i);
   });

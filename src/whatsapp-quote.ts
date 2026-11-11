@@ -148,7 +148,7 @@ export interface QuoteDeps {
   // Control de atención humana (ver human-control.ts). Si está presente: el contacto se identifica con una clave estable (HMAC) y SIN ella no se responde; un
   // contacto con la IA pausada no se procesa; la reserva y la comprobación final de envío vuelven a consultar la pausa; y el claim de la auditoría pasa a ser
   // obligatorio (como requireAuditGuard).
-  humanControl?: { contactKeyFor(phone: string): string | undefined };
+  humanControl?: { contactKeyFor(phone: string): string | undefined; pauseExpiry?(contactKey: string): Promise<unknown> };
   // Control acotado a una lista explícita de contactos (sin control humano global): SOLO para los contactos que `covers` reconoce se aplica la misma exigencia que arriba (clave de contacto,
   // claim obligatorio, pausa comprobada en la reserva y antes de enviar). Para cualquier otro contacto el flujo es EXACTAMENTE el de siempre. Ignorado si humanControl está definido.
   scopedControl?: { contactKeyFor(phone: string): string | undefined; covers(phone: string): boolean };
