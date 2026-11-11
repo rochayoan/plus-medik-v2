@@ -23,11 +23,12 @@ export const REASON_DESCRIPTIONS: Record<CrmReason, string> = {
 
 // Etiqueta del caso para quien lo recibe en el CRM (convenio/aliado, domicilio). NO es un motivo de la cola (la base guarda uno de CRM_REASONS): solo encabeza el texto `failureReason`, que el CRM lee por su
 // prefijo para avisar y etiquetar. Texto fijo, sin datos del paciente.
-export const CASE_LABELS = ["ALLIED_LAB", "HOME_VISIT"] as const;
+export const CASE_LABELS = ["ALLIED_LAB", "HOME_VISIT", "RESULTS_READY"] as const;
 export type CaseLabel = (typeof CASE_LABELS)[number];
 export const LABEL_DESCRIPTIONS: Record<CaseLabel, string> = {
   ALLIED_LAB: "convenio o laboratorio aliado: lo atiende una persona (el agente no responde)",
-  HOME_VISIT: "solicitud de estudio a domicilio: un asesor confirma disponibilidad y costo"
+  HOME_VISIT: "solicitud de estudio a domicilio: un asesor confirma disponibilidad y costo",
+  RESULTS_READY: "el paciente pregunta por un resultado ya realizado: recepción verifica con el nombre del paciente o el comprobante"
 };
 
 export interface DetectedTest {

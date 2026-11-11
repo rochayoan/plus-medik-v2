@@ -1,5 +1,5 @@
 import { repeatCandidate } from "./attention-filter.js";
-import { routeResultsMessage } from "./results-silence.js";
+import { resultsCheckMessage, routeResultsMessage } from "./results-silence.js";
 import { audioFailureProducer, resolveAudioTurns } from "./audio-turns.js";
 import type { AudioFailureCode } from "./audio/types.js";
 import { engineCanDecide, engineReply, instantPhotoReply, photoOutcomeOf, shadowAfter, shadowBefore } from "./batch-engine.js";
@@ -357,10 +357,17 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
   // la solicitud completa se refiere únicamente al estado/acceso a resultados.
   // Se evalúa ANTES de consultar modelos o catálogos y sin reservar envíos.
   const resultsRouting = new Map([...perContact.entries()].flatMap(([from, indices]) => {
-    if (!indices.every((index) => turns[index]!.kind === "TEXT" && typeof turns[index]!.text === "string")) return [];
-    const routing = routeResultsMessage(indices.map((index) => turns[index]!.text!).join("\n"));
-    return routing === "NORMAL" ? [] : [[from, routing] as const];
+    // Excepción: «¿ya está mi resultado?» (READY_CHECK) también se reconoce con fotos adjuntas (comprobante, orden, papel del resultado): las fotos no se analizan y una persona verifica.
+    const textIndices = indices.filter((index) => turns[index]!.kind === "TEXT" && typeof turns[index]!.text === "string");
+    if (textIndices.length === 0) return [];
+    const routing = routeResultsMessage(textIndices.map((index) => turns[index]!.text!).join("\n"));
+    if (routing === "NORMAL") return [];
+    if (textIndices.length !== indices.length && routing !== "READY_CHECK") return [];
+    return [[from, routing] as const];
   }));
+  // Consulta por un resultado ya realizado: responde UNA vez (el último mensaje del lote) con el texto cálido de recepción y deriva el caso al CRM; el resto del lote se cierra sin respuesta.
+  const readyCheck = new Set([...resultsRouting.entries()].filter(([, action]) => action === "READY_CHECK").map(([from]) => from));
+  const readyResponder = new Map([...perContact.entries()].filter(([from]) => readyCheck.has(from)).map(([from, indices]) => [from, indices[indices.length - 1]!] as const));
   const resultsOnly = new Set([...resultsRouting.entries()].filter(([, action]) => action === "SILENT").map(([from]) => from));
   // Si también pregunta por el HORARIO GENERAL, procesar exclusivamente
   // esa consulta. Nunca entregar al modelo ni al conocimiento el texto privado
@@ -375,10 +382,25 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
     const done = await ctx.persist("close", (audit, runId, lease) => audit.recordIgnored(runId, "NO_REPLY", lease));
     return done ? { kind: "none" } : { kind: "none" };
   };
+  // La respuesta cálida solo sale si el caso quedó REGISTRADO en el CRM (no se promete que alguien verifica si nadie lo va a ver); si no, se calla.
+  const readyProducer = (turn: IncomingTurn): TurnProducer => async (ctx) => {
+    const crm = deps.turns?.crmHandoff;
+    let registered = false;
+    if (crm) {
+      try {
+        const [outcome] = await crm.submit(ctx, [{ kapsoMessageId: turn.messageId, contactPhone: turn.from, kind: "CONVERSATION", reasons: ["HUMAN_REQUEST"], label: "RESULTS_READY" }]);
+        registered = outcome?.state === "REGISTERED";
+      } catch {
+        registered = false;
+      }
+    }
+    if (!registered) return silenceProducer(ctx);
+    return { kind: "reply", body: resultsCheckMessage(new Date()), result: "conversation", processingStatus: "COMPLETED", stale: "NONE", signature: "RESULTS_READY_CHECK" };
+  };
   // Un contacto del PILOTO (solo mensajes de texto o audio) también se atiende como lote, aunque traiga un solo mensaje: así su respuesta sale por la misma ruta de un solo envío por lote.
   const pilot = deps.turns?.agentPilot;
   const isPilotBatch = (from: string, indices: readonly number[]) => Boolean(pilot?.isPilot(from)) && indices.every((index) => turns[index]!.kind === "TEXT" || turns[index]!.kind === "AUDIO");
-  const batched = new Set([...perContact.entries()].filter(([from, indices]) => !resultsOnly.has(from) && (indices.length > 1 || isPilotBatch(from, indices))).map(([from]) => from));
+  const batched = new Set([...perContact.entries()].filter(([from, indices]) => !resultsOnly.has(from) && !readyCheck.has(from) && (indices.length > 1 || isPilotBatch(from, indices))).map(([from]) => from));
 
   const claims = new Map<number, ClaimedTurn>();
   // Mensajes que no se reclamaron porque una persona tiene la palabra (pausa humana): no se atienden solos, pero la memoria en sombra los registra como pendientes.
@@ -434,7 +456,7 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
       await resolveFor([index]);
       const turn = turns[index]!;
       try {
-        const result = await claimed.run(resultsOnly.has(turn.from) ? silenceProducer : producerFor(turn, deps)!);
+        const result = await claimed.run(readyCheck.has(turn.from) ? (readyResponder.get(turn.from) === index ? readyProducer(turn) : silenceProducer) : resultsOnly.has(turn.from) ? silenceProducer : producerFor(turn, deps)!);
         reports[index] = { messageId: turn.messageId, result };
         if (resultsOnly.has(turn.from)) deps.log("results_query_silenced", { kind: "RESULTS_ONLY", sent: false });
         // Un mensaje que no llegó a buen término (falla técnica, respuesta retenida) se puede repetir y debe procesarse.

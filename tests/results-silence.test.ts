@@ -25,11 +25,26 @@ describe("resultados: silencio determinista sin IA ni mensajes", () => {
     "Necesito mis resultados urgente",
     "Estoy hospitalizado, necesito resultados urgente",
     "El enlace de mis resultados no funciona",
-    "¿Cuánto demora el resultado de glucosa?",
-    "¿Cuánto tiempo tardan los resultados?",
     "¿A qué hora entregan los resultados?"
   ])("no responde temas de resultados, incluso con urgencia: %s", (message) => {
     expect(isResultsOnlyRequest(message)).toBe(true);
+  });
+  it.each([
+    "¿Cuánto demora el resultado de glucosa?",
+    "¿Cuánto tiempo tardan los resultados?",
+    "¿En cuánto tiempo sale el resultado del hemograma?"
+  ])("cuánto tarda un resultado es información para hacerse el estudio (flujo normal): %s", (message) => {
+    expect(routeResultsMessage(message)).toBe("NORMAL");
+  });
+  it.each([
+    "Buenas tardes ya está mi resultado?",
+    "¿Ya salió el hemograma?",
+    "No está en su sistema el resultado",
+    "Quisiera saber a qué hora puedo pasar a recoger resultados de patología",
+    "Cómo vas el resultado",
+    "Necesito la contraseña de mis resultados"
+  ])("un resultado ya realizado: recepción verifica (READY_CHECK): %s", (message) => {
+    expect(routeResultsMessage(message)).toBe("READY_CHECK");
   });
   it.each([
     "Quiero cotizar un hemograma y saber mis resultados",
@@ -105,5 +120,50 @@ describe("resultados: silencio determinista sin IA ni mensajes", () => {
     expect(loadCatalog).not.toHaveBeenCalled();
     expect(analyze).not.toHaveBeenCalled();
     expect(audit.reserveSend).not.toHaveBeenCalled();
+  });
+
+  describe("consulta por un resultado ya realizado: respuesta cálida y caso al CRM", () => {
+    const build = (state: "REGISTERED" | "FAILED" | "none") => {
+      const recordIgnored = vi.fn(async () => undefined);
+      const audit = {
+        claim: vi.fn(async () => ({ kind: "claimed" as const, runId: "run-r", lease })),
+        renewLease: vi.fn(async () => true),
+        recordIgnored,
+        recordFailure: vi.fn(async () => undefined),
+        recordReply: vi.fn(async () => undefined),
+        reserveSend: vi.fn(async () => "reserved" as const),
+        confirmSend: vi.fn(async () => "proceed" as const)
+      } as unknown as AuditRepository;
+      const sendText = vi.fn(async () => undefined);
+      const submit = vi.fn(async () => [{ state: state === "none" ? "FAILED" : state }]);
+      const analyze = vi.fn(async () => { throw new Error("NO DEBE EJECUTARSE"); });
+      const handler = vi.fn(async () => ({ body: "NO DEBE SALIR" }));
+      const deps = {
+        audit, sendText, loadCatalog: vi.fn(async () => []), analyze,
+        downloadImage: vi.fn(async () => ({ bytes: new Uint8Array() })),
+        log: vi.fn(),
+        turns: { handlers: { text: handler }, contactKeyFor: () => "a".repeat(64), ...(state === "none" ? {} : { crmHandoff: { submit, submitSessionReview: vi.fn() } }) } as unknown as NonNullable<QuoteDeps["turns"]>
+      } as unknown as QuoteDeps;
+      return { deps, sendText, submit, analyze, handler };
+    };
+    it("registrado en el CRM: UNA respuesta cálida, la foto no se analiza y el caso lleva la etiqueta RESULTS_READY", async () => {
+      const { deps, sendText, submit, analyze, handler } = build("REGISTERED");
+      const image: IncomingTurn = { kind: "IMAGE", from, messageId: "img-1", mediaId: "media-1" };
+      await processTurns([image, turn("Quería saber si ya están listos mis resultados", "t-1")], deps);
+      expect(sendText).toHaveBeenCalledTimes(1);
+      const [, body] = sendText.mock.calls[0] as unknown as [string, string];
+      expect(body).toMatch(/^(Buenos días|Buenas tardes|Buenas noches), gracias por preferirnos 😊 Verifico. Ve pasándome el nombre completo del paciente o el comprobante de pago/);
+      expect(submit).toHaveBeenCalledTimes(1);
+      expect((submit.mock.calls[0] as unknown as [unknown, Array<{ label: string }>])[1][0]!.label).toBe("RESULTS_READY");
+      expect(analyze).not.toHaveBeenCalled();
+      expect(handler).not.toHaveBeenCalled();
+    });
+    it("el caso no quedó registrado o no hay cola al CRM: no se promete nada, silencio", async () => {
+      for (const state of ["FAILED", "none"] as const) {
+        const { deps, sendText } = build(state);
+        await processTurns([turn("¿Ya están mis resultados?", "t-2")], deps);
+        expect(sendText).not.toHaveBeenCalled();
+      }
+    });
   });
 });
