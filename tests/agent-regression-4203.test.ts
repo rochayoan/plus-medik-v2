@@ -22,12 +22,12 @@ const ctx = { now: new Date("2026-11-06T09:00:00Z") };
 describe("quote_studies: un nombre que no se encuentra NO es «sin datos»", () => {
   const quote = quoteStudiesTool({ loadCatalog: async () => CATALOG });
 
-  it("estudios fuera del catálogo (o con errata) devuelven un hecho «no se pudo identificar», sin bloque ni precios, para que el agente pregunte", async () => {
+  it("estudios fuera del catálogo (o con errata) devuelven un hecho «no se pudo identificar» sin precios; a lo sumo el sistema sugiere opciones parecidas (nunca una cotización con total)", async () => {
     for (const studies of [["perfil tiroideo completo"], ["hemogrma"], ["ecografia abdominal", "resonancia"]]) {
       const result = (await quote.run({ studies }, ctx)) as { facts: Array<{ text: string }>; blocks?: string[] };
-      expect(result.blocks ?? [], studies.join(",")).toEqual([]);
+      expect((result.blocks ?? []).join(" "), studies.join(",")).not.toMatch(/Cotización|Total/);
       expect(result.facts.some((fact) => /No se pudo identificar con certeza \d+ estudio/.test(fact.text))).toBe(true);
-      expect(JSON.stringify(result)).not.toMatch(/\b45\b|30[.,]5|Bs/);
+      expect(JSON.stringify(result.facts)).not.toMatch(/\b45\b|30[.,]5|Bs/);
     }
   });
 });

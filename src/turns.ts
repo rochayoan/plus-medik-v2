@@ -663,13 +663,15 @@ async function processContactBatch(
       const routine = contactTurns.length === 1 && drafts.length === 0 ? responder.produce : produce;
       const crm = deps.turns?.crmHandoff;
       const leadId = responder.unit.turn.messageId;
-      const REASONS = { HUMAN_REQUEST: "HUMAN_REQUEST", MEDICAL: "MEDICAL_QUERY", OUT_OF_SCOPE: "NO_APPROVED_ANSWER" } as const;
+      const REASONS = { HUMAN_REQUEST: "HUMAN_REQUEST", MEDICAL: "MEDICAL_QUERY", OUT_OF_SCOPE: "NO_APPROVED_ANSWER", ALLIED_LAB: "HUMAN_REQUEST", HOME_VISIT: "NO_APPROVED_ANSWER" } as const;
+      // Convenio/aliado y domicilio se guardan con un motivo ya permitido de la cola, pero viajan al CRM con su propia etiqueta (encabeza failureReason).
+      const LABELS: Partial<Record<keyof typeof REASONS, "ALLIED_LAB" | "HOME_VISIT">> = { ALLIED_LAB: "ALLIED_LAB", HOME_VISIT: "HOME_VISIT" };
       produce = async (ctx) => {
         const piloted = await pilot.produce({
           from,
           turns: contactTurns.map((turn) => ({ messageId: turn.messageId, kind: "TEXT" as const, text: turn.text!, ...(turn.timestamp !== undefined ? { timestamp: turn.timestamp } : {}) })),
           // La derivación REAL: el caso entra a la cola del CRM con el lease de ESTA ejecución; solo cuenta si el CRM ya lo registró.
-          ...(crm ? { handoff: async (reason: keyof typeof REASONS) => (await crm.submit(ctx, [{ kapsoMessageId: leadId, contactPhone: from, kind: "CONVERSATION", reasons: [REASONS[reason]] }]))[0]?.state === "REGISTERED" } : {})
+          ...(crm ? { handoff: async (reason: keyof typeof REASONS) => (await crm.submit(ctx, [{ kapsoMessageId: leadId, contactPhone: from, kind: "CONVERSATION", reasons: [REASONS[reason]], ...(LABELS[reason] ? { label: LABELS[reason] } : {}) }]))[0]?.state === "REGISTERED" } : {})
         });
         if (!piloted) return routine(ctx);
         await Promise.all(drafts.map((draft) => draft.claimed.skip().catch(() => undefined)));

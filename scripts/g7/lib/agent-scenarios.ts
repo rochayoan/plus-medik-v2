@@ -110,9 +110,10 @@ export const AGENT_SCENARIOS: AgentScenario[] = [
   },
   {
     id: "estudio-ambiguo",
-    title: "Un nombre que coincide con dos estudios: pregunta cuál, sin cotizar",
+    title: "Un nombre que coincide con dos estudios: pregunta cuál y el sistema agrega las opciones con su precio (sin total ni cotización)",
     turns: ["necesito cotizar creatinina"],
-    expect: { quoteBlock: false, tools: ["quote_studies"], replyMatch: [/s[ée]rica/i, /orina/i], replyNoMatch: NO_PRICES },
+    // El texto del modelo no trae precios; el bloque de opciones con precio lo agrega el sistema debajo.
+    expect: { quoteBlock: true, tools: ["quote_studies"], replyMatch: [/s[ée]rica/i, /orina/i, /Opciones que encontré/] },
     good: [
       { calls: [q("creatinina")], text: "Tenemos dos opciones de creatinina: CREATININA SERICA (en sangre) y CREATININA EN ORINA. ¿Cuál necesitas?" },
       { calls: [q("creatinina")], text: "Para la creatinina hay dos opciones, en sangre (sérica) o en orina. ¿Cuál te cotizo?" }

@@ -131,11 +131,14 @@ describe("herramientas: solo lectura, acotadas, que nunca lanzan, y «sin datos�
     });
   });
 
-  it("find_studies: coincidencias del catálogo SIN precios; sin coincidencias, «sin datos»", async () => {
+  it("find_studies: los hechos van SIN precios y el sistema agrega un bloque de opciones con precio; sin coincidencias, «sin datos»", async () => {
     const find = findStudiesTool({ loadCatalog: async () => CATALOG });
     const found = await find.run({ query: "hemograma" }, ctx);
     expect(found).toMatchObject({ facts: [{ source: "CATALOG", text: "Estudio del catálogo: HEMOGRAMA COMPLETO", refs: [`study:${uuid(1)}`] }] });
-    expect(JSON.stringify(found)).not.toMatch(/priceBs|\b45\b/);
+    expect(JSON.stringify((found as { facts: unknown }).facts)).not.toMatch(/priceBs|Bs|\b45\b/);
+    const block = (found as { blocks?: string[] }).blocks?.[0] ?? "";
+    expect(block).toContain("HEMOGRAMA COMPLETO");
+    expect(block).toMatch(/Bs 45/);
     expect(await find.run({ query: "zzzz yyyy" }, ctx)).toEqual({ noData: "NO_MATCH" });
   });
 
@@ -153,9 +156,12 @@ describe("herramientas: solo lectura, acotadas, que nunca lanzan, y «sin datos�
       expect(result.facts.some((f) => /PARCIAL/.test(f.text))).toBe(false);
     });
 
-    it("ambiguo (creatinina sérica o en orina): sin bloque; el hecho nombra las opciones, sin precios", async () => {
+    it("ambiguo (creatinina sérica o en orina): no es una cotización, pero el sistema sugiere las opciones con su precio; los hechos nombran las opciones, sin precios", async () => {
       const result = (await quote.run({ studies: ["creatinina"] }, ctx)) as { facts: Array<{ text: string }>; blocks?: string[] };
-      expect(result.blocks ?? []).toEqual([]);
+      expect(result.blocks).toHaveLength(1);
+      expect(result.blocks![0]).toContain("Opciones que encontré");
+      expect(result.blocks![0]).toMatch(/CREATININA SERICA.*Bs/);
+      expect(result.blocks![0]).not.toContain("Total");
       expect(result.facts.map((f) => f.text).join(" ")).toMatch(/CREATININA SERICA.*CREATININA EN ORINA|CREATININA EN ORINA.*CREATININA SERICA/);
       noPrices(result);
     });
@@ -174,9 +180,18 @@ describe("herramientas: solo lectura, acotadas, que nunca lanzan, y «sin datos�
     it("estudios que no están en el catálogo (o con errata) dan el hecho «no se pudo identificar», no «sin datos»: el agente puede preguntar", async () => {
       for (const studies of [["perfil tiroideo completo"], ["hemogrma"], ["ecografia abdominal", "resonancia"]]) {
         const result = (await quote.run({ studies }, ctx)) as { facts: Array<{ text: string }>; blocks?: string[] };
-        expect(result.blocks ?? [], studies.join(",")).toEqual([]);
+        // Nunca una cotización con total: a lo sumo, opciones parecidas para que el paciente elija.
+        expect((result.blocks ?? []).join(" "), studies.join(",")).not.toMatch(/Cotización|Total/);
         expect(result.facts.some((f) => /No se pudo identificar con certeza \d+ estudio/.test(f.text))).toBe(true);
       }
+    });
+
+    it("nombre con errata o genérico: se sugiere lo más parecido del catálogo con precio, sin cotizar ni inventar; inactivos o sin precio válido no se sugieren", async () => {
+      const typo = (await quote.run({ studies: ["hemogrma"] }, ctx)) as { blocks?: string[] };
+      expect(typo.blocks?.[0]).toContain("HEMOGRAMA COMPLETO");
+      expect(typo.blocks?.[0]).toMatch(/Bs 45/);
+      const hidden = quoteStudiesTool({ loadCatalog: async () => CATALOG.map((s) => (s.id === uuid(1) ? ({ ...s, priceBs: 0, active: false } as CatalogStudy) : s)) });
+      expect(((await hidden.run({ studies: ["hemogrma"] }, ctx)) as { blocks?: string[] }).blocks?.join(" ") ?? "").not.toContain("HEMOGRAMA COMPLETO");
     });
 
     it("un estudio inactivo o con precio inválido no se cotiza (el catálogo manda)", async () => {
@@ -324,6 +339,30 @@ describe("runAgentTurn: tubería corta con un modelo simulado", () => {
       expect(seen.respond[0]!.handoff).toBe(false);
       const promise = await runAgentTurn({ model: model({ handoff: "HUMAN_REQUEST" }, ["Una persona del laboratorio te contactará."]), tools, handoff }, { utterances: [u("persona", "HUMAN_REQUEST")], capabilities: CAPS });
       expect(promise.status).toBe("REJECTED");
+    });
+
+    it("convenio o laboratorio aliado: registra el caso y CALLA (el redactor ni se llama); sin derivación disponible también calla", async () => {
+      const handoff = vi.fn(async () => true);
+      const seen: Seen = { respond: [] };
+      const silent = await runAgentTurn({ model: model({ handoff: "ALLIED_LAB" }, ["no debería usarse"], seen), tools, handoff }, { utterances: [u("somos de la clínica X, queremos un convenio")], capabilities: withCrm });
+      expect(silent).toMatchObject({ status: "SILENT", handoffRequested: true, handoffRegistered: true });
+      expect(silent.reply).toBeUndefined();
+      expect(handoff).toHaveBeenCalledWith("ALLIED_LAB");
+      expect(seen.respond).toHaveLength(0);
+      const off = vi.fn(async () => true);
+      const without = await runAgentTurn({ model: model({ handoff: "ALLIED_LAB" }, ["no debería usarse"]), tools, handoff: off }, { utterances: [u("convenio")], capabilities: CAPS });
+      expect(without).toMatchObject({ status: "SILENT", handoffRequested: true });
+      expect(without.handoffRegistered).toBeUndefined();
+      expect(off).not.toHaveBeenCalled();
+      const failing = await runAgentTurn({ model: model({ handoff: "ALLIED_LAB" }, ["x"]), tools, handoff: async () => { throw new Error("crm"); } }, { utterances: [u("convenio")], capabilities: withCrm });
+      expect(failing.status).toBe("SILENT");
+    });
+
+    it("domicilio: se registra y el texto puede mencionar al asesor", async () => {
+      const handoff = vi.fn(async () => true);
+      const decision = await runAgentTurn({ model: model({ handoff: "HOME_VISIT" }, ["Sí, hacemos estudios a domicilio, con costo de delivery. Un asesor le dará la información."]), tools, handoff }, { utterances: [u("hacen estudios a domicilio?")], capabilities: withCrm });
+      expect(decision).toMatchObject({ status: "VERIFIED", handoffRegistered: true });
+      expect(handoff).toHaveBeenCalledWith("HOME_VISIT");
     });
   });
 

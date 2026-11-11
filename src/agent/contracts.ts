@@ -26,7 +26,8 @@ export interface Utterance {
   topic: string;
 }
 
-export type HandoffReason = "HUMAN_REQUEST" | "MEDICAL" | "OUT_OF_SCOPE";
+// ALLIED_LAB: convenio o laboratorio aliado (solo humano: se registra el caso y el agente CALLA). HOME_VISIT: pide un estudio a domicilio (se registra y se responde con el aviso aprobado).
+export type HandoffReason = "HUMAN_REQUEST" | "MEDICAL" | "OUT_OF_SCOPE" | "ALLIED_LAB" | "HOME_VISIT";
 
 export interface ToolCall { tool: string; input: unknown }
 

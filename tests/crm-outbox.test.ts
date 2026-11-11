@@ -37,6 +37,17 @@ describe("carga útil: el contrato del receptor del CRM", () => {
     expect(payload.agentResult).toEqual({ source: "plusmedik-v2", schema: 1, kind: "REVIEW_CASE", reasonCodes: ["AMBIGUOUS_STUDY", "UNRESOLVED_TEXT"], sessionId: "s1", itemStatus: "AMBIGUOUS", counts: { studies: 1 } });
   });
 
+  it("aliados y domicilio: failureReason EMPIEZA por la etiqueta (el CRM la lee por su prefijo) y la cola sigue guardando un motivo permitido", () => {
+    for (const label of ["ALLIED_LAB", "HOME_VISIT"] as const) {
+      const payload = buildPayload(input({ label, reasons: ["HUMAN_REQUEST"] }), RUN, PHONE_ID);
+      expect(payload.failureReason).toMatch(new RegExp(`^${label}: `));
+      expect(payload.failureReason).toContain("HUMAN_REQUEST:");
+      expect(payload.detectedTests).toEqual([]);
+      expect((payload.agentResult as { reasonCodes: string[] }).reasonCodes).toEqual([label, "HUMAN_REQUEST"]);
+    }
+    expect(buildPayload(input(), RUN, PHONE_ID).failureReason.startsWith("HUMAN_REQUEST:")).toBe(true);
+  });
+
   it("respeta los límites del receptor: eventId ≤ 120, failureReason ≤ 1000, ≤ 60 estudios y agentResult + detectedTests ≤ 40.000 caracteres (nunca se pierde el motivo)", () => {
     expect(eventIdOf(RUN).length).toBeLessThanOrEqual(LIMITS.eventId);
     const many = Array.from({ length: 200 }, (_, i) => ({ catalogTestId: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`, name: `ESTUDIO ${i} ` + "X".repeat(150) }));

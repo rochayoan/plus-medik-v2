@@ -4,6 +4,7 @@ import type { ConversationReader } from "../conversation-state-store.js";
 import { detectTopics, type KnowledgeAnswer } from "../knowledge-answers.js";
 import { evaluateSession, extractStudyRequests, formatSessionQuote, optionsOf, QUOTE_TEXTS, type SessionItem } from "../quote-session.js";
 import type { CatalogStudy } from "../types.js";
+import { emojiFor, formatBs } from "../whatsapp-quote.js";
 import type { Fact, ToolCall, ToolContext, ToolDef, ToolErrorCode, ToolRun } from "./contracts.js";
 
 // Herramientas del agente conversacional: SOLO LECTURA y deterministas. Envuelven lo que ya funciona (conocimiento aprobado, catálogo, motor de cotización, memoria); no inventan datos, no envían y no derivan.
@@ -110,6 +111,15 @@ export function labInfoTool(options: { answer: (question: string) => Promise<Kno
   };
 }
 
+// Opciones del catálogo con su precio, armadas por el SISTEMA (el redactor nunca escribe precios). Sirven cuando el paciente escribió un nombre genérico, parcial o con erratas («drogas», «antidoping»):
+// se le sugieren los estudios que más se parecen para que elija. Solo entran estudios activos con precio válido. Se incluye el tiempo de entrega si el catálogo lo trae.
+const SUGGESTION_LIMIT = 5;
+function formatStudyOptions(studies: readonly CatalogStudy[]): string | undefined {
+  const valid = studies.filter((study) => study.active && Number.isFinite(study.priceBs) && study.priceBs >= 0).slice(0, SUGGESTION_LIMIT);
+  if (valid.length === 0) return undefined;
+  return ["🩺 *PlusMedik* · Opciones que encontré", "", ...valid.map((study) => `${emojiFor(study.name)} ${study.name} — ${formatBs(study.priceBs)}${study.turnaroundText ? ` (entrega: ${study.turnaroundText})` : ""}`), "", "Dime cuál te interesa y te armo la cotización. 😊"].join("\n");
+}
+
 // Qué estudios del catálogo corresponden a lo que el paciente nombró. NUNCA devuelve precios: un precio solo llega al paciente por la cotización del catálogo.
 export function findStudiesTool(options: { loadCatalog: () => Promise<readonly CatalogStudy[]>; minScore?: number }): ToolDef {
   return {
@@ -121,7 +131,8 @@ export function findStudiesTool(options: { loadCatalog: () => Promise<readonly C
       const { query } = input as { query: string };
       const hits = searchCatalog(query, await options.loadCatalog(), { limit: 5, minScore: options.minScore ?? 0.6 });
       if (hits.length === 0) return { noData: "NO_MATCH" };
-      return { facts: hits.map((hit) => ({ source: "CATALOG" as const, text: `Estudio del catálogo: ${hit.study.name}`, refs: [`study:${hit.study.id}`] })) };
+      const block = formatStudyOptions(hits.map((hit) => hit.study));
+      return { facts: hits.map((hit) => ({ source: "CATALOG" as const, text: `Estudio del catálogo: ${hit.study.name}`, refs: [`study:${hit.study.id}`] })), ...(block ? { blocks: [block] } : {}) };
     }
   };
 }
@@ -160,6 +171,13 @@ export function quoteStudiesTool(options: { loadCatalog: () => Promise<readonly 
           facts.push({ source: "QUOTE_ENGINE", text: complete ? quoteNote : `${quoteNote} La cotización es PARCIAL: solo incluye los estudios identificados con certeza; el total no cubre los que faltan por aclarar. Dilo y pregunta por ellos.`, refs: [] });
           return { facts, blocks: [formatSessionQuote(evaluation.lines, evaluation.duplicates, QUOTE_TEXTS)] };
         }
+      }
+      // Nada identificado con certeza (nombre genérico o con erratas): se sugieren los estudios más parecidos del catálogo, con precio, para que el paciente elija. No es una cotización.
+      if (extraction.matched.length === 0) {
+        const seen = new Map<string, CatalogStudy>();
+        for (const text of studies) for (const hit of searchCatalog(text, catalog, { limit: SUGGESTION_LIMIT, minScore: 0.5 })) if (!seen.has(hit.study.id)) seen.set(hit.study.id, hit.study);
+        const block = formatStudyOptions([...seen.values()]);
+        if (block) return { facts: [...facts, { source: "CATALOG" as const, text: `Opciones parecidas en el catálogo (el sistema agrega sus precios): ${[...seen.values()].slice(0, SUGGESTION_LIMIT).map((study) => study.name).join("; ")}`, refs: [...seen.values()].slice(0, SUGGESTION_LIMIT).map((study) => `study:${study.id}`) }], blocks: [block] };
       }
       return facts.length > 0 ? { facts } : { noData: "NOT_QUOTABLE" };
     }

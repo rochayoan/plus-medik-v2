@@ -89,6 +89,13 @@ export async function runAgentTurn(deps: AgentDeps, input: AgentTurnInput): Prom
   // previa (ningún mensaje en las últimas horas). Ante cualquier duda se responde como siempre.
   if (plan.silent === true && input.utterances.every((utterance) => utterance.topic === "OTHER") && recent.length === 0) return done({ status: "SILENT", ...planInfo });
 
+  // Convenio o laboratorio aliado: solo una persona lo atiende. Se registra el caso (si la derivación existe y está disponible) y el agente CALLA siempre: no se llama al redactor ni se envía nada.
+  if (plan.handoff === "ALLIED_LAB") {
+    const attempt = capabilities.handoff && deps.handoff && !deps.cancelled?.();
+    const registered = attempt ? await deps.handoff!("ALLIED_LAB").catch(() => false) : false;
+    return done({ status: "SILENT", ...planInfo, handoffRequested: true, ...(registered ? { handoffRegistered: true } : {}) });
+  }
+
   // 2. Herramientas de solo lectura. «Sin datos» pasa al modelo como una nota, no como un fallo.
   const patientText = input.utterances.map((utterance) => utterance.text).join("\n");
   const { runs, facts, blocks, notes } = await runToolCalls(deps.tools, plan.toolCalls, { now, patientText });

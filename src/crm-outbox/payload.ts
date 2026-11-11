@@ -21,6 +21,15 @@ export const REASON_DESCRIPTIONS: Record<CrmReason, string> = {
   PRICE_INVALID: "un estudio identificado no tiene un precio válido en el catálogo"
 };
 
+// Etiqueta del caso para quien lo recibe en el CRM (convenio/aliado, domicilio). NO es un motivo de la cola (la base guarda uno de CRM_REASONS): solo encabeza el texto `failureReason`, que el CRM lee por su
+// prefijo para avisar y etiquetar. Texto fijo, sin datos del paciente.
+export const CASE_LABELS = ["ALLIED_LAB", "HOME_VISIT"] as const;
+export type CaseLabel = (typeof CASE_LABELS)[number];
+export const LABEL_DESCRIPTIONS: Record<CaseLabel, string> = {
+  ALLIED_LAB: "convenio o laboratorio aliado: lo atiende una persona (el agente no responde)",
+  HOME_VISIT: "solicitud de estudio a domicilio: un asesor confirma disponibilidad y costo"
+};
+
 export interface DetectedTest {
   catalogTestId?: string;
   name: string;
@@ -37,6 +46,8 @@ export interface CaseInput {
   contactPhone: string;
   kind: CaseKind;
   reasons: readonly CrmReason[];
+  // Si se indica, `failureReason` empieza por este código (y agentResult lo lleva en reasonCodes). Los motivos de la cola siguen siendo los de `reasons`.
+  label?: CaseLabel;
   detectedTests?: readonly DetectedTest[];
   sessionId?: string;
   itemStatus?: string;
@@ -81,9 +92,10 @@ export function buildPayload(input: CaseInput, originRunId: string, phoneNumberI
   if (eventId.length > LIMITS.eventId) throw new PayloadError("INVALID_RUN");
 
   // Códigos, no texto libre: «CODIGO: descripción fija; …».
-  const failureReason = clip(reasons.map((reason) => `${reason}: ${REASON_DESCRIPTIONS[reason]}`).join("; "), LIMITS.failureReason);
+  const described = reasons.map((reason) => `${reason}: ${REASON_DESCRIPTIONS[reason]}`);
+  const failureReason = clip((input.label ? [`${input.label}: ${LABEL_DESCRIPTIONS[input.label]}`, ...described] : described).join("; "), LIMITS.failureReason);
   const agentResult: Record<string, unknown> = {
-    source: "plusmedik-v2", schema: 1, kind: input.kind, reasonCodes: reasons,
+    source: "plusmedik-v2", schema: 1, kind: input.kind, reasonCodes: input.label ? [input.label, ...reasons] : reasons,
     ...(input.sessionId ? { sessionId: input.sessionId } : {}), ...(input.itemStatus ? { itemStatus: input.itemStatus } : {}), ...(input.counts ? { counts: input.counts } : {})
   };
   let detectedTests: DetectedTest[] = (input.detectedTests ?? []).slice(0, LIMITS.detectedTests).map((test) => ({
