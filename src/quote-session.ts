@@ -123,6 +123,11 @@ const GENERIC = new Set(["analisis", "estudio", "estudios", "examen", "examenes"
 const MODIFIER_WORDS = new Set(["completo", "completa", "total", "totales", "general", "simple", "basal", "automatizado", "serico", "serica", "cuantitativo", "cuantitativa", "cualitativo", "cualitativa", "rapida", "rapido", "prueba", "pruebas", "test", "adulto", "pediatrico", "convencional", "orina", "sangre", "heces", "suero", "muestra", "muestras"]);
 const HEADINGS_THAT_ARE_STUDIES = new Set(["urianalisis", "uroanalisis"]);
 const SECTION_HEADINGS = new Set(["hematologia", "quimica sanguinea", "quimica clinica", "quimica", "bioquimica", "serologia", "inmunologia", "microbiologia", "bacteriologia", "parasitologia", "coprologia", "urianalisis", "uroanalisis", "hormonas", "hormonal", "coagulacion", "inmunoserologia", "otros", "otros estudios", "laboratorio clinico"]);
+// ¿El texto es solo relleno, cortesía o palabras genéricas («es para mi hijo», «unos análisis por favor»)? No nombra ningún estudio: ni se pregunta por él ni se avisa que «no existe».
+export function isOnlyFiller(text: string): boolean {
+  const tokens = normalizeStudyKey(text.slice(0, 300)).split(" ").filter(Boolean);
+  return tokens.length > 0 && tokens.every((token) => FILLER.has(token) || GENERIC.has(token));
+}
 // ¿El texto es solo el título de una sección de la orden («SEROLOGIA»)? No es un estudio ni una duda.
 export function isSectionHeading(text: string): boolean {
   const key = normalizeStudyKey(text.replace(/^\s*(?:[-•*·–—]+|\d{1,2}\s*[.)\-:])\s*/, "").replace(/[:.\-–—]+$/, ""));

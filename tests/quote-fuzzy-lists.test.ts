@@ -196,3 +196,31 @@ describe("lista que llega como mensajes separados (motor de lotes, producción)"
     expect(withUrinalysis?.matched.map((s) => s.name) ?? []).toEqual(["EXAMEN GENERAL DE ORINA COMPLETA"]);
   });
 });
+
+describe("palabras sueltas y frases corrientes dentro de una conversación (motor de lotes)", () => {
+  const plan = async (messages: string[]) => {
+    const { understandBatch, EMPTY_SESSION } = await import("../src/batch-understanding.js");
+    const { decideBatch } = await import("../src/batch-policy.js");
+    const understanding = await understandBatch({ fragments: messages.map((text, index) => ({ id: `f${index}`, text })), catalog: C, session: EMPTY_SESSION, modelUse: "never" });
+    return decideBatch({ understanding });
+  };
+  it("«es para mi hijo» no es un estudio ni una duda: sigue la conversación de siempre, sin «no pude identificar»", async () => {
+    const p = await plan(["es para mi hijo"]);
+    expect(p.core).toMatchObject({ kind: "PROMPT", reason: "OTHER" });
+  });
+  it("junto a una lista, esa frase no estorba: se cotiza la lista", async () => {
+    const p = await plan(["Hemograma", "Glucosa", "es para mi hijo"]);
+    expect(p.core.kind).toBe("QUOTE");
+    expect(p.notices).toEqual([]);
+  });
+  it("una palabra suelta que no existe en el catálogo, dentro de una lista, se cotiza el resto y se AVISA cuál no está (nunca se descarta en silencio)", async () => {
+    const p = await plan(["Hemograma", "Glucosa", "Tiroides"]);
+    expect(p.core.kind).toBe("QUOTE");
+    expect(p.notices).toContainEqual({ kind: "STUDIES_NOT_IN_CATALOG", mentions: ["Tiroides"] });
+  });
+  it("«quiero cotizar tiroides» (nada identificado): se dice que no está en el catálogo y se pide el estudio", async () => {
+    const p = await plan(["Quiero cotizar tiroides"]);
+    expect(p.core).toMatchObject({ kind: "PROMPT", reason: "QUOTE_WITHOUT_STUDIES" });
+    expect(p.notices).toContainEqual({ kind: "STUDIES_NOT_IN_CATALOG", mentions: ["tiroides"] });
+  });
+});

@@ -1,7 +1,7 @@
 import { mentionsKnownStudy } from "./catalog-search.js";
 import { normalizeStudyKey } from "./consensus.js";
 import {
-  cleanMention, extractStudyRequests, extractWithNotes, isAddingMore, isGeneralQuestion, isSectionHeading, mergeInterpretation, optionsOf, parseSessionCommand, parseSessionReply, wantsQuoteNow,
+  cleanMention, extractStudyRequests, extractWithNotes, isAddingMore, isGeneralQuestion, isOnlyFiller, isSectionHeading, mergeInterpretation, optionsOf, parseSessionCommand, parseSessionReply, wantsQuoteNow,
   type InterpretationNotes, type InterpretedStudyRequest, type ItemResult, type StudyInterpreter, type TextExtraction
 } from "./quote-session.js";
 import { asksForPrice, classifyText } from "./text-handler.js";
@@ -512,6 +512,7 @@ export async function understandBatch(input: UnderstandInput): Promise<BatchUnde
   const residues: Array<{ mention: string; tokens: string[]; requiresMention: boolean }> = [];
   const talkTexts: string[] = [];
   const textNotFound: string[] = [];
+  const deferredMissing: string[] = [];
   const textInterpreted: Array<{ mention: string; studyName: string }> = [];
   let repeated = 0;
   let unresolvedCount = 0;
@@ -522,6 +523,8 @@ export async function understandBatch(input: UnderstandInput): Promise<BatchUnde
       // Solo cuenta como «estudio que el catálogo no tiene» lo que parece un estudio (sigla, parecido con el catálogo) o viene en un mensaje que habla de estudios o de cotizar; una frase corriente no.
       const missing = group.scored.notes.notFound.filter((mention) => looksLikeStudyMention(mention, catalog) || classifyText(group.scored.text) === "RECIPE_OR_QUOTE");
       textNotFound.push(...missing);
+      // Una palabra suelta que no parece un estudio pero llega junto a una lista de estudios («Tiroides» entre «hemograma» y «glucosa») probablemente lo es: si el lote trae estudios, se avisa que no está (solo una o dos palabras: una frase más larga es conversación).
+      if (extraction === undefined) deferredMissing.push(...group.scored.notes.notFound.filter((mention) => !missing.includes(mention) && mention.split(" ").length <= 2));
       textInterpreted.push(...group.scored.notes.interpreted);
       if (!extraction || extraction.matched.length + extraction.result.ambiguous.length === 0) {
         // Solo estudios que el catálogo no tiene: se le dice cuáles faltan; no es una duda que bloquee ni conversación.
@@ -529,8 +532,13 @@ export async function understandBatch(input: UnderstandInput): Promise<BatchUnde
           groups.push({ fragmentIds, kind: "TALK" });
           continue;
         }
-        // Un título de sección de la orden («SEROLOGIA») no es un estudio ni una duda.
-        if (extraction === undefined && isSectionHeading(group.scored.text)) {
+        // Relleno o cortesía («es para mi hijo») y títulos de sección de la orden («SEROLOGIA») no son un estudio ni una duda.
+        if (extraction === undefined && (isSectionHeading(group.scored.text) || isOnlyFiller(group.scored.text))) {
+          // El relleno es conversación (la atiende el camino de siempre); un título de sección no necesita respuesta.
+          if (!isSectionHeading(group.scored.text)) {
+            delegated.talk.push(...fragmentIds);
+            talkTexts.push(group.scored.text);
+          }
           groups.push({ fragmentIds, kind: "TALK" });
           continue;
         }
@@ -567,6 +575,8 @@ export async function understandBatch(input: UnderstandInput): Promise<BatchUnde
       groups.push({ fragmentIds, kind: extraction.result.unresolved > 0 ? "UNRESOLVED" : extraction.result.ambiguous.length > 0 ? "AMBIGUOUS" : "STUDIES" });
     }
   }
+
+  if (matched.size + ambiguous.length > 0) textNotFound.push(...deferredMissing);
 
   // ── gana lo último que dijo el paciente (regla 5 de la negación) ──
   // Un estudio que se niega DESPUÉS de haberlo pedido en este lote queda fuera; uno que se pide después de negarlo queda dentro. Negar uno que ya estaba en la solicitud abierta es una duda.
