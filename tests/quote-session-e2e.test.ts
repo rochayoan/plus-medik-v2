@@ -448,7 +448,7 @@ describe.skipIf(!bin)("sesiones de cotización de extremo a extremo contra Postg
       const w = setup();
       await say(w, p.phone, "quiero cotizar hemograma y creatinina");
       expect(hasPrice(last(w))).toBe(false);
-      expect(last(w)).toContain("Estudios anotados: HEMOGRAMA COMPLETO.");
+      expect(last(w)).not.toContain("Estudios anotados");
       expect(last(w)).toContain("1. CREATININA SERICA\n2. CREATININA EN ORINA");
       await say(w, p.phone, "2");
       expect(last(w)).toContain("Estudios anotados: HEMOGRAMA COMPLETO, CREATININA EN ORINA.");

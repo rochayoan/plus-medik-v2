@@ -121,7 +121,13 @@ const FILLER = new Set(["hola", "oye", "oiga", "buenas", "buenos", "dias", "tard
 const GENERIC = new Set(["analisis", "estudio", "estudios", "examen", "examenes", "laboratorio", "laboratorios", "receta", "orden", "medica", "medico", "chequeo", "varios", "algunos", "antibiograma", "antibiogramas", "hijo", "hija", "hijos", "mama", "papa", "esposo", "esposa", "bebe", "nino", "nina", "paciente", "familiar", "senora", "senor", "doctor", "doctora", "urgente", "hoy", "manana", "ahora", "pronto"]);
 // Títulos de sección de una orden médica («HEMATOLOGIA», «QUIMICA SANGUINEA»): no son estudios. Solo se ignoran en una lista (3 o más fragmentos) y solo si el fragmento ES el título.
 const MODIFIER_WORDS = new Set(["completo", "completa", "total", "totales", "general", "simple", "basal", "automatizado", "serico", "serica", "cuantitativo", "cuantitativa", "cualitativo", "cualitativa", "rapida", "rapido", "prueba", "pruebas", "test", "adulto", "pediatrico", "convencional", "orina", "sangre", "heces", "suero", "muestra", "muestras"]);
+const HEADINGS_THAT_ARE_STUDIES = new Set(["urianalisis", "uroanalisis"]);
 const SECTION_HEADINGS = new Set(["hematologia", "quimica sanguinea", "quimica clinica", "quimica", "bioquimica", "serologia", "inmunologia", "microbiologia", "bacteriologia", "parasitologia", "coprologia", "urianalisis", "uroanalisis", "hormonas", "hormonal", "coagulacion", "inmunoserologia", "otros", "otros estudios", "laboratorio clinico"]);
+// ¿El texto es solo el título de una sección de la orden («SEROLOGIA»)? No es un estudio ni una duda.
+export function isSectionHeading(text: string): boolean {
+  const key = normalizeStudyKey(text.replace(/^\s*(?:[-•*·–—]+|\d{1,2}\s*[.)\-:])\s*/, "").replace(/[:.\-–—]+$/, ""));
+  return SECTION_HEADINGS.has(key) && !HEADINGS_THAT_ARE_STUDIES.has(key);
+}
 // Calificativos de muestra que no cambian de qué estudio se trata («gasometría arterial o venosa», «complemento sérico C3»): se usan solo como segundo intento.
 const QUALIFIERS = new Set(["arterial", "venosa", "venoso", "serico", "serica", "sanguineo", "sanguinea", "o"]);
 // «V.D.R.L» → «VDRL», «H.I.V.» → «HIV».
@@ -167,6 +173,10 @@ function variants(segment: string): string[] {
 // («y también TSH», «agrega glucosa») sigue acumulando y preguntando «¿Eso es todo?».
 const ASKS_FOR = /\b(quiero|quisiera|necesito|requiero|deseo|ocupo|me gustaria|hacerme|hacerse|sacarme|sacarse|realizarme|realizarse)\b/;
 const ADDING = /\b(agrega\w*|anade\w*|suma\w*|incluy\w*|tambien|ademas|falta\w*|otro|otra|mas)\b/;
+// «agrega glucosa», «y también TSH», «falta uno»: el paciente sigue sumando; no se cotiza por iniciativa propia.
+export function isAddingMore(text: string): boolean {
+  return ADDING.test(plain(text.slice(0, 300)));
+}
 export function wantsQuoteNow(text: string): boolean {
   if (asksForPrice(text)) return true;
   const key = plain(text.slice(0, 300));
@@ -361,7 +371,8 @@ export function extractWithNotes(text: string, catalog: readonly CatalogStudy[],
 
   let coarse = text.slice(0, 2000).split(/[,;\n+/]|\s&\s/).map((part) => part.replace(LIST_MARKER, "").trim()).filter(Boolean).slice(0, MAX_SEGMENTS);
   // En una lista, un fragmento que ES el título de una sección de la orden («SEROLOGIA») no es un estudio.
-  if (fuzzy && coarse.length >= 3) coarse = coarse.filter((part) => !SECTION_HEADINGS.has(normalizeStudyKey(part.replace(/[:.\-–—]+$/, ""))));
+  // Un título solo se ignora aislado si no es también el nombre de un estudio («urianálisis»).
+  if (fuzzy) coarse = coarse.filter((part) => { const key = normalizeStudyKey(part.replace(/[:.\-–—]+$/, "")); return !(SECTION_HEADINGS.has(key) && (coarse.length >= 3 || !HEADINGS_THAT_ARE_STUDIES.has(key))); });
   const segments: Segment[] = [];
   const notFound: string[] = [];
   // Cada fragmento aporta sus segmentos; los ambiguos llevan el texto del paciente (para decirle cómo se interpretó).
@@ -495,10 +506,7 @@ export function assertSafeInterpreterTexts(texts: Record<string, string> = INTER
 export function formatInterpretationNote(notes: InterpretationNotes | undefined, texts: typeof INTERPRETER_TEXTS = INTERPRETER_TEXTS): string | undefined {
   if (!notes) return undefined;
   const lines: string[] = [];
-  for (const item of notes.interpreted.slice(0, 5)) {
-    const mention = cleanMention(item.mention);
-    if (mention) lines.push(`${texts.interpreted} «${mention}» ${texts.interpreted_as} ${list([item.studyName])}.`);
-  }
+  // Lo que se interpretó ya no se repite al paciente (12-nov): la cotización muestra el nombre del estudio, su precio, sus indicaciones y el tiempo de entrega. Solo se avisa lo que NO está en el catálogo.
   const missing = [...new Set(notes.notFound.map(cleanMention).filter(Boolean))].slice(0, 8);
   if (missing.length > 0) lines.push(`${texts.not_found} ${missing.map((name) => `«${name}»`).join(", ")}.`, texts.not_found_outro);
   return lines.length > 0 ? lines.join("\n") : undefined;
@@ -794,9 +802,11 @@ export type TextDoubt = "NONE" | "OPTIONS" | "UNRESOLVED" | "RESEND";
 export function formatTextReply(input: { texts: QuoteTexts; head?: string; names: readonly string[]; options: readonly string[]; doubt: TextDoubt; repeated: number; note?: string }): string {
   const { texts } = input;
   const lines: string[] = [];
-  if (input.head) lines.push(input.head);
-  if (input.names.length > 0) lines.push(`${texts.identified_so_far} ${list(input.names)}.`);
-  if (input.repeated > 0) lines.push(texts.repeated_note);
+  // Con una pregunta de opciones se va directo a la pregunta: no se repite «anoté…» ni la lista de lo ya identificado (el paciente la verá en la cotización). El aviso de una opción inválida sí se conserva.
+  const asking = input.doubt === "OPTIONS";
+  if (input.head && !(asking && input.head === texts.added_text)) lines.push(input.head);
+  if (input.names.length > 0 && !asking) lines.push(`${texts.identified_so_far} ${list(input.names)}.`);
+  if (input.repeated > 0 && !asking) lines.push(texts.repeated_note);
   if (input.note) lines.push(input.note);
   if (input.doubt === "OPTIONS") lines.push(texts.ask_option_intro, ...input.options.map((name, index) => `${index + 1}. ${list([name])}`), texts.ask_option_outro);
   else if (input.doubt === "UNRESOLVED") lines.push(texts.ask_unresolved);

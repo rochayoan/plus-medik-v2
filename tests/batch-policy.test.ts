@@ -379,7 +379,9 @@ describe("de punta a punta: la misma solicitud da el mismo plan, sea cual sea la
 
   const cases: Array<[string, Core["kind"], string]> = [
     ["quiero cotizar hemograma completo y glucosa", "QUOTE", "intención clara + todo resuelto: cotiza directo"],
-    ["hemograma completo y glucosa en ayunas", "SUMMARY", "estudios sin intención: resumen y «¿algo más?»"],
+    ["hemograma completo y glucosa en ayunas", "QUOTE", "una lista de 2 o más estudios sin dudas: cotiza directo"],
+    ["hemograma completo", "SUMMARY", "un estudio suelto sin intención: resumen y «¿algo más?»"],
+    ["agrega hemograma completo y glucosa en ayunas", "SUMMARY", "sigue sumando: no se cotiza por iniciativa propia"],
     ["quiero cotizar creatinina", "CLARIFY", "ambigüedad: solo la opción"],
     ["quiero cotizar creatinina en orina", "QUOTE", "la unión aclara la ambigüedad y cotiza"],
     ["necesito colesterol total y tsh", "QUOTE", "otra forma de pedir"],

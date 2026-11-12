@@ -357,7 +357,7 @@ describe("G5.9 · texto en modo sesión: cotizar sin «listo», acumular y pregu
     const w = start(audit);
     await processTurns([text("cotiza hemograma y creatinina")], w.deps);
     expect(audit.quoteClose).not.toHaveBeenCalled();
-    expect(w.sends[0]).toContain("Estudios anotados: HEMOGRAMA COMPLETO.");
+    expect(w.sends[0]).not.toContain("Estudios anotados");
     expect(w.sends[0]).toContain("1. CREATININA SERICA\n2. CREATININA EN ORINA");
     expect(w.sends[0]).toContain(QUOTE_TEXTS.ask_option_outro);
     expect(w.sends[0]).not.toMatch(/Bs\s?\d/);

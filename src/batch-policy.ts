@@ -69,7 +69,7 @@ export type Core =
 
 export type PlanReason =
   | "SAFETY_PRESENT" | "CANCEL" | "DECLINED" | "BLOCKED_AMBIGUOUS" | "BLOCKED_UNCLEAR" | "BLOCKED_UNREADABLE" | "BLOCKED_UNCERTAIN" | "BLOCKED_INVALID_CHOICE"
-  | "QUOTE_BY_INTENT" | "QUOTE_BY_CONFIRMATION" | "FINALIZED_WITH_DOUBTS" | "STUDIES_WITHOUT_INTENT" | "CONFIRM_SUPERSEDED" | "NO_STUDIES" | "NEGATION_UNCLEAR";
+  | "QUOTE_BY_INTENT" | "QUOTE_BY_LIST" | "QUOTE_BY_CONFIRMATION" | "FINALIZED_WITH_DOUBTS" | "STUDIES_WITHOUT_INTENT" | "CONFIRM_SUPERSEDED" | "NO_STUDIES" | "NEGATION_UNCLEAR";
 
 export interface ReplyPlan {
   // Bloques que nunca se suprimen. Los textos y la derivación los resuelve el manejador de siempre.
@@ -187,6 +187,14 @@ export function decideBatch(input: PolicyInput): ReplyPlan {
         }
         reasons.push("QUOTE_BY_CONFIRMATION");
         return { kind: "QUOTE", studyIds, closeBy: u.confirmedBy ?? "YES" };
+      }
+      // Una LISTA de estudios (2 o más en este lote) o la respuesta a una pregunta de opciones, con todo identificado y sin que el paciente siga sumando, va directo a la cotización (12-nov): pedir «¿eso es todo?»
+      // de nuevo solo hace perder tiempo. Un estudio suelto o un «agrega…» siguen acumulando.
+      const listed = u.studies.matchedIds.length >= 2;
+      const answered = u.commands.some((command) => command.kind === "CHOICE");
+      if ((listed || answered) && intent === "NONE" && u.adding !== true && !negationUnclear) {
+        reasons.push("QUOTE_BY_LIST");
+        return { kind: "QUOTE", studyIds, closeBy: "INTENT" };
       }
       reasons.push("STUDIES_WITHOUT_INTENT");
       return { kind: "SUMMARY", studyIds, askMore: true };

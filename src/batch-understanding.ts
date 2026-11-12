@@ -1,7 +1,7 @@
 import { mentionsKnownStudy } from "./catalog-search.js";
 import { normalizeStudyKey } from "./consensus.js";
 import {
-  cleanMention, extractStudyRequests, extractWithNotes, isGeneralQuestion, mergeInterpretation, optionsOf, parseSessionCommand, parseSessionReply, wantsQuoteNow,
+  cleanMention, extractStudyRequests, extractWithNotes, isAddingMore, isGeneralQuestion, isSectionHeading, mergeInterpretation, optionsOf, parseSessionCommand, parseSessionReply, wantsQuoteNow,
   type InterpretationNotes, type InterpretedStudyRequest, type ItemResult, type StudyInterpreter, type TextExtraction
 } from "./quote-session.js";
 import { asksForPrice, classifyText } from "./text-handler.js";
@@ -90,6 +90,8 @@ export interface BatchUnderstanding {
   // El comando de confirmar no iba al final (llegaron estudios después): no se aplica, para no cotizar lo que el paciente aún estaba agregando.
   confirmSuperseded: boolean;
   model: ModelUse;
+  // Algún mensaje sigue sumando estudios («agrega…», «y también…»): no se cotiza por iniciativa propia.
+  adding?: boolean;
 }
 
 export interface UnderstandInput {
@@ -282,7 +284,8 @@ function maskNegations(candidates: readonly Classified[], catalog: readonly Cata
       if (current.length > 0) clauses.push({ owner, index: index++, words: current, last: false });
       current = [];
     };
-    for (const raw of owner.fragment.text.match(/[^\s,;.:!?¿¡()]+|[,;.:!?¿¡()\n]/g) ?? []) {
+    // Una sigla con puntos («V.D.R.L», «H.I.V.») es UNA palabra: sus puntos no cierran cláusulas ni se pierden.
+    for (const raw of owner.fragment.text.match(/(?:[A-Za-z]\.)+[A-Za-z]?(?![A-Za-z])|[^\s,;.:!?¿¡()]+|[,;.:!?¿¡()\n]/g) ?? []) {
       const norm = normalizeStudyKey(raw);
       if (CLAUSE_WORDS.has(norm)) {
         pieces.push({ owner, text: ",", word: false, norm: "", masked: false });
@@ -526,6 +529,11 @@ export async function understandBatch(input: UnderstandInput): Promise<BatchUnde
           groups.push({ fragmentIds, kind: "TALK" });
           continue;
         }
+        // Un título de sección de la orden («SEROLOGIA») no es un estudio ni una duda.
+        if (extraction === undefined && isSectionHeading(group.scored.text)) {
+          groups.push({ fragmentIds, kind: "TALK" });
+          continue;
+        }
         // El catálogo no reconoce ningún estudio en este texto (el extractor puede incluso marcarlo «sin resolver», p. ej. «no quiero cotizar»): ¿es un posible estudio sin identificar, o conversación?
         if (looksLikeStudyMention(group.scored.text, catalog)) {
           const mention = cleanMention(group.scored.text) || "estudio";
@@ -749,6 +757,7 @@ export async function understandBatch(input: UnderstandInput): Promise<BatchUnde
     cancelled,
     sessionWasOpen: session.open,
     confirmSuperseded,
-    model
+    model,
+    adding: candidates.some((item) => isAddingMore(item.fragment.text))
   };
 }

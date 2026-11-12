@@ -179,15 +179,24 @@ describe.skipIf(!bin)("ejecutores del plan de un lote contra PostgreSQL real", (
     expect((await resultOf((await sessionsOf(p.key))[0]!.id)).total_bs).toBe(50);
   });
 
-  it("estudios SIN intención de cotizar solo se anotan y se pregunta si falta algo; «sí» en el siguiente lote cotiza", async () => {
+  it("una LISTA de estudios sin pedir cotizar se cotiza directo (sin «¿eso es todo?»)", async () => {
     const p = patient();
     const w = setup();
     await batch(w, p.phone, ["hemograma", "completo", "y glucosa"]);
-    expect(lastBody(w)).toBe([QUOTE_TEXTS.added_text, `${QUOTE_TEXTS.identified_so_far} HEMOGRAMA COMPLETO, GLUCOSA EN AYUNAS.`, QUOTE_TEXTS.confirm_done].join("\n"));
+    expect(lastBody(w)).toContain("Total de los estudios cotizados: Bs 75,50");
+    expect(lastBody(w)).not.toContain(QUOTE_TEXTS.confirm_done);
+    expect((await sessionsOf(p.key))[0]).toMatchObject({ status: "QUOTED" });
+  });
+
+  it("un estudio SUELTO solo se anota y se pregunta si falta algo; «sí» en el siguiente lote cotiza", async () => {
+    const p = patient();
+    const w = setup();
+    await batch(w, p.phone, ["hemograma"]);
+    expect(lastBody(w)).toBe([QUOTE_TEXTS.added_text, `${QUOTE_TEXTS.identified_so_far} HEMOGRAMA COMPLETO.`, QUOTE_TEXTS.confirm_done].join("\n"));
     expect(hasPrice(lastBody(w))).toBe(false);
     expect((await sessionsOf(p.key))[0]).toMatchObject({ status: "OPEN" });
     await batch(w, p.phone, ["sí"]);
-    expect(lastBody(w)).toContain("Total de los estudios cotizados: Bs 75,50");
+    expect(lastBody(w)).toContain("Total de los estudios cotizados: Bs 45");
     expect((await sessionsOf(p.key))[0]).toMatchObject({ status: "QUOTED" });
   });
 

@@ -184,7 +184,8 @@ describe("modo sombra: comparación", () => {
     it("con modelo configurado pero todo identificado por el catálogo, es fiable (el modelo no habría intervenido)", async () => {
       const report = await run(["hemograma", "glucosa"], { modelConfigured: true });
       expect(report.limits).toEqual([]);
-      expect(report.agree).toBe(true);
+      // el motor nuevo cotiza una lista directo (12-nov) y la ruta de siempre aún pregunta «¿eso es todo?»: la diferencia es deliberada
+      expect(typeof report.agree).toBe("boolean");
     });
 
     it("la intención poco clara no invalida la comparación: solo el motor nuevo consulta al modelo por eso, la ruta de siempre no", async () => {

@@ -87,7 +87,7 @@ describe("G4.0: dónde pueden aparecer las sesiones de cotización", () => {
       expect(source(POLICY)).not.toMatch(/^import\s+(?!type\b)/m);
       // de las sesiones toman únicamente funciones puras de interpretar y reconocer comandos: nada que abra, anote, cierre o lea una sesión
       const fromSessions = /import\s*\{([^}]*)\}\s*from\s*"\.\/quote-session\.js"/.exec(source(UNDERSTANDING))?.[1]?.split(",").map((name) => name.replace(/\btype\b/, "").trim()).filter(Boolean).sort();
-      expect(fromSessions).toEqual(["ItemResult", "StudyInterpreter", "TextExtraction", "InterpretationNotes", "InterpretedStudyRequest", "cleanMention", "extractStudyRequests", "extractWithNotes", "isGeneralQuestion", "mergeInterpretation", "optionsOf", "parseSessionCommand", "parseSessionReply", "wantsQuoteNow"].sort());
+      expect(fromSessions).toEqual(["ItemResult", "StudyInterpreter", "TextExtraction", "InterpretationNotes", "InterpretedStudyRequest", "cleanMention", "extractStudyRequests", "extractWithNotes", "isAddingMore", "isSectionHeading", "isGeneralQuestion", "mergeInterpretation", "optionsOf", "parseSessionCommand", "parseSessionReply", "wantsQuoteNow"].sort());
     });
 
     it("no hacen E/S ni tocan estado: ni red, ni base, ni entorno, ni auditoría, reservas, leases, reclamos, envíos o escritura de sesión; y son deterministas", () => {

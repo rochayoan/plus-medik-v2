@@ -178,3 +178,21 @@ describe("sin método especificado se asume el más rápido (ECLIA, luego CLIA) 
     expect(preferredByMethod([study(71, "X (ECLIA)", [], 1), study(72, "Y (CLIA)", [], 1)])).toMatchObject({ name: "X (ECLIA)" });
   });
 });
+
+describe("lista que llega como mensajes separados (motor de lotes, producción)", () => {
+  it("una sigla con puntos y un título de sección suelto no se pierden ni se reportan como «no está en el catálogo»", async () => {
+    const { understandBatch, EMPTY_SESSION } = await import("../src/batch-understanding.js");
+    const { decideBatch } = await import("../src/batch-policy.js");
+    const fragments = ["SEROLOGIA", "* V.D.R.L", "* Hemograma Completo", "QUIMICA SANGUINEA", "* Glicemia (Basal)"].map((text, index) => ({ id: `f${index}`, text }));
+    const understanding = await understandBatch({ fragments, catalog: C, session: EMPTY_SESSION, modelUse: "never" });
+    expect(understanding.studies.notFound).toEqual([]);
+    expect(understanding.studies.matchedIds.map(name).sort()).toEqual(["GLUCOSA", "HEMOGRAMA COMPLETO AUTOMATIZADO", "TEST VDRL ( Semi Cuantitativo)"]);
+    // una lista de varios estudios sin dudas se cotiza directo
+    const plan = decideBatch({ understanding });
+    expect(plan.core.kind, JSON.stringify([plan.core, understanding.request])).toBe("QUOTE");
+  });
+  it("un título de sección que también es un estudio («urianálisis») no se descarta", () => {
+    const withUrinalysis = extractStudyRequests("urianalisis", C, { fuzzy: true });
+    expect(withUrinalysis?.matched.map((s) => s.name) ?? []).toEqual(["EXAMEN GENERAL DE ORINA COMPLETA"]);
+  });
+});

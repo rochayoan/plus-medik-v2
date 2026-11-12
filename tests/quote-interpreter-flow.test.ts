@@ -130,7 +130,8 @@ describe("cotización por texto con el intérprete", () => {
     expect(quote.totalBs).toBe(GLUCOSA.priceBs + HEMOGRAMA.priceBs);
     expect(reply).toContain("GLUCOSA");
     expect(reply).toContain("HEMOGRAMA COMPLETO AUTOMATIZADO");
-    expect(reply).toContain(`Interpreté «glucoza» como ${GLUCOSA.name}.`);
+    expect(reply).not.toContain("Interpreté");
+    expect(reply).toContain(GLUCOSA.name);
     // «bh» ya lo había identificado el resolvedor exacto: no se presenta como interpretación ni como repetido.
     expect(reply).not.toContain("«bh»");
     expect(reply).not.toContain("repetiste");
@@ -191,7 +192,8 @@ describe("cotización por texto con el intérprete", () => {
   it("acumula en varios mensajes: anota lo interpretado y cotiza al decir listo", async () => {
     const w = world({ interpret: searchingModel(["glucoza"]) });
     const ack = await w.say("glucoza");
-    expect(ack).toContain(`Interpreté «glucoza» como ${GLUCOSA.name}.`);
+    expect(ack).not.toContain("Interpreté");
+    expect(ack).toContain(GLUCOSA.name);
     expect(ack).toContain(QUOTE_TEXTS.confirm_done);
     expect(w.closes).toEqual([]);
     const reply = await w.say("listo");
@@ -218,7 +220,7 @@ describe("cotización por texto con el intérprete", () => {
     const reply = await w.say("cotiza tsh");
     expect(reply).toContain("TSH (ECLIA)");
     expect(reply).not.toContain("NEONATAL");
-    expect(reply).toContain("Interpreté «tsh» como TSH (ECLIA).");
+    expect(reply).not.toContain("Interpreté");
     expect(quotedLines(w.closes)!.lines.map((line) => line.studyId)).toEqual([TSH_ECLIA.id]);
     const neonatal = world({ noInterpreter: true });
     await neonatal.say("cotiza tsh neonatal");
@@ -238,7 +240,8 @@ describe("cotización por texto con el intérprete", () => {
     const reply = await w.say("cotiza glucoza");
     expect(w.client.run).not.toHaveBeenCalled();
     expect(reply).toContain("GLUCOSA");
-    expect(reply).toContain(`Interpreté «glucoza» como ${GLUCOSA.name}.`);
+    // Lo interpretado ya no se repite al paciente (12-nov): la cotización muestra el nombre, el precio, las indicaciones y el tiempo de entrega.
+    expect(reply).not.toContain("Interpreté");
     expect(quotedLines(w.closes)!.totalBs).toBe(GLUCOSA.priceBs);
   });
 
@@ -280,9 +283,9 @@ describe("lista real con dudas: se pregunta con opciones y se puede elegir más 
   it("anota lo claro, pregunta solo la hepatitis con opciones numeradas, acepta «1 y 2» y cotiza todo", async () => {
     const w = world({ catalog, noInterpreter: true });
     const ask = await w.say("HEMATOLOGIA\n* Hemograma Completo\nQUIMICA SANGUINEA\n* Glicemia (Basal)\nSEROLOGIA\n* V.D.R.L\n* Hepatitis B Ag.De Sup (P. Rápida)");
-    expect(ask).toContain("Estudios anotados:");
-    expect(ask).toContain("GLUCOSA");
-    expect(ask).toContain("TEST VDRL");
+    // directo a la pregunta, sin repetir lo ya identificado (se verá en la cotización)
+    expect(ask).not.toContain("Estudios anotados");
+    expect(ask).not.toContain("Interpreté");
     expect(ask).toContain(QUOTE_TEXTS.ask_option_intro);
     expect(ask).toContain("1. HEPATITIS B ANTIGENO");
     expect(ask).toContain("2. HEPATITIS B ANTICUERPO");
@@ -363,7 +366,7 @@ describe("feedback del piloto (31/10/2026)", () => {
     const reply = await w.say("Hemogtana y tomografía");
     expect(w.client.run).toHaveBeenCalledTimes(1);
     expect(reply).toContain("Estudios anotados: HEMOGRAMA COMPLETO AUTOMATIZADO.");
-    expect(reply).toContain("Interpreté «Hemogtana» como HEMOGRAMA COMPLETO AUTOMATIZADO.");
+    expect(reply).not.toContain("Interpreté");
     expect(reply).toContain("No encontré en nuestro catálogo: «tomografía».");
   });
 
@@ -400,7 +403,7 @@ describe("feedback del piloto (31/10/2026)", () => {
     expect(lines[2]).toMatch(/^💰 \*Total de los estudios cotizados: Bs 30\*$/);
     expect(reply).not.toMatch(/\n\n\n/);
     expect(reply).toContain("• Ayuno: 8 horas.");
-    expect(reply).toContain("Interpreté «glucoza» como GLUCOSA.");
+    expect(reply).not.toContain("Interpreté");
     expect(reply).toContain("No encontré en nuestro catálogo: «tomografia».");
     expect(lines.at(-1)).toBe("Respóndenos por este chat para continuar. 😊");
     // Más corta que la versión con espacios de antes.
@@ -410,6 +413,6 @@ describe("feedback del piloto (31/10/2026)", () => {
   it("sin datos aprobados la cotización compacta trae solo estudios, total y pie", async () => {
     const w = world({ interpret: correcting({ glucoza: "glucosa" }, true), approved: {} });
     const reply = await w.say("cotiza glucoza");
-    expect(reply.split("\n").filter((line) => line !== "")).toEqual(["🩺 *PlusMedik* · Cotización", "🍬 GLUCOSA — Bs 30", "💰 *Total de los estudios cotizados: Bs 30*", "Interpreté «glucoza» como GLUCOSA.", "Respóndenos por este chat para continuar. 😊"]);
+    expect(reply.split("\n").filter((line) => line !== "")).toEqual(["🩺 *PlusMedik* · Cotización", "🍬 GLUCOSA — Bs 30", "💰 *Total de los estudios cotizados: Bs 30*", "Respóndenos por este chat para continuar. 😊"]);
   });
 });
