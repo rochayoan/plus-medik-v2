@@ -209,7 +209,8 @@ describe.skipIf(!bin)("audios (transcripción dentro del flujo del mensaje) de e
   const sessionsOf = async (key: string): Promise<Array<Record<string, any>>> => JSON.parse(await db.ok(`select coalesce(json_agg(s order by s.created_at, s.id), '[]') from public.plusmedik_quote_sessions s where contact_key = '${key}'`));
   const itemStatuses = async (key: string): Promise<string[]> => JSON.parse(await db.ok(`select coalesce(json_agg(status order by seq), '[]') from public.plusmedik_quote_items where contact_key = '${key}'`));
   const openRuns = async (key: string): Promise<number> => Number(await db.ok(`select count(*) from public.plusmedik_audit_runs where contact_key = '${key}' and processing_status in ('PROCESSING','ANALYZED')`));
-  const hasPrice = (body: string) => /Bs\s?\d/.test(body);
+  // Un precio de COTIZACIÓN: el que muestran las opciones numeradas («1. TSH — Bs 90») sirve para elegir y no es una cotización.
+  const hasPrice = (body: string) => /Bs\s?\d/.test(body.replace(/^\d+\. .+ — Bs \d+(?:,\d+)?$/gm, ""));
   const callsTo = (w: World, name: string) => w.network.calls.filter((call) => call === name).length;
   const until = (condition: () => void) => vi.waitFor(condition, { timeout: 30_000, interval: 20 });
 

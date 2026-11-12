@@ -130,7 +130,8 @@ describe("foto en modo sesión", () => {
     expect(w.audit.quoteFinish).toHaveBeenCalledWith("run-1", LEASE, expect.objectContaining({ status: "RESOLVED", studyIds: [uuid(1)] }));
     expect(w.sends).toHaveLength(1);
     expect(w.sends[0]).toContain("HEMOGRAMA COMPLETO");
-    expect(w.sends[0]).not.toMatch(/Bs\s?\d/);
+    // sin cotización (las opciones muestran el precio de cada una para elegir, pero no hay total)
+    expect(w.sends[0]).not.toContain("Total de los estudios cotizados");
     expect(w.audit.reserveSend).toHaveBeenCalledWith("run-1", "conversation", LEASE, { stale: "NEWER_TURN" });
   });
 
@@ -358,9 +359,10 @@ describe("G5.9 · texto en modo sesión: cotizar sin «listo», acumular y pregu
     await processTurns([text("cotiza hemograma y creatinina")], w.deps);
     expect(audit.quoteClose).not.toHaveBeenCalled();
     expect(w.sends[0]).not.toContain("Estudios anotados");
-    expect(w.sends[0]).toContain("1. CREATININA SERICA\n2. CREATININA EN ORINA");
+    expect(w.sends[0]).toMatch(/1\. CREATININA SERICA( — Bs [\d,]+)?\n2\. CREATININA EN ORINA/);
     expect(w.sends[0]).toContain(QUOTE_TEXTS.ask_option_outro);
-    expect(w.sends[0]).not.toMatch(/Bs\s?\d/);
+    // sin cotización (las opciones muestran el precio de cada una para elegir, pero no hay total)
+    expect(w.sends[0]).not.toContain("Total de los estudios cotizados");
   });
 
   it("lo que no se pudo identificar se pregunta (nombre exacto o foto), no se cotiza a medias y no se promete a nadie", async () => {
@@ -399,7 +401,7 @@ describe("G5.9 · texto en modo sesión: cotizar sin «listo», acumular y pregu
     const w = start(audit);
     await processTurns([text("sí")], w.deps);
     expect(audit.quoteClose).not.toHaveBeenCalled();
-    expect(w.sends[0]).toContain("1. CREATININA SERICA\n2. CREATININA EN ORINA");
+    expect(w.sends[0]).toMatch(/1\. CREATININA SERICA( — Bs [\d,]+)?\n2\. CREATININA EN ORINA/);
     expect(audit.reserveSend).toHaveBeenCalledWith("run-1", "conversation", LEASE, { stale: "NEWER_TURN" });
   });
 

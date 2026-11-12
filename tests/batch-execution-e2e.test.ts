@@ -135,7 +135,8 @@ describe.skipIf(!bin)("ejecutores del plan de un lote contra PostgreSQL real", (
   const itemStatuses = async (key: string): Promise<string[]> => JSON.parse(await db.ok(`select coalesce(json_agg(status order by seq), '[]') from public.plusmedik_quote_items where contact_key = '${key}'`));
   const resultOf = async (sessionId: string): Promise<Record<string, any>> => JSON.parse(await db.ok(`select to_json(r) from public.plusmedik_quote_results r where session_id = '${sessionId}'`));
   const runOf = async (message: string): Promise<Record<string, any>> => JSON.parse(await db.ok(`select to_json(r) from public.plusmedik_audit_runs r where kapso_message_id = '${message}'`));
-  const hasPrice = (body: string) => /Bs\s?\d/.test(body);
+  // Un precio de COTIZACIÓN: el que muestran las opciones numeradas («1. TSH — Bs 90») sirve para elegir y no es una cotización.
+  const hasPrice = (body: string) => /Bs\s?\d/.test(body.replace(/^\d+\. .+ — Bs \d+(?:,\d+)?$/gm, ""));
 
   // ───────────────────────────── cotización directa ─────────────────────────────
 

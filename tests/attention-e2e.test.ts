@@ -175,7 +175,7 @@ describe.skipIf(!bin)("atención selectiva de extremo a extremo contra PostgreSQ
     const w = setup();
     const p = patient();
     await say(w, p.phone, "hemograma y creatinina");
-    expect(last(w)).toContain("1. CREATININA SERICA\n2. CREATININA EN ORINA");
+    expect(last(w)).toMatch(/1\. CREATININA SERICA( — Bs [\d,]+)?\n2\. CREATININA EN ORINA/);
     await say(w, p.phone, "el segundo");
     expect(last(w)).toContain("Estudios anotados: HEMOGRAMA COMPLETO, CREATININA EN ORINA.");
     await say(w, p.phone, "¿cuánto sería todo?");

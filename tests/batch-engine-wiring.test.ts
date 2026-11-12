@@ -163,7 +163,8 @@ describe.skipIf(!bin)("motor global de lotes conectado a los turnos (apagado, so
     JSON.parse(await db.ok(`select coalesce(json_agg(x order by x.seq), '[]') from (select t.seq, r.kapso_message_id, r.send_state, r.send_kind, r.reply_kind, r.processing_status, r.error_code, r.send_block_reason from public.plusmedik_audit_runs r join public.plusmedik_turns t on t.run_id = r.id where r.contact_key = '${key}') x`));
   const sessionsOf = async (key: string): Promise<Array<Record<string, any>>> => JSON.parse(await db.ok(`select coalesce(json_agg(s order by s.created_at, s.id), '[]') from public.plusmedik_quote_sessions s where contact_key = '${key}'`));
   const itemStatuses = async (key: string): Promise<string[]> => JSON.parse(await db.ok(`select coalesce(json_agg(status order by seq), '[]') from public.plusmedik_quote_items where contact_key = '${key}'`));
-  const hasPrice = (body: string) => /Bs\s?\d/.test(body);
+  // Un precio de COTIZACIÓN: el que muestran las opciones numeradas («1. TSH — Bs 90») sirve para elegir y no es una cotización.
+  const hasPrice = (body: string) => /Bs\s?\d/.test(body.replace(/^\d+\. .+ — Bs \d+(?:,\d+)?$/gm, ""));
   // Ninguna corrida del contacto queda «en proceso» (todas terminaron: con envío, sin respuesta o dadas por atendidas).
   const openRuns = async (key: string): Promise<number> => Number(await db.ok(`select count(*) from public.plusmedik_audit_runs where contact_key = '${key}' and processing_status in ('PROCESSING','ANALYZED')`));
   const countsOf = (w: World): Record<string, number> => {

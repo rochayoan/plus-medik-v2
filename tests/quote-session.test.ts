@@ -357,12 +357,14 @@ describe("G5.9 · aclaraciones y estado de la sesión", () => {
   it("el resumen reúne lo anotado (sin repetidos) y las dudas, y las opciones salen solo de estudios ACTIVOS del catálogo", () => {
     const items = [item(1, { studyIds: [uuid(1), uuid(2)] }), amb(2, [[7, 8], [9, 10]], [2, 3]), item(3, { kind: "IMAGE", status: "UNCERTAIN", studyIds: [uuid(1)], reasons: ["ENGINE_PARTIAL"] }), item(4, { status: "DUPLICATE", kind: "IMAGE" })];
     expect(summarizeSession(items)).toEqual({ studyIds: [uuid(1), uuid(2), uuid(3)], pendingGroups: [[uuid(7), uuid(8)], [uuid(9), uuid(10)]], unresolved: 0, uncertain: true, unreadable: 0 });
-    expect(optionsOf([uuid(7), uuid(8), uuid(10), uuid(99)], CATALOG)).toEqual([{ id: uuid(7), name: "CREATININA SERICA" }, { id: uuid(8), name: "CREATININA EN ORINA" }]);
+    expect(optionsOf([uuid(7), uuid(8), uuid(10), uuid(99)], CATALOG)).toMatchObject([{ id: uuid(7), name: "CREATININA SERICA" }, { id: uuid(8), name: "CREATININA EN ORINA" }]);
+    // lo que ve el paciente lleva el precio vigente del catálogo
+    expect(optionsOf([uuid(7), uuid(8)], CATALOG).map((option) => option.label)).toEqual(["CREATININA SERICA — Bs 70", "CREATININA EN ORINA — Bs 80"]);
   });
 
   it("con una duda de opciones va directo a la pregunta (sin repetir lo anotado); las opciones salen numeradas del catálogo, sin repetir lo que escribió el paciente", () => {
     const options = formatTextReply({ texts: QUOTE_TEXTS, head: QUOTE_TEXTS.added_text, names: ["HEMOGRAMA COMPLETO"], options: ["CREATININA SERICA", "CREATININA EN ORINA"], doubt: "OPTIONS", repeated: 0 });
-    expect(options).toBe([QUOTE_TEXTS.ask_option_intro, "1. CREATININA SERICA", "2. CREATININA EN ORINA", QUOTE_TEXTS.ask_option_outro].join("\n"));
+    expect(options).toBe([QUOTE_TEXTS.ask_option_intro, "1. CREATININA SERICA", "2. CREATININA EN ORINA", QUOTE_TEXTS.ask_option_outro].join("\n")); // (el texto recibe los nombres ya con su precio desde optionsOf().label)
     expect(formatTextReply({ texts: QUOTE_TEXTS, names: ["TSH"], options: [], doubt: "NONE", repeated: 2 })).toBe(["Estudios anotados: TSH.", QUOTE_TEXTS.repeated_note, QUOTE_TEXTS.confirm_done].join("\n"));
     expect(formatTextReply({ texts: QUOTE_TEXTS, names: [], options: [], doubt: "UNRESOLVED", repeated: 0 })).toBe(QUOTE_TEXTS.ask_unresolved);
     for (const body of [options, QUOTE_TEXTS.confirm_done, QUOTE_TEXTS.ask_unresolved]) expect(body).not.toMatch(/Bs\s?\d|persona|equipo|asesor/i);

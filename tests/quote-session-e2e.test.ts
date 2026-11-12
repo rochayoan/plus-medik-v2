@@ -137,7 +137,8 @@ describe.skipIf(!bin)("sesiones de cotización de extremo a extremo contra Postg
   const last = (w: World) => w.sends.at(-1)!.body;
   const run = async (message: string): Promise<Record<string, any>> => JSON.parse(await db.ok(`select to_json(r) from public.plusmedik_audit_runs r where kapso_message_id = '${message}'`));
   const sessionsOf = async (key: string): Promise<Array<Record<string, any>>> => JSON.parse(await db.ok(`select coalesce(json_agg(s order by s.created_at, s.id), '[]') from public.plusmedik_quote_sessions s where contact_key = '${key}'`));
-  const hasPrice = (body: string) => /Bs\s?\d/.test(body);
+  // Un precio de COTIZACIÓN: el que muestran las opciones numeradas («1. TSH — Bs 90») sirve para elegir y no es una cotización.
+  const hasPrice = (body: string) => /Bs\s?\d/.test(body.replace(/^\d+\. .+ — Bs \d+(?:,\d+)?$/gm, ""));
 
   it("APAGADAS (sin sesiones): una foto se cotiza al instante, como siempre, y no se toca ninguna tabla de sesiones", async () => {
     const p = patient();
@@ -201,7 +202,7 @@ describe.skipIf(!bin)("sesiones de cotización de extremo a extremo contra Postg
     const w = setup();
     await say(w, p.phone, "hemograma y creatinina");
     expect(last(w)).toContain(QUOTE_TEXTS.ask_option_intro);
-    expect(last(w)).toContain("1. CREATININA SERICA");
+    expect(last(w)).toMatch(/1\. CREATININA SERICA/);
     await say(w, p.phone, "listo");
     expect(last(w)).toBe(QUOTE_TEXTS.review);
     expect(hasPrice(last(w))).toBe(false);
@@ -449,7 +450,7 @@ describe.skipIf(!bin)("sesiones de cotización de extremo a extremo contra Postg
       await say(w, p.phone, "quiero cotizar hemograma y creatinina");
       expect(hasPrice(last(w))).toBe(false);
       expect(last(w)).not.toContain("Estudios anotados");
-      expect(last(w)).toContain("1. CREATININA SERICA\n2. CREATININA EN ORINA");
+      expect(last(w)).toMatch(/1\. CREATININA SERICA( — Bs [\d,]+)?\n2\. CREATININA EN ORINA/);
       await say(w, p.phone, "2");
       expect(last(w)).toContain("Estudios anotados: HEMOGRAMA COMPLETO, CREATININA EN ORINA.");
       expect(last(w)).toContain(QUOTE_TEXTS.confirm_done);
@@ -483,7 +484,7 @@ describe.skipIf(!bin)("sesiones de cotización de extremo a extremo contra Postg
       const w = setup();
       await say(w, p.phone, "hemograma y creatinina");
       await say(w, p.phone, "sí");
-      expect(last(w)).toContain("1. CREATININA SERICA\n2. CREATININA EN ORINA");
+      expect(last(w)).toMatch(/1\. CREATININA SERICA( — Bs [\d,]+)?\n2\. CREATININA EN ORINA/);
       await say(w, p.phone, "¿cuánto cuesta todo?");
       expect(hasPrice(last(w))).toBe(false);
       expect(last(w)).toContain(QUOTE_TEXTS.ask_option_outro);

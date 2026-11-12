@@ -224,3 +224,59 @@ describe("palabras sueltas y frases corrientes dentro de una conversación (moto
     expect(p.notices).toContainEqual({ kind: "STUDIES_NOT_IN_CATALOG", mentions: ["tiroides"] });
   });
 });
+
+describe("temas en lugar de nombres («tiroides», «hígado»): el agente ofrece los estudios del catálogo con su precio", () => {
+  const TSH_E = study(81, "TSH (ECLIA)", ["tsh"], 90);
+  const TSH_F = study(82, "TSH (FIA Fluorescencia)", ["tsh"], 100);
+  const T4 = study(83, "T4 LIBRE (ECLIA)", [], 90);
+  const T3 = study(84, "T3 LIBRE (ECLIA)", [], 150);
+  const HEMO = study(85, "HEMOGRAMA COMPLETO AUTOMATIZADO", ["hemograma completo", "hemograma"], 45);
+  const FERR = study(86, "FERRITINA (CLIA)", ["ferritina"], 130);
+  const FERR_P = study(87, "PERFIL FERROCINETICO (HIERRO, FERRITINA, TRANSFERRINA)", ["ferritina"], 350);
+  const HIERRO = study(88, "HIERRO SERICO", [], 60);
+  const GLU = study(89, "GLUCOSA", ["glucosa"], 30);
+  const T = [TSH_E, TSH_F, T4, T3, HEMO, FERR, FERR_P, HIERRO, GLU];
+  const names = (ids: readonly string[]) => ids.map((id) => T.find((s) => s.id === id)!.name);
+
+  it("«tiroides» no es un estudio: se ofrecen TSH, T4 libre y T3 libre del catálogo (sin elegir uno por su método)", () => {
+    const result = extractStudyRequests("Tiroides", T, { fuzzy: true })!;
+    expect(result.matched).toEqual([]);
+    expect(result.result.ambiguous).toHaveLength(1);
+    expect(names(result.result.ambiguous[0]!).sort()).toEqual(["T3 LIBRE (ECLIA)", "T4 LIBRE (ECLIA)", "TSH (ECLIA)"]);
+  });
+  it("lo mismo dentro de una frase corta: «necesito algo de la tiroides» y «los de la tiroides»", () => {
+    for (const text of ["necesito algo de la tiroides", "los de la tiroides"]) expect(extractStudyRequests(text, T, { fuzzy: true })!.result.ambiguous).toHaveLength(1);
+  });
+  it("anemia ofrece hemograma, ferritina y hierro: tres estudios distintos que NO se reducen a uno por su método (CLIA)", () => {
+    const result = extractStudyRequests("anemia", T, { fuzzy: true })!;
+    expect(result.matched).toEqual([]);
+    expect(names(result.result.ambiguous[0]!).sort()).toEqual(["FERRITINA (CLIA)", "HEMOGRAMA COMPLETO AUTOMATIZADO", "HIERRO SERICO"]);
+  });
+  it("si el catálogo solo tiene UN estudio del tema se anota ese; si no tiene ninguno, se dice que no está", () => {
+    const only = extractStudyRequests("azucar", [GLU], { fuzzy: true })!;
+    expect(only.matched.map((s) => s.name)).toEqual(["GLUCOSA"]);
+    const none = extractWithNotes("tiroides", [HEMO], { fuzzy: true });
+    expect(none.extraction).toBeUndefined();
+    expect(none.notes.notFound).toEqual(["tiroides"]);
+  });
+  it("el paciente elige con números, con «y» o con «todos»; las opciones muestran el precio vigente", async () => {
+    expect(parseSessionReply("todos")).toEqual({ kind: "CHOICE", index: 1, all: true });
+    expect(parseSessionReply("ambos por favor")).toEqual({ kind: "CHOICE", index: 1, all: true });
+    expect(parseSessionReply("quiero todos")).toEqual({ kind: "CHOICE", index: 1, all: true });
+    const { optionsOf } = await import("../src/quote-session.js");
+    expect(optionsOf([TSH_E.id, T4.id], T).map((option) => option.label)).toEqual(["TSH (ECLIA) — Bs 90", "T4 LIBRE (ECLIA) — Bs 90"]);
+  });
+  it("de punta a punta: «tiroides» pregunta con las opciones; «todos» las cotiza", async () => {
+    const { understandBatch, EMPTY_SESSION } = await import("../src/batch-understanding.js");
+    const { decideBatch } = await import("../src/batch-policy.js");
+    const first = await understandBatch({ fragments: [{ id: "a", text: "Tiroides" }], catalog: T, session: EMPTY_SESSION, modelUse: "never" });
+    const ask = decideBatch({ understanding: first });
+    expect(ask.core.kind).toBe("CLARIFY");
+    const group = first.studies.ambiguous[0]!.candidateIds;
+    expect(group).toHaveLength(3);
+    const all = await understandBatch({ fragments: [{ id: "b", text: "todos" }], catalog: T, session: { ...EMPTY_SESSION, open: true, pendingGroups: [group] }, modelUse: "never" });
+    const quote = decideBatch({ understanding: all });
+    expect(quote.core.kind).toBe("QUOTE");
+    expect(names((quote.core as { studyIds: string[] }).studyIds).sort()).toEqual(["T3 LIBRE (ECLIA)", "T4 LIBRE (ECLIA)", "TSH (ECLIA)"]);
+  });
+});

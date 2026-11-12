@@ -200,7 +200,7 @@ type CloseCommand = "FINALIZE" | "CANCEL" | "AUTO";
 function describeSession(items: readonly SessionItem[], catalog: readonly CatalogStudy[]): { names: string[]; options: string[]; doubt: TextDoubt } {
   const summary = summarizeSession(items);
   const first = summary.pendingGroups[0];
-  const options = first ? optionsOf(first, catalog).map((option) => option.name) : [];
+  const options = first ? optionsOf(first, catalog).map((option) => option.label) : [];
   const doubt: TextDoubt =
     summary.pendingGroups.length > 0 ? (options.length >= 2 ? "OPTIONS" : "UNRESOLVED")
     : summary.unresolved > 0 || summary.uncertain ? "UNRESOLVED"
@@ -387,7 +387,7 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
     if (!group) return handOver(ctx);
     const catalog = await catalogForText();
     const options = optionsOf(group, catalog);
-    const wanted = reply.indexes ?? [reply.index];
+    const wanted = reply.all ? options.map((_option, position) => position + 1) : (reply.indexes ?? [reply.index]);
     const chosen = options.length >= 2 ? wanted.map((index) => options[index - 1]) : [];
     if (chosen.length === 0 || chosen.some((option) => !option)) return ask(texts.choose_invalid, read.items.length);
     // Las opciones elegidas (una o varias) entran a la sesión como estudios identificados con certeza; eso aclara el grupo ambiguo (la base aplica la misma regla al cerrar).

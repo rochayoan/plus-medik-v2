@@ -45,7 +45,7 @@ export const EMPTY_SESSION: SessionContext = { open: false, studyIds: [], pendin
 
 export type BatchCommand =
   | { fragmentId: string; kind: "FINALIZE" | "CANCEL" | "YES" | "NO" }
-  | { fragmentId: string; kind: "CHOICE"; index: number; indexes?: number[] };
+  | { fragmentId: string; kind: "CHOICE"; index: number; indexes?: number[]; all?: true };
 
 // QUOTE: pide cotizar o el precio. CONFIRM: confirma («listo», «sí»). CANCEL: cancela. MORE: dice que falta algo («no»). DECLINE: pide NO cotizar («no quiero cotizar»). NONE: no hay intención de cotizar.
 export type BatchIntent = "QUOTE" | "CONFIRM" | "CANCEL" | "MORE" | "DECLINE" | "NONE";
@@ -144,7 +144,7 @@ function classify(fragment: BatchFragment, order: number, input: UnderstandInput
   if (category === "MEDICAL") return { ...base, kind: "MEDICAL" };
   if (category === "HUMAN_REQUEST") return { ...base, kind: "HUMAN" };
   const reply = parseSessionReply(text);
-  if (reply) return { ...base, kind: "COMMAND", command: reply.kind === "CHOICE" ? { fragmentId: fragment.id, kind: "CHOICE", index: reply.index, ...(reply.indexes ? { indexes: reply.indexes } : {}) } : { fragmentId: fragment.id, kind: reply.kind } };
+  if (reply) return { ...base, kind: "COMMAND", command: reply.kind === "CHOICE" ? { fragmentId: fragment.id, kind: "CHOICE", index: reply.index, ...(reply.indexes ? { indexes: reply.indexes } : {}), ...(reply.all ? { all: true as const } : {}) } : { fragmentId: fragment.id, kind: reply.kind } };
   if (category === "INFO_REQUEST" || input.isInfoQuestion?.(text) || isGeneralQuestion(text)) return { ...base, kind: "QUESTION" };
   if (category === "GREETING") return { ...base, kind: "GREETING" };
   if (input.isSocial?.(text)) return { ...base, kind: "SOCIAL" };
@@ -688,7 +688,7 @@ export async function understandBatch(input: UnderstandInput): Promise<BatchUnde
       continue;
     }
     const options = optionsOf(group, catalog);
-    const wanted = command.indexes ?? [command.index];
+    const wanted = command.all ? options.map((_option, position) => position + 1) : (command.indexes ?? [command.index]);
     const picks = options.length >= 2 ? wanted.map((index) => options[index - 1]) : [];
     if (picks.length === 0 || picks.some((pick) => !pick)) {
       invalidChoices++;

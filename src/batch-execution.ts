@@ -274,7 +274,7 @@ export function previewPlan(state: PreviewState, photos: readonly PhotoOutcome[]
 }
 
 function composeWith(plan: ReplyPlan, facts: Omit<Parameters<typeof composeReply>[1], "namesOf" | "optionsOf">, texts: Parameters<typeof composeReply>[2], catalog: readonly CatalogStudy[]): ComposedReply | undefined {
-  return composeReply(plan, { ...facts, namesOf: (ids) => namesOf(ids, catalog), optionsOf: (ids) => optionsOf(ids, catalog).map((option) => option.name) }, texts);
+  return composeReply(plan, { ...facts, namesOf: (ids) => namesOf(ids, catalog), optionsOf: (ids) => optionsOf(ids, catalog).map((option) => option.label) }, texts);
 }
 
 // ───────────────────────────── sesión ─────────────────────────────

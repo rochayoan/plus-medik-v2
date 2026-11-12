@@ -1,7 +1,8 @@
 import { ExactAliasCatalogResolver } from "./catalog.js";
 import { searchCatalog, type SearchHit } from "./catalog-search.js";
 import { normalizeStudyKey } from "./consensus.js";
-import { formatQuoteMessage, QUOTE_FOOTER } from "./whatsapp-quote.js";
+import { formatBs, formatQuoteMessage, QUOTE_FOOTER } from "./whatsapp-quote.js";
+import { topicOf } from "./study-topics.js";
 import { buildPublicQuote } from "./partial-auto.js";
 import { synonymsOf } from "./study-synonyms.js";
 import { asksForPrice, classifyText } from "./text-handler.js";
@@ -203,7 +204,7 @@ export interface TextExtraction {
 
 type Segment =
   | { kind: "MATCHED"; study: CatalogStudy; via?: string }
-  | { kind: "AMBIGUOUS"; candidates: CatalogStudy[]; label?: string }
+  | { kind: "AMBIGUOUS"; candidates: CatalogStudy[]; label?: string; topic?: true }
   | { kind: "UNMATCHED" }
   | { kind: "EMPTY" }
   | { kind: "NOTFOUND"; mention: string };
@@ -321,6 +322,19 @@ export function extractWithNotes(text: string, catalog: readonly CatalogStudy[],
     const core = stripped.length > 0 ? stripped[stripped.length - 1]! : normalizeStudyKey(segment);
     // Si no hubo relleno que quitar se muestra tal como lo escribió el paciente; si lo hubo, solo el nombre.
     const mention = cleanMention(core.split(" ").length === normalizeStudyKey(segment).split(" ").filter(Boolean).length ? segment : core);
+    // El paciente nombra un TEMA («tiroides», «hígado», «anemia») y no un estudio: se OFRECEN los estudios relacionados que el catálogo sí tiene (con precio) para que elija cuáles necesita.
+    const topic = mode === "ANY" ? topicOf(core) : undefined;
+    if (topic) {
+      const offered = new Map<string, CatalogStudy>();
+      for (const phrase of topic.phrases) {
+        // Cada estudio del tema se busca con el mismo camino de siempre; solo cuenta si queda UN estudio claro (sin dudas) y activo en el catálogo.
+        const sub = extractWithNotes(phrase, catalog, { fuzzy: true }).extraction;
+        const only = sub && sub.matched.length === 1 && sub.result.ambiguous.length === 0 ? sub.matched[0] : undefined;
+        if (only) offered.set(only.id, only);
+      }
+      if (offered.size >= 2) return { kind: "AMBIGUOUS", candidates: [...offered.values()].slice(0, MAX_AMBIGUOUS), topic: true };
+      if (offered.size === 1) return { kind: "MATCHED", study: [...offered.values()][0]!, via: mention };
+    }
     // Una frase larga no es el nombre de un estudio: no se adivina nada ni se le dice al paciente que «no existe».
     const coreForms = variants(stripParens(collapseDots(segment))).filter((form) => form !== "");
     const words = (coreForms.length > 0 ? coreForms[coreForms.length - 1]! : core).split(" ").filter(Boolean).length;
@@ -429,7 +443,8 @@ export function extractWithNotes(text: string, catalog: readonly CatalogStudy[],
       else matchedById.set(segment.study.id, segment.study);
     } else if (segment.kind === "AMBIGUOUS") {
       // Sin método especificado se asume el más rápido (ECLIA, luego CLIA) si hay uno solo; se le dice al paciente cómo se interpretó.
-      const fast = fuzzy ? preferredByMethod(segment.candidates) : undefined;
+      // (Las ofertas por tema son estudios distintos entre sí: nunca se elige uno por su método.)
+      const fast = fuzzy && !segment.topic ? preferredByMethod(segment.candidates) : undefined;
       if (fast) {
         if (matchedById.has(fast.id)) repeated++;
         else matchedById.set(fast.id, fast);
@@ -651,16 +666,19 @@ export function summarizeSession(items: readonly SessionItem[]): SessionSummary 
 }
 
 // Las opciones que se le muestran al paciente para un grupo ambiguo: estudios ACTIVOS del catálogo, con su nombre. El número que responda indica la posición en esta lista.
-export function optionsOf(group: readonly string[], catalog: readonly CatalogStudy[]): Array<{ id: string; name: string }> {
+// `label` es lo que se le muestra al paciente: el nombre y el precio vigente del catálogo (para que pueda elegir sabiendo cuánto cuesta cada opción).
+export function optionsOf(group: readonly string[], catalog: readonly CatalogStudy[]): Array<{ id: string; name: string; label: string }> {
   const byId = new Map(catalog.filter((study) => study.active).map((study) => [study.id, study]));
   return group.flatMap((id) => {
     const study = byId.get(id);
-    return study ? [{ id: study.id, name: study.name }] : [];
+    if (!study) return [];
+    const priced = Number.isFinite(study.priceBs) && study.priceBs > 0;
+    return [{ id: study.id, name: study.name, label: priced ? `${study.name} — ${formatBs(study.priceBs)}` : study.name }];
   });
 }
 
 // Respuestas cortas a lo que el agente preguntó: «sí» (eso es todo), «no» (falta algo) o el número/ordinal de una opción. Solo significan algo con una sesión abierta; sin ella son mensajes cualquiera.
-export type SessionReply = { kind: "YES" } | { kind: "NO" } | { kind: "CHOICE"; index: number; indexes?: number[] };
+export type SessionReply = { kind: "YES" } | { kind: "NO" } | { kind: "CHOICE"; index: number; indexes?: number[]; all?: true };
 const YES_CORE = new Set(["si", "sii", "siii", "sip", "claro", "correcto", "exacto", "afirmativo", "adelante", "procede", "acuerdo", "seguro"]);
 // G6.1: ni «gracias» ni «ok»/«dale»/«vale» confirman nada: solo una confirmación EXPLÍCITA cierra («sí», «sí, esos estudios», «eso es todo», «listo»). Un agradecimiento o un acuse no son una orden.
 const YES_EXTRA = new Set(["que", "por", "favor", "eso", "es", "todo", "nada", "mas", "de", "esta", "bien", "asi", "cotiza", "cotizar", "cotizame", "cotizalo", "cotizalos", "ya", "listo", "esos", "estos", "esas", "estas", "estudio", "estudios", "son", "los", "las", "mismos", "correctos"]);
@@ -682,6 +700,8 @@ export function parseSessionReply(text: string): SessionReply | undefined {
     if (tokens.every((token) => YES_CORE.has(token) || YES_EXTRA.has(token)) && tokens.some((token) => YES_CORE.has(token))) return { kind: "YES" };
     if (tokens.every((token) => NO_CORE.has(token) || NO_EXTRA.has(token)) && tokens.some((token) => NO_CORE.has(token))) return { kind: "NO" };
   }
+  // «todos», «ambos», «los dos»: elige todas las opciones.
+  if (tokens.some((token) => ALL_WORDS.has(token)) && tokens.every((token) => ALL_WORDS.has(token) || CHOICE_FILLER.has(token) || token === "dos" || token === "tres")) return { kind: "CHOICE", index: 1, all: true };
   if (tokens.length > 5) return parseChattyChoice(tokens);
   let start = 0;
   while (start < tokens.length && CHOICE_LEAD.has(tokens[start]!)) start++;
@@ -697,6 +717,7 @@ export function parseSessionReply(text: string): SessionReply | undefined {
 // «estaría bien la 1», «mejor la 2», «me quedo con la 1 por favor», «la 1 está bien»: el número va rodeado de palabras de cortesía o de acuerdo, y nada más. Cualquier otra palabra (un estudio, una cantidad:
 // «quiero 2 hemogramas») deja de ser una elección.
 const CHOICE_FILLER = new Set(["estaria", "estarian", "esta", "bien", "ok", "okay", "mejor", "me", "quedo", "con", "dame", "deme", "quisiera", "quiero", "elijo", "escojo", "prefiero", "opcion", "opciones", "numero", "la", "las", "el", "lo", "los", "por", "favor", "porfa", "gracias", "seria", "sera", "es", "vale", "dale", "pues", "entonces", "creo", "que", "si", "va", "vamos", "seleccionar", "selecciono", "pongo", "pon", "ese", "esa", "esos", "esas", "de", "y", "e", "mas", "tambien"]);
+const ALL_WORDS = new Set(["todos", "todas", "ambos", "ambas"]);
 function parseChattyChoice(tokens: readonly string[]): SessionReply | undefined {
   const numbers = tokens.filter((token) => ORDINALS[token] !== undefined);
   const others = tokens.filter((token) => ORDINALS[token] === undefined);
@@ -763,8 +784,8 @@ export const QUOTE_TEXTS: QuoteTexts = {
   unreadable_image: "No pude leer esa imagen. Envíala de nuevo como foto, clara y completa.",
   identified_so_far: "Estudios anotados:",
   confirm_done: "¿Eso es todo? Responde SÍ y te paso la cotización, o envíame los estudios que falten.",
-  ask_option_intro: "Para uno de los estudios tengo varias opciones:",
-  ask_option_outro: "Responde con el número de la opción (si quieres más de una, escribe sus números separados por «y») o escribe el nombre exacto del estudio.",
+  ask_option_intro: "Tengo estas opciones:",
+  ask_option_outro: "Responde con el número de la opción (si quieres más de una, escribe sus números separados por «y», o «todos») o escribe el nombre exacto del estudio.",
   ask_unresolved: "No pude identificar con certeza algunos estudios. Escribe el nombre exacto de cada uno o envía una foto de tu receta. Si no los encuentras, escribe LISTO y dejaré tu solicitud en revisión.",
   choose_invalid: "No encontré esa opción. Responde con el número de la lista o escribe el nombre exacto del estudio.",
   not_done: "De acuerdo, sigo esperando. Envíame los estudios que faltan y después responde SÍ o escribe LISTO."
