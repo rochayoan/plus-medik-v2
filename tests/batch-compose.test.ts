@@ -44,7 +44,8 @@ describe("bloque principal", () => {
 
   it("CLARIFY de opciones: lista numerada del catálogo y cómo responder; solo lo necesario", () => {
     const reply = compose(plan({ kind: "CLARIFY", studyIds: [B], questions: [{ kind: "OPTIONS", candidateIds: G1, remainingGroups: 0, invalidChoice: false }] }))!;
-    expect(reply.body).toContain(QUOTE_TEXTS.ask_option_intro);
+    // con otros estudios ya anotados el paciente lo entiende: no se perdió nada
+    expect(reply.body).toContain(QUOTE_TEXTS.option_intro_others);
     expect(reply.body).toContain("1. CREATININA SERICA");
     expect(reply.body).toContain("2. CREATININA EN ORINA");
     expect(reply.body).toContain(QUOTE_TEXTS.ask_option_outro);
@@ -59,7 +60,7 @@ describe("bloque principal", () => {
     expect(name.body).not.toContain("xhq");
     const both = compose(plan({ kind: "CLARIFY", studyIds: [A], questions: [{ kind: "OPTIONS", candidateIds: G1, remainingGroups: 1, invalidChoice: false }, { kind: "NAME", mentions: ["xhq"] }] }))!;
     expect(both.body.match(new RegExp(QUOTE_TEXTS.ask_unresolved.slice(0, 20), "g"))).toHaveLength(1);
-    expect(both.body.match(new RegExp(QUOTE_TEXTS.ask_option_intro.slice(0, 20), "g"))).toHaveLength(1);
+    expect(both.body.match(new RegExp(QUOTE_TEXTS.option_intro_more.slice(0, 20), "g"))).toHaveLength(1);
   });
 
   it("una opción inválida abre la pregunta con el aviso «no encontré esa opción», no con el «anoté lo que escribiste»", () => {

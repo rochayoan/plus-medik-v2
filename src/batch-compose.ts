@@ -111,7 +111,7 @@ function renderQuestions(questions: readonly Question[], names: readonly string[
   const options = questions.find((question): question is Extract<Question, { kind: "OPTIONS" }> => question.kind === "OPTIONS");
   const needsName = questions.some((question) => question.kind === "NAME");
   const doubt: TextDoubt = options ? "OPTIONS" : "UNRESOLVED";
-  const body = formatTextReply({ texts: texts.quote, head: options?.invalidChoice ? texts.quote.choose_invalid : texts.quote.added_text, names, options: options ? facts.optionsOf(options.candidateIds) : [], doubt, repeated, ...(note ? { note } : {}) });
+  const body = formatTextReply({ texts: texts.quote, head: options?.invalidChoice ? texts.quote.choose_invalid : texts.quote.added_text, names, options: options ? facts.optionsOf(options.candidateIds) : [], doubt, repeated, remainingGroups: options?.remainingGroups ?? 0, ...(note ? { note } : {}) });
   // Con una duda de opciones Y algo sin identificar se preguntan las dos cosas, una vez cada una.
   return options && needsName ? `${body}\n${texts.quote.ask_unresolved}` : body;
 }

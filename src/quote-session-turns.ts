@@ -197,7 +197,7 @@ type Settled = Exclude<QuoteReadResult, { state: "pending" }>;
 type CloseCommand = "FINALIZE" | "CANCEL" | "AUTO";
 
 // El mismo catálogo que se usa para identificar estudios escritos, entregado como opciones numeradas, y lo que se anotó hasta ahora.
-function describeSession(items: readonly SessionItem[], catalog: readonly CatalogStudy[]): { names: string[]; options: string[]; doubt: TextDoubt } {
+function describeSession(items: readonly SessionItem[], catalog: readonly CatalogStudy[]): { names: string[]; options: string[]; doubt: TextDoubt; remaining: number } {
   const summary = summarizeSession(items);
   const first = summary.pendingGroups[0];
   const options = first ? optionsOf(first, catalog).map((option) => option.label) : [];
@@ -206,7 +206,7 @@ function describeSession(items: readonly SessionItem[], catalog: readonly Catalo
     : summary.unresolved > 0 || summary.uncertain ? "UNRESOLVED"
     : summary.unreadable > 0 ? "RESEND"
     : "NONE";
-  return { names: namesOf(summary.studyIds, catalog), options, doubt };
+  return { names: namesOf(summary.studyIds, catalog), options, doubt, remaining: Math.max(0, summary.pendingGroups.length - 1) };
 }
 
 export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: QuoteSessionsConfig, delegate: () => TurnProducer, texts: QuoteTexts = QUOTE_TEXTS, recentQuote?: (ctx: TurnContext) => Promise<boolean>): TurnProducer {
@@ -326,7 +326,7 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
     if (command === "AUTO" && evaluation.kind === "REVIEW" && !evaluation.reasons.some((reason) => reason === "STUDY_UNAVAILABLE" || reason === "PRICE_INVALID")) {
       const asked = describeSession(read.items, catalog);
       deps.log("quote_session", { event: "clarify", doubt: asked.doubt, reasons: evaluation.reasons });
-      return ask(formatTextReply({ texts, names: asked.names, options: asked.options, doubt: asked.doubt === "NONE" ? "UNRESOLVED" : asked.doubt, repeated: 0, ...(note ? { note } : {}) }), read.items.length);
+      return ask(formatTextReply({ texts, names: asked.names, options: asked.options, doubt: asked.doubt === "NONE" ? "UNRESOLVED" : asked.doubt, repeated: 0, remainingGroups: asked.remaining, ...(note ? { note } : {}) }), read.items.length);
     }
     const input: QuoteCloseInput =
       evaluation.kind === "QUOTE" ? { sessionId: read.sessionId, outcome: "QUOTED", lines: evaluation.lines, totalBs: evaluation.totalBs, catalogFingerprint: catalogFingerprint(catalog).hash }
@@ -369,7 +369,7 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
     const items: SessionItem[] = read && read.state === "ready" ? read.items : [{ id: begun.itemId, seq: 1, kind: "TEXT", ...own }];
     const described = describeSession(items, catalog);
     deps.log("quote_session", { event: "text_reply", doubt: described.doubt, studies: described.names.length, summary: read?.state === "ready" });
-    return ack(formatTextReply({ texts, head: texts.added_text, names: described.names, options: described.options, doubt: described.doubt, repeated, ...(note ? { note } : {}) }), begun.position);
+    return ack(formatTextReply({ texts, head: texts.added_text, names: described.names, options: described.options, doubt: described.doubt, repeated, remainingGroups: described.remaining, ...(note ? { note } : {}) }), begun.position);
   }
 
   // «sí», «no» o el número de una opción: solo significan algo con una solicitud abierta; sin ella es un mensaje cualquiera.

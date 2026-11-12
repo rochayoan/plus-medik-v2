@@ -201,7 +201,7 @@ describe.skipIf(!bin)("sesiones de cotización de extremo a extremo contra Postg
     const p = patient();
     const w = setup();
     await say(w, p.phone, "hemograma y creatinina");
-    expect(last(w)).toContain(QUOTE_TEXTS.ask_option_intro);
+    expect(last(w)).toContain(QUOTE_TEXTS.option_intro_others);
     expect(last(w)).toMatch(/1\. CREATININA SERICA/);
     await say(w, p.phone, "listo");
     expect(last(w)).toBe(QUOTE_TEXTS.review);

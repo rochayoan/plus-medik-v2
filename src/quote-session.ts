@@ -102,12 +102,20 @@ const FINALIZE_WORDS = new Set(["listo", "lista", "ya", "eso", "es", "todo", "se
 const FINALIZE_KEYS = new Set(["listo", "lista", "todo", "cotiza", "cotizar", "cotizame", "cotizalo", "cotizalos", "termine", "termino", "finalizar", "nada mas", "fin"]);
 const CANCEL_PHRASES = new Set(["cancelar", "cancela", "cancelalo", "cancelar todo", "cancela todo", "anular", "anula", "borrar todo", "borra todo", "empezar de nuevo", "empezar otra vez", "reiniciar", "nueva solicitud"]);
 
+const CANCEL_STRONG = new Set(["cancelar", "cancela", "cancelalo", "cancelalos", "cancelame", "anular", "anula", "anulalo", "olvidalo", "olvidalos", "olvida", "borra", "borrar", "borralo", "reiniciar", "reinicia"]);
+const CANCEL_ALLOWED = new Set(["todo", "todos", "esto", "eso", "la", "el", "lo", "los", "solicitud", "cotizacion", "pedido", "por", "favor", "porfa", "ya", "mejor", "gracias", "mi", "nueva", "otra", "vez", "de", "nuevo", "y"]);
+// («ya no necesito más» NO es cancelar: dice que no falta nada.)
+const CANCEL_SOFT = /^(?:ya no (?:lo |los |la |las )?quiero(?: nada)?|ya no voy a (?:hacer|hacerme|cotizar)(?: nada)?)$/;
+
 // Solo un mensaje que ES el comando (corto y sin negaciones) lo activa: «aún no estoy listo» o «listo el resultado de mi examen» no cierran la sesión.
 export function parseSessionCommand(text: string): "FINALIZE" | "CANCEL" | undefined {
   const key = normalizeStudyKey(text.slice(0, 120));
   if (key === "") return undefined;
   if (CANCEL_PHRASES.has(key)) return "CANCEL";
   const tokens = key.split(" ");
+  // «cancela todo por favor», «olvídalo», «ya no quiero», «mejor cancélalo»: un verbo claro de cancelar la solicitud y nada más que cortesía o referencias a ella («cancelar mi cita» NO es esto).
+  if (tokens.length <= 7 && tokens.some((token) => CANCEL_STRONG.has(token)) && tokens.every((token) => CANCEL_STRONG.has(token) || CANCEL_ALLOWED.has(token))) return "CANCEL";
+  if (CANCEL_SOFT.test(key)) return "CANCEL";
   if (tokens.length > 5 || !tokens.every((token) => FINALIZE_WORDS.has(token))) return undefined;
   const joined = tokens.join(" ");
   return tokens.some((token) => FINALIZE_KEYS.has(token)) || [...FINALIZE_KEYS].some((phrase) => phrase.includes(" ") && joined.includes(phrase)) ? "FINALIZE" : undefined;
@@ -211,12 +219,20 @@ type Segment =
 
 // Búsqueda por parecido (solo para decidir, nunca para dar precio: el precio lo calcula el catálogo al cotizar). Se acepta un estudio solo si lidera con claridad; si hay varios plausibles se le pregunta al
 // paciente con opciones del catálogo; si no hay nada parecido, se le dice que el catálogo no lo tiene y se cotiza el resto.
-export const FUZZY = { strong: 0.88, strongGap: 0.1, unique: 0.75, uniqueGap: 0.12, lone: 0.65, group: 0.6, span: 0.15, maxOptions: 4, minScore: 0.45 } as const;
+export const FUZZY = { strong: 0.88, strongGap: 0.1, unique: 0.75, uniqueGap: 0.12, lone: 0.65, group: 0.6, span: 0.12, maxOptions: 4, minScore: 0.45 } as const;
 
 function mergeHits(lists: readonly SearchHit[][]): SearchHit[] {
   const best = new Map<string, SearchHit>();
   for (const list of lists) for (const hit of list) if (!best.has(hit.study.id) || best.get(hit.study.id)!.score < hit.score) best.set(hit.study.id, hit);
   return [...best.values()].sort((a, b) => b.score - a.score || (a.study.id < b.study.id ? -1 : 1));
+}
+
+// Si la palabra más larga de lo que escribió el paciente aparece EXACTA en el nombre de algunos candidatos y no en otros («hemocultivo» no está en «retrocultivo»), los otros no son opciones plausibles.
+export function focusOnDistinctiveWord(hits: SearchHit[], core: string): SearchHit[] {
+  const longest = normalizeStudyKey(core).split(" ").filter((token) => token.length >= 6 && !MODIFIER_WORDS.has(token)).sort((a, b) => b.length - a.length)[0];
+  if (!longest) return hits;
+  const exact = hits.filter((hit) => hit.via.split(" ").includes(longest));
+  return exact.length > 0 && exact.length < hits.length ? exact : hits;
 }
 
 export function decideFuzzy(allHits: readonly SearchHit[], mention: string, mode: "ANY" | "STRONG_ONLY" = "ANY"): Segment {
@@ -341,7 +357,9 @@ export function extractWithNotes(text: string, catalog: readonly CatalogStudy[],
     if (words > 6) return mode === "STRONG_ONLY" ? { kind: "UNMATCHED" } : { kind: "EMPTY" };
     const search = (forms: readonly string[]): SearchHit[] => mergeHits([...new Set(forms.map((form) => normalizeStudyKey(form)).filter((form) => form !== ""))].slice(0, 8).map((query) => searchCatalog(query, catalog, { limit: 6, minScore: FUZZY.minScore })));
     // Primero tal como lo escribió (con sus paréntesis: «(P. Rápida)» distingue un estudio de otro); solo si nada se parece, sin paréntesis ni calificativos.
-    const direct = search([segment, ...stripped]);
+    // «dos muestras» / «tres muestras» son la versión «X 2» / «X3» del estudio (hemocultivo seriado).
+    const counted = [segment, ...stripped].flatMap((form) => { const key = normalizeStudyKey(form); const two = key.replace(/\b(dos|2) muestras?\b/, "x 2"); const three = key.replace(/\b(tres|3) muestras?\b/, "x3"); return [two !== key ? two : "", three !== key ? three : "", three !== key ? three.replace("x3", "x 3") : ""].filter(Boolean); });
+    const direct = focusOnDistinctiveWord(search([segment, ...stripped, ...counted]), core);
     // Una palabra suelta que es solo un calificativo o una muestra («completo», «total», «orina») no identifica ningún estudio: no se adivina ni se ofrecen opciones.
     if (MODIFIER_WORDS.has(core)) return mode === "STRONG_ONLY" ? { kind: "UNMATCHED" } : { kind: "EMPTY" };
     if (direct[0] && direct[0].score >= FUZZY.group) return decideFuzzy(direct, mention, mode);
@@ -692,9 +710,22 @@ const CHOICE_JOINERS = new Set(["y", "e", "con", "tambien", "mas"]);
 // «eso nomás», «solo eso»: dicen que no falta nada (G6.0). Frases completas: «solo» o «nomás» sueltos no significan nada.
 const YES_PHRASES = /^(?:(?:si|claro|pues|bueno) )?(?:(?:solo|solamente|nomas|unicamente) (?:eso|esto)(?: nomas)?|(?:eso|esto) (?:nomas|solo|solamente|unicamente)|eso es lo unico)$/;
 
+// «ya está», «así está bien», «no falta nada», «con eso nomás», «me parece bien»: dicen que no falta nada. Un «ok», «dale», «perfecto» o «gracias» sueltos siguen siendo un ACUSE, no una orden (regla G6.1: el silencio y los acuses nunca cierran la solicitud).
+const YES_PHRASES_EXTRA = /^(?:(?:si|ya|bueno|pues|ok|listo) )?(?:ya esta(?: todo| bien)?|asi esta bien|esta bien(?: asi)?|asi nomas|asi esta perfecto|no falta nada|no me falta nada|ya no (?:falta|necesito|quiero) (?:nada|mas)|con eso (?:nomas|basta|alcanza|es suficiente)|me parece bien|es suficiente|eso basta|nada mas que eso|eso seria todo)(?: gracias| por favor)?$/;
+// «tengo más», «me faltan», «hay otro»: dicen que falta algo.
+const NO_PHRASES_EXTRA = /^(?:(?:si |no )?(?:me )?faltan?|(?:si |no )?(?:tengo|hay|me faltan?|faltan?|quiero|necesito) (?:mas|otros?|otras?|algo mas|uno mas|unos mas|otro mas|alguno mas|mas estudios)(?: por favor)?)$/;
 export function parseSessionReply(text: string): SessionReply | undefined {
   const tokens = normalizeStudyKey(text.slice(0, 80)).split(" ").filter(Boolean);
   if (tokens.length === 0 || tokens.length > 8) return undefined;
+  // «del 1 al 3», «de la 2 a la 4», «1-3»: un rango de opciones.
+  const range = /\b([1-8])\s*(?:al|a|hasta|-|–)\s*(?:la\s+|el\s+)?([1-8])\b/.exec(text.slice(0, 80).toLowerCase());
+  if (range && tokens.every((token) => /^\d$/.test(token) || CHOICE_FILLER.has(token) || ["del", "al", "a", "hasta", "opciones"].includes(token))) {
+    const from = Math.min(Number(range[1]), Number(range[2]));
+    const to = Math.max(Number(range[1]), Number(range[2]));
+    if (to > from && to - from <= 5) return { kind: "CHOICE", index: from, indexes: Array.from({ length: to - from + 1 }, (_unused, position) => from + position) };
+  }
+  if (YES_PHRASES_EXTRA.test(tokens.join(" "))) return { kind: "YES" };
+  if (NO_PHRASES_EXTRA.test(tokens.join(" "))) return { kind: "NO" };
   if (tokens.length <= 5) {
     if (YES_PHRASES.test(tokens.join(" "))) return { kind: "YES" };
     if (tokens.every((token) => YES_CORE.has(token) || YES_EXTRA.has(token)) && tokens.some((token) => YES_CORE.has(token))) return { kind: "YES" };
@@ -719,11 +750,70 @@ export function parseSessionReply(text: string): SessionReply | undefined {
 const CHOICE_FILLER = new Set(["estaria", "estarian", "esta", "bien", "ok", "okay", "mejor", "me", "quedo", "con", "dame", "deme", "quisiera", "quiero", "elijo", "escojo", "prefiero", "opcion", "opciones", "numero", "la", "las", "el", "lo", "los", "por", "favor", "porfa", "gracias", "seria", "sera", "es", "vale", "dale", "pues", "entonces", "creo", "que", "si", "va", "vamos", "seleccionar", "selecciono", "pongo", "pon", "ese", "esa", "esos", "esas", "de", "y", "e", "mas", "tambien"]);
 const ALL_WORDS = new Set(["todos", "todas", "ambos", "ambas"]);
 function parseChattyChoice(tokens: readonly string[]): SessionReply | undefined {
-  const numbers = tokens.filter((token) => ORDINALS[token] !== undefined);
-  const others = tokens.filter((token) => ORDINALS[token] === undefined);
+  // «el segundo de 300»: un número de dos o más cifras o «Bs» es el precio que el paciente ve en la opción, no otra elección.
+  const meaningful = tokens.filter((token) => !/^\d{2,}$/.test(token) && token !== "bs" && token !== "bolivianos");
+  const numbers = meaningful.filter((token) => ORDINALS[token] !== undefined);
+  const others = meaningful.filter((token) => ORDINALS[token] === undefined);
   if (numbers.length === 0 || numbers.length > 6 || !others.every((token) => CHOICE_FILLER.has(token))) return undefined;
   const picks = [...new Set(numbers.map((token) => ORDINALS[token]!))];
   return picks.length === 1 ? { kind: "CHOICE", index: picks[0]! } : { kind: "CHOICE", index: picks[0]!, indexes: picks };
+}
+
+// Responder a las opciones con palabras, no solo con números: «el de sangre», «la que incluye gasometría», «el más barato», «el de 3 muestras», «el ldh», «ambos». Se compara lo escrito con lo que
+// DISTINGUE a cada opción (las palabras que no comparten todas) y con su precio. Solo cuenta si todo lo escrito habla de las opciones (relleno, números o palabras de ellas) y queda UNA opción clara (o varias
+// si el paciente las une con «y»); si menciona otra cosa («quiero también glucosa»), no es una respuesta a la pregunta y no se toca.
+const OPTION_FILLER = new Set(["el", "la", "los", "las", "lo", "un", "una", "de", "del", "que", "quiero", "necesito", "dame", "deme", "opcion", "estudio", "prueba", "examen", "incluye", "incluya", "tenga", "tiene", "solo", "solamente", "unicamente", "cual", "cuales", "dice", "con", "sin", "por", "favor", "porfa", "gracias", "mejor", "me", "quedo", "esa", "ese", "esta", "este", "seria", "estaria", "bien", "ok", "dale", "si", "pues", "entonces", "muestra", "muestras", "bs", "bolivianos", "en", "al", "para", "es", "son", "va", "vamos", "ambos", "ambas", "todos", "todas"]);
+const NUMBER_WORDS: Record<string, string> = { dos: "2", tres: "3" };
+const CONJUNCTIONS = new Set(["y", "e", "tambien", "ademas", "mas"]);
+export function matchOptionReply(text: string, options: ReadonlyArray<{ name: string; priceBs: number }>): number[] | undefined {
+  if (options.length < 2) return undefined;
+  const tokens = normalizeStudyKey(text.slice(0, 160)).split(" ").filter(Boolean).map((token) => NUMBER_WORDS[token] ?? token);
+  if (tokens.length === 0 || tokens.length > 14) return undefined;
+  const optionTokens = options.map((option) => new Set(normalizeStudyKey(option.name).split(" ").filter(Boolean)));
+  const same = (reply: string, name: string): boolean => reply === name || (reply.length >= 4 && name.length >= 4 && (name.startsWith(reply) || reply.startsWith(name)));
+  const inOption = (reply: string, set: ReadonlySet<string>): boolean => [...set].some((name) => same(reply, name));
+  const words = tokens.filter((token) => !OPTION_FILLER.has(token) && !CONJUNCTIONS.has(token));
+  if (words.length === 0) return undefined;
+  // 1. superlativos de precio o posición
+  const cheapest = words.some((word) => word.startsWith("barat") || word.startsWith("economic"));
+  const dearest = words.some((word) => word.startsWith("caro") || word.startsWith("costos"));
+  const last = words.some((word) => word === "ultimo" || word === "ultima");
+  if ((cheapest || dearest || last) && words.every((word) => word.startsWith("barat") || word.startsWith("economic") || word.startsWith("caro") || word.startsWith("costos") || word === "ultimo" || word === "ultima" || word === "mas" || word === "menos")) {
+    if (last) return [options.length];
+    const prices = options.map((option) => option.priceBs);
+    const target = cheapest ? Math.min(...prices) : Math.max(...prices);
+    const hits = prices.flatMap((price, index) => (price === target ? [index + 1] : []));
+    return hits.length === 1 ? hits : undefined;
+  }
+  // 2. precio (el que el paciente ve en la opción) y cantidad de muestras (x2, x3). Cada número puede elegir una opción; varios números eligen varias.
+  const numbers = words.filter((word) => /^\d+$/.test(word));
+  const rest = words.filter((word) => !/^\d+$/.test(word));
+  let candidates = options.map((_option, index) => index);
+  if (numbers.length > 0) {
+    const hitsOf = (n: string): number[] => {
+      const byPrice = candidates.filter((index) => Number(n) === Math.round(options[index]!.priceBs));
+      if (byPrice.length > 0) return byPrice;
+      return n.length === 1 ? candidates.filter((index) => new RegExp("\\bx ?" + n + "\\b", "i").test(options[index]!.name.replace(/x(\d)/gi, "x $1"))) : [];
+    };
+    const perNumber = numbers.map(hitsOf);
+    if (perNumber.some((hits) => hits.length === 0)) return undefined;
+    if (rest.length === 0) return perNumber.every((hits) => hits.length === 1) ? [...new Set(perNumber.map((hits) => hits[0]! + 1))].sort((a, b) => a - b) : undefined;
+    candidates = [...new Set(perNumber.flat())];
+  }
+  // 3. palabras que distinguen a cada opción: cada palabra apunta a la(s) opción(es) cuyo nombre la distingue; varias palabras que apuntan a opciones distintas eligen varias (con comas, «y», «+», espacios o sin nada).
+  const common = new Set([...optionTokens[0]!].filter((token) => optionTokens.every((set) => set.has(token))));
+  const everyWordIsAboutTheOptions = rest.every((word) => optionTokens.some((set) => inOption(word, set)));
+  if (!everyWordIsAboutTheOptions) return undefined;
+  const owners = rest
+    .map((word) => candidates.filter((index) => [...optionTokens[index]!].some((name) => !common.has(name) && same(word, name))))
+    .filter((owned) => owned.length > 0);
+  if (owners.length === 0) return undefined;
+  if (owners.some((owned) => owned.length > 1)) {
+    // una palabra encaja con varias opciones: solo vale si otra palabra más precisa la desempata
+    const precise = new Set(owners.filter((owned) => owned.length === 1).map((owned) => owned[0]!));
+    return precise.size === 1 && owners.every((owned) => owned.includes([...precise][0]!)) ? [[...precise][0]! + 1] : undefined;
+  }
+  return [...new Set(owners.map((owned) => owned[0]!))].sort((a, b) => a - b).map((index) => index + 1);
 }
 
 // Una pregunta general («¿qué es el hemograma?», «¿para qué sirve la glucosa?») no es una lista de estudios aunque nombre uno: la atiende el manejador de siempre (y el prompt de conversación). Si
@@ -758,6 +848,9 @@ export interface QuoteTexts {
   identified_so_far: string;
   confirm_done: string;
   ask_option_intro: string;
+  option_intro_others: string;
+  option_intro_more: string;
+  option_intro_more_alone: string;
   ask_option_outro: string;
   ask_unresolved: string;
   choose_invalid: string;
@@ -785,7 +878,11 @@ export const QUOTE_TEXTS: QuoteTexts = {
   identified_so_far: "Estudios anotados:",
   confirm_done: "¿Eso es todo? Responde SÍ y te paso la cotización, o envíame los estudios que falten.",
   ask_option_intro: "Tengo estas opciones:",
-  ask_option_outro: "Responde con el número de la opción (si quieres más de una, escribe sus números separados por «y», o «todos») o escribe el nombre exacto del estudio.",
+  // Cuando ya hay estudios anotados o más dudas por venir: el paciente entiende que no se perdió nada.
+  option_intro_others: "Ya tengo anotados tus otros estudios. Para este tengo varias opciones:",
+  option_intro_more: "Ya tengo anotados varios de tus estudios, pero tengo dudas en algunos. Empecemos por este:",
+  option_intro_more_alone: "Tengo dudas en algunos de tus estudios. Empecemos por este:",
+  ask_option_outro: "Dime cuál necesitas: con el número, con el nombre o con lo que lo distingue. Si son varios, escríbelos como te quede más cómodo (con comas, «y» o «todos»).",
   ask_unresolved: "No pude identificar con certeza algunos estudios. Escribe el nombre exacto de cada uno o envía una foto de tu receta. Si no los encuentras, escribe LISTO y dejaré tu solicitud en revisión.",
   choose_invalid: "No encontré esa opción. Responde con el número de la lista o escribe el nombre exacto del estudio.",
   not_done: "De acuerdo, sigo esperando. Envíame los estudios que faltan y después responde SÍ o escribe LISTO."
@@ -825,7 +922,7 @@ export type TextDoubt = "NONE" | "OPTIONS" | "UNRESOLVED" | "RESEND";
 
 // Respuesta a un estudio escrito (G5.9): qué quedó anotado en la sesión y qué falta. Con dudas pregunta (las opciones salen del catálogo, numeradas; el texto del paciente nunca se repite); sin dudas
 // pregunta si terminó. La cotización NUNCA sale de aquí.
-export function formatTextReply(input: { texts: QuoteTexts; head?: string; names: readonly string[]; options: readonly string[]; doubt: TextDoubt; repeated: number; note?: string }): string {
+export function formatTextReply(input: { texts: QuoteTexts; head?: string; names: readonly string[]; options: readonly string[]; doubt: TextDoubt; repeated: number; note?: string; remainingGroups?: number }): string {
   const { texts } = input;
   const lines: string[] = [];
   // Con una pregunta de opciones se va directo a la pregunta: no se repite «anoté…» ni la lista de lo ya identificado (el paciente la verá en la cotización). El aviso de una opción inválida sí se conserva.
@@ -834,7 +931,9 @@ export function formatTextReply(input: { texts: QuoteTexts; head?: string; names
   if (input.names.length > 0 && !asking) lines.push(`${texts.identified_so_far} ${list(input.names)}.`);
   if (input.repeated > 0 && !asking) lines.push(texts.repeated_note);
   if (input.note) lines.push(input.note);
-  if (input.doubt === "OPTIONS") lines.push(texts.ask_option_intro, ...input.options.map((name, index) => `${index + 1}. ${list([name])}`), texts.ask_option_outro);
+  const more = (input.remainingGroups ?? 0) > 0;
+  const intro = input.names.length > 0 ? (more ? texts.option_intro_more : texts.option_intro_others) : more ? texts.option_intro_more_alone : texts.ask_option_intro;
+  if (input.doubt === "OPTIONS") lines.push(intro, ...input.options.map((name, index) => `${index + 1}. ${list([name])}`), texts.ask_option_outro);
   else if (input.doubt === "UNRESOLVED") lines.push(texts.ask_unresolved);
   else if (input.doubt === "RESEND") lines.push(texts.resend);
   else lines.push(texts.confirm_done);

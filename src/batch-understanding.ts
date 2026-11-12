@@ -1,7 +1,7 @@
 import { mentionsKnownStudy } from "./catalog-search.js";
 import { normalizeStudyKey } from "./consensus.js";
 import {
-  cleanMention, extractStudyRequests, extractWithNotes, isAddingMore, isGeneralQuestion, isOnlyFiller, isSectionHeading, mergeInterpretation, optionsOf, parseSessionCommand, parseSessionReply, wantsQuoteNow,
+  cleanMention, extractStudyRequests, extractWithNotes, isAddingMore, isGeneralQuestion, isOnlyFiller, isSectionHeading, matchOptionReply, mergeInterpretation, optionsOf, parseSessionCommand, parseSessionReply, wantsQuoteNow,
   type InterpretationNotes, type InterpretedStudyRequest, type ItemResult, type StudyInterpreter, type TextExtraction
 } from "./quote-session.js";
 import { asksForPrice, classifyText } from "./text-handler.js";
@@ -453,6 +453,19 @@ export async function understandBatch(input: UnderstandInput): Promise<BatchUnde
   const classified = fragments.map((fragment, order) => classify(fragment, order, input));
   const ids = (kind: Kind) => classified.filter((item) => item.kind === kind).map((item) => item.fragment.id);
 
+  // Con una pregunta de opciones abierta, el paciente puede responder con palabras («el de sangre», «el más barato», «el de 3 muestras», «la que incluye gasometría»): si lo escrito corresponde con claridad a
+  // una o varias de las opciones, se toma como esa elección. Si menciona otra cosa, no es una respuesta y sigue su camino.
+  const openGroup = session.pendingGroups[0];
+  if (openGroup && !classified.some((item) => item.command?.kind === "CANCEL")) {
+    const activeById = new Map(catalog.filter((study) => study.active).map((study) => [study.id, study]));
+    const options = openGroup.flatMap((id) => (activeById.has(id) ? [activeById.get(id)!] : []));
+    const target = options.length >= 2 ? classified.find((item) => item.kind === "CANDIDATE" && item.command === undefined && matchOptionReply(item.fragment.text, options) !== undefined) : undefined;
+    if (target) {
+      const picks = matchOptionReply(target.fragment.text, options)!;
+      target.kind = "COMMAND";
+      target.command = { fragmentId: target.fragment.id, kind: "CHOICE", index: picks[0]!, ...(picks.length > 1 ? { indexes: picks } : {}) };
+    }
+  }
   const commands = classified.flatMap((item) => (item.command ? [item.command] : []));
   const lastCancelOrder = Math.max(-1, ...classified.filter((item) => item.command?.kind === "CANCEL").map((item) => item.order));
   const cancelled = lastCancelOrder >= 0;
@@ -700,6 +713,12 @@ export async function understandBatch(input: UnderstandInput): Promise<BatchUnde
       matchedIds.add(chosen.id);
       for (let index = stillPending.length - 1; index >= 0; index--) if (stillPending[index]!.includes(chosen.id)) stillPending.splice(index, 1);
     }
+  }
+  // Una respuesta que no se entiende («el segundo de 300», «no sé») cuando hay una pregunta de opciones abierta NO se le deja a la conversación libre (perdería el hilo): se vuelve a preguntar.
+  const sessionGroupKeys = new Set(session.pendingGroups.map((group) => [...group].sort().join("|")));
+  if (stillPending.some((group) => sessionGroupKeys.has([...group].sort().join("|"))) && !cancelled && chosenIds.length === 0 && invalidChoices === 0 && matched.size === 0 && delegated.talk.length > 0 && delegated.questions.length === 0 && medical.length === 0 && humanRequest.length === 0 && !medicalSplit && !humanRequestSplit) {
+    invalidChoices++;
+    delegated.talk.length = 0;
   }
   const batchMatchedIds = [...new Set([...matched.keys(), ...chosenIds])];
   const clearedAmbiguous = ambiguous.filter((group) => !group.candidateIds.some((id) => matchedIds.has(id)));

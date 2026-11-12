@@ -219,7 +219,7 @@ describe.skipIf(!bin)("ejecutores del plan de un lote contra PostgreSQL real", (
     const w = setup();
     await batch(w, p.phone, ["quiero cotizar", "glucosa", "creatinina"]);
     const asked = lastBody(w);
-    expect(asked).toContain(QUOTE_TEXTS.ask_option_intro);
+    expect(asked).toContain(QUOTE_TEXTS.option_intro_others);
     expect(asked).toMatch(/1\. CREATININA/);
     expect(asked).not.toContain(QUOTE_TEXTS.ask_unresolved);
     expect(hasPrice(asked)).toBe(false);

@@ -286,7 +286,7 @@ describe("lista real con dudas: se pregunta con opciones y se puede elegir más 
     // directo a la pregunta, sin repetir lo ya identificado (se verá en la cotización)
     expect(ask).not.toContain("Estudios anotados");
     expect(ask).not.toContain("Interpreté");
-    expect(ask).toContain(QUOTE_TEXTS.ask_option_intro);
+    expect(ask).toContain(QUOTE_TEXTS.option_intro_others);
     expect(ask).toContain("1. HEPATITIS B ANTIGENO");
     expect(ask).toContain("2. HEPATITIS B ANTICUERPO");
     expect(ask).toContain(QUOTE_TEXTS.ask_option_outro);

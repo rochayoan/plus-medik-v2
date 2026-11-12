@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decideFuzzy, extractStudyRequests, extractWithNotes, FUZZY, parseSessionReply, preferredByMethod } from "../src/quote-session.js";
+import { decideFuzzy, extractStudyRequests, extractWithNotes, FUZZY, matchOptionReply, parseSessionReply, preferredByMethod } from "../src/quote-session.js";
 import type { SearchHit } from "../src/catalog-search.js";
 import { study } from "./support/study-catalog.js";
 
@@ -54,11 +54,22 @@ describe("listas escritas reales: búsqueda por parecido con opciones", () => {
 
   it("lista de 8 estudios con nombres compuestos: GOT y GPT son dos estudios; «totales y fracciones» y «arterial o venosa» no se rompen; el antibiograma no es un estudio", () => {
     const { extraction, notes } = extractWithNotes(LIST_B, C, { fuzzy: true });
-    expect(extraction!.matched.map((s) => s.name).sort()).toEqual(["BILIRRUBINA TOTAL Y FRACCIONES", "COPROCULTIVO", "FOSFATASA ALCALINA", "GASOMETRIA", "HEMOGRAMA COMPLETO AUTOMATIZADO", "LACTATO EN SANGRE", "TRANSAMINASA GOT", "TRANSAMINASA GPT", "UROCULTIVO"].sort());
+    expect(extraction!.matched.map((s) => s.name).sort()).toEqual(["BILIRRUBINA TOTAL Y FRACCIONES", "COPROCULTIVO", "FOSFATASA ALCALINA", "GASOMETRIA", "HEMOCULTIVO ADULTO - PEDIATRICO SERIADO X 2- CONVENCIONAL", "HEMOGRAMA COMPLETO AUTOMATIZADO", "LACTATO EN SANGRE", "TRANSAMINASA GOT", "TRANSAMINASA GPT", "UROCULTIVO"].sort());
     expect(extraction!.result.unresolved).toBe(0);
-    // «gasometría + lactato» son dos estudios; el hemocultivo seriado se pregunta: dos opciones
-    expect(extraction!.result.ambiguous.map((group) => group.map(name).sort())).toContainEqual(["HEMOCULTIVO ADULTO - PEDIATRICO SERIADO X 2- CONVENCIONAL", "HEMOCULTIVO ADULTO - PEDIATRICO SERIADO X3- CONVENCIONAL"]);
+    // «gasometría + lactato» son dos estudios; «hemocultivo seriado (dos muestras)» es la versión X 2: no se pregunta
+    expect(extraction!.result.ambiguous).toEqual([]);
     expect(notes.notFound).toEqual([]);
+  });
+
+  it("«dos muestras» es la versión X 2; sin decir cuántas se pregunta X3 o X 2, y un estudio de otro nombre (retrocultivo) no se ofrece como opción", () => {
+    const withRetro = [...C, study(91, "RETROCULTIVO ADULTO - PEDRIATRICO SERIADO X 2 - CONVENCIONAL", [], 300)];
+    const two = extractStudyRequests("Hemocultivo seriado (dos muestras)", withRetro, { fuzzy: true })!;
+    expect(two.matched.map((s) => s.name)).toEqual(["HEMOCULTIVO ADULTO - PEDIATRICO SERIADO X 2- CONVENCIONAL"]);
+    const three = extractStudyRequests("Hemocultivo seriado tres muestras", withRetro, { fuzzy: true })!;
+    expect(three.matched.map((s) => s.name)).toEqual(["HEMOCULTIVO ADULTO - PEDIATRICO SERIADO X3- CONVENCIONAL"]);
+    const unspecified = extractStudyRequests("Hemocultivo seriado", withRetro, { fuzzy: true })!;
+    expect(unspecified.matched).toEqual([]);
+    expect(unspecified.result.ambiguous.map((group) => group.map((id) => withRetro.find((s) => s.id === id)!.name).sort())).toEqual([["HEMOCULTIVO ADULTO - PEDIATRICO SERIADO X 2- CONVENCIONAL", "HEMOCULTIVO ADULTO - PEDIATRICO SERIADO X3- CONVENCIONAL"]]);
   });
 
   it("un estudio que el catálogo no tiene se dice y no se confunde con otro; el resto se identifica", () => {
@@ -118,6 +129,11 @@ describe("decisión de la búsqueda por parecido", () => {
 });
 
 describe("elegir una o varias opciones, como en una votación", () => {
+  it("«el segundo de 300» (con el precio que ve en la opción) es la opción 2", () => {
+    expect(parseSessionReply("el segundo de 300")).toEqual({ kind: "CHOICE", index: 2 });
+    expect(parseSessionReply("la 1 de Bs 160")).toEqual({ kind: "CHOICE", index: 1 });
+    expect(parseSessionReply("quiero 300 hemogramas")).toBeUndefined();
+  });
   it("«1 y 3», «1, 2 y 4» y «la 1 y la 2» eligen varias; un número solo sigue eligiendo una", () => {
     expect(parseSessionReply("1 y 3")).toEqual({ kind: "CHOICE", index: 1, indexes: [1, 3] });
     expect(parseSessionReply("1, 2 y 4")).toEqual({ kind: "CHOICE", index: 1, indexes: [1, 2, 4] });
@@ -278,5 +294,132 @@ describe("temas en lugar de nombres («tiroides», «hígado»): el agente ofrec
     const quote = decideBatch({ understanding: all });
     expect(quote.core.kind).toBe("QUOTE");
     expect(names((quote.core as { studyIds: string[] }).studyIds).sort()).toEqual(["T3 LIBRE (ECLIA)", "T4 LIBRE (ECLIA)", "TSH (ECLIA)"]);
+  });
+});
+
+describe("una respuesta que no se entiende con una pregunta abierta: se vuelve a preguntar, no se pierde el hilo", () => {
+  const A = study(101, "LACTATO EN SANGRE", [], 160);
+  const B = study(102, "GASOMETRIA + LACTATO", [], 330);
+  const H = study(103, "HEMOGRAMA COMPLETO AUTOMATIZADO", ["hemograma"], 45);
+  const catalog = [A, B, H];
+  const open = async (text: string) => {
+    const { understandBatch, EMPTY_SESSION } = await import("../src/batch-understanding.js");
+    const { decideBatch } = await import("../src/batch-policy.js");
+    const understanding = await understandBatch({ fragments: [{ id: "x", text }], catalog, session: { ...EMPTY_SESSION, open: true, studyIds: [H.id], pendingGroups: [[A.id, B.id]] }, modelUse: "never" });
+    return decideBatch({ understanding });
+  };
+  it("«el que sea» vuelve a mostrar las opciones con el aviso de opción inválida y no se le deja a la conversación libre (que perdería el hilo)", async () => {
+    const plan = await open("el que sea");
+    expect(plan.core).toMatchObject({ kind: "CLARIFY", questions: [{ kind: "OPTIONS", invalidChoice: true }] });
+  });
+  it("«no sé cuál» y «mmm» también vuelven a preguntar las mismas opciones", async () => {
+    for (const text of ["no se cual", "mmm"]) expect((await open(text)).core, text).toMatchObject({ kind: "CLARIFY", questions: [{ kind: "OPTIONS" }] });
+  });
+  it("«el segundo de 330», «estaría bien la 1» y «todos» sí se entienden", async () => {
+    for (const text of ["el segundo de 330", "estaria bien la 1", "todos"]) expect((await open(text)).core.kind, text).toBe("QUOTE");
+  });
+  it("una pregunta de información en medio sigue su camino (no se confunde con una respuesta inválida)", async () => {
+    const plan = await open("¿a qué hora abren?");
+    expect(plan.delegatedQuestionIds.length).toBeGreaterThan(0);
+  });
+});
+
+describe("responder a las opciones con palabras, no solo con números", () => {
+  const options = [
+    { name: "LACTATO EN SANGRE", priceBs: 160 },
+    { name: "GASOMETRIA + LACTATO", priceBs: 330 },
+    { name: "LDH (Lactato deshidrogenasa) de LIQUIDOS", priceBs: 80 }
+  ];
+  const hemo = [
+    { name: "HEMOCULTIVO ADULTO - PEDIATRICO SERIADO X 2- CONVENCIONAL", priceBs: 300 },
+    { name: "HEMOCULTIVO ADULTO - PEDIATRICO SERIADO X3- CONVENCIONAL", priceBs: 450 }
+  ];
+  it("lo que distingue a cada opción: «el de sangre», «la gasometría con lactato», «el ldh»", () => {
+    expect(matchOptionReply("el de sangre", options)).toEqual([1]);
+    expect(matchOptionReply("la gasometria con lactato", options)).toEqual([2]);
+    expect(matchOptionReply("el ldh", options)).toEqual([3]);
+    expect(matchOptionReply("el de liquidos por favor", options)).toEqual([3]);
+  });
+  it("por precio y por cantidad de muestras: «el de 450», «el de tres muestras», «el x2»", () => {
+    expect(matchOptionReply("el de 450", hemo)).toEqual([2]);
+    expect(matchOptionReply("el de tres muestras", hemo)).toEqual([2]);
+    expect(matchOptionReply("el de dos muestras", hemo)).toEqual([1]);
+    expect(matchOptionReply("el x3", hemo)).toEqual([2]);
+  });
+  it("superlativos: «el más barato», «el más caro», «el último»", () => {
+    expect(matchOptionReply("el mas barato", options)).toEqual([3]);
+    expect(matchOptionReply("el mas caro", options)).toEqual([2]);
+    expect(matchOptionReply("el ultimo", options)).toEqual([3]);
+  });
+  it("varias unidas con «y»", () => {
+    expect(matchOptionReply("el de sangre y la gasometria", options)).toEqual([1, 2]);
+    expect(matchOptionReply("ambos, el de sangre y la gasometria", options)).toEqual([1, 2]);
+  });
+  it("lo que no habla de las opciones (otro estudio, una pregunta) NO es una respuesta: no se toma por una elección", () => {
+    for (const text of ["quiero tambien glucosa", "hemograma", "cuanto tarda", "no se cual", "mmm"]) expect(matchOptionReply(text, options), text).toBeUndefined();
+  });
+  it("si lo escrito cuadra con varias opciones y no las une, no se adivina: se vuelve a preguntar", () => {
+    expect(matchOptionReply("el de lactato", options)).toBeUndefined();
+  });
+  it("de punta a punta con una pregunta abierta: «el de sangre» elige y cotiza; «hemograma» no estorba", async () => {
+    const { understandBatch, EMPTY_SESSION } = await import("../src/batch-understanding.js");
+    const { decideBatch } = await import("../src/batch-policy.js");
+    const A = study(111, "LACTATO EN SANGRE", [], 160), B = study(112, "GASOMETRIA + LACTATO", [], 330), H = study(113, "HEMOGRAMA COMPLETO AUTOMATIZADO", ["hemograma"], 45);
+    const run = async (text: string) => decideBatch({ understanding: await understandBatch({ fragments: [{ id: "x", text }], catalog: [A, B, H], session: { ...EMPTY_SESSION, open: true, studyIds: [H.id], pendingGroups: [[A.id, B.id]] }, modelUse: "never" }) });
+    const chosen = await run("el de sangre");
+    expect(chosen.core).toMatchObject({ kind: "QUOTE" });
+    expect((chosen.core as { studyIds: string[] }).studyIds.sort()).toEqual([A.id, H.id].sort());
+    const both = await run("la gasometria");
+    expect((both.core as { studyIds: string[] }).studyIds.sort()).toEqual([B.id, H.id].sort());
+    expect((await run("no se cual")).core.kind).toBe("CLARIFY");
+  });
+});
+
+describe("varias opciones escritas como cada quien quiera: comas, «y», «/», «+», «&», espacios, rangos o ninguna palabra de unión", () => {
+  const options = [
+    { name: "LACTATO EN SANGRE", priceBs: 160 },
+    { name: "GASOMETRIA + LACTATO", priceBs: 330 },
+    { name: "LDH (Lactato deshidrogenasa) de LIQUIDOS", priceBs: 80 }
+  ];
+  it.each(["1,3", "1, 3", "1 y 3", "1/3", "1+3", "1&3", "1 3", "1 e 3", "la 1 y la 3", "1 también el 3", "1;3"])("números: «%s» elige 1 y 3", (text) => {
+    const reply = parseSessionReply(text);
+    expect(reply?.kind === "CHOICE" ? (reply.indexes ?? [reply.index]) : undefined, text).toEqual([1, 3]);
+  });
+  it.each([["del 1 al 3", [1, 2, 3]], ["de la 2 a la 3", [2, 3]], ["1-2", [1, 2]]] as const)("rangos: «%s»", (text, expected) => {
+    const reply = parseSessionReply(text);
+    expect(reply?.kind === "CHOICE" ? (reply.indexes ?? [reply.index]) : undefined, text).toEqual([...expected]);
+  });
+  it.each(["el de sangre, la gasometria", "sangre / gasometria", "sangre + gasometria", "sangre & gasometria", "sangre gasometria", "el de sangre y la gasometria", "sangre; gasometria", "ambos: el de sangre y la gasometria"])("palabras: «%s» elige las opciones 1 y 2", (text) => {
+    expect(matchOptionReply(text, options), text).toEqual([1, 2]);
+  });
+  it("precios: «160, 330» elige 1 y 2; un precio repetido o inexistente no adivina", () => {
+    expect(matchOptionReply("160, 330", options)).toEqual([1, 2]);
+    expect(matchOptionReply("el de 999", options)).toBeUndefined();
+  });
+  it("una palabra que encaja con varias opciones no se adivina («lactato» es de las tres)", () => {
+    expect(matchOptionReply("lactato", options)).toBeUndefined();
+    expect(matchOptionReply("lactato, ldh", options)).toEqual([3]);
+  });
+});
+
+describe("confirmar, agregar y cancelar con las palabras de cada quien (auditoría de rigidez, 12-nov)", () => {
+  const H = study(121, "HEMOGRAMA COMPLETO AUTOMATIZADO", ["hemograma"], 45);
+  const intentOf = async (text: string) => {
+    const { understandBatch, EMPTY_SESSION } = await import("../src/batch-understanding.js");
+    const understanding = await understandBatch({ fragments: [{ id: "x", text }], catalog: [H], session: { ...EMPTY_SESSION, open: true, studyIds: [H.id] }, modelUse: "never" });
+    return understanding.intent;
+  };
+  const CONFIRM = ["sí", "listo", "ya está", "ya esta todo", "eso es todo", "nada más", "nomás eso", "así está bien", "está bien así", "correcto", "no falta nada", "ya no necesito más", "con eso nomás", "me parece bien", "eso sería todo gracias", "gracias, eso es todo"];
+  it.each(CONFIRM)("«%s» confirma (cotiza lo anotado)", async (text) => {
+    expect(["CONFIRM", "QUOTE"]).toContain(await intentOf(text));
+  });
+  it.each(["tengo más", "me faltan", "falta uno", "hay otro", "espera", "no"])("«%s» dice que falta algo (no cotiza aún)", async (text) => {
+    expect(await intentOf(text)).toBe("MORE");
+  });
+  it.each(["cancelar", "cancela todo por favor", "olvídalo", "ya no quiero", "mejor cancélalo", "borra todo", "empezar de nuevo", "anula la solicitud"])("«%s» cancela la solicitud", async (text) => {
+    expect(await intentOf(text)).toBe("CANCEL");
+  });
+  it.each(["cancelar mi cita", "quiero cancelar mi cita médica", "ok", "gracias", "hola", "dale", "perfecto", "vale"])("«%s» NO cancela ni confirma (otra cosa o solo un acuse)", async (text) => {
+    expect(["CANCEL", "CONFIRM"]).not.toContain(await intentOf(text));
   });
 });
