@@ -125,6 +125,13 @@ describe("elegir una o varias opciones, como en una votación", () => {
     expect(parseSessionReply("2")).toEqual({ kind: "CHOICE", index: 2 });
     expect(parseSessionReply("la 2 por favor")).toEqual({ kind: "CHOICE", index: 2 });
   });
+  it("una elección con cortesías alrededor también se entiende: «estaría bien la 1», «mejor la 2», «me quedo con la 1 y la 3»", () => {
+    expect(parseSessionReply("estaría bien la 1")).toEqual({ kind: "CHOICE", index: 1 });
+    expect(parseSessionReply("mejor la 2 por favor")).toEqual({ kind: "CHOICE", index: 2 });
+    expect(parseSessionReply("la 1 está bien")).toEqual({ kind: "CHOICE", index: 1 });
+    expect(parseSessionReply("me quedo con la 1 y la 3")).toEqual({ kind: "CHOICE", index: 1, indexes: [1, 3] });
+    expect(parseSessionReply("si dale la opcion 2")).toEqual({ kind: "CHOICE", index: 2 });
+  });
   it("un mensaje que mezcla números con otras palabras no es una elección", () => {
     expect(parseSessionReply("1 y hemograma")).toBeUndefined();
     expect(parseSessionReply("quiero 2 hemogramas")).toBeUndefined();

@@ -662,11 +662,14 @@ const CHOICE_JOINERS = new Set(["y", "e", "con", "tambien", "mas"]);
 const YES_PHRASES = /^(?:(?:si|claro|pues|bueno) )?(?:(?:solo|solamente|nomas|unicamente) (?:eso|esto)(?: nomas)?|(?:eso|esto) (?:nomas|solo|solamente|unicamente)|eso es lo unico)$/;
 
 export function parseSessionReply(text: string): SessionReply | undefined {
-  const tokens = normalizeStudyKey(text.slice(0, 60)).split(" ").filter(Boolean);
-  if (tokens.length === 0 || tokens.length > 5) return undefined;
-  if (YES_PHRASES.test(tokens.join(" "))) return { kind: "YES" };
-  if (tokens.every((token) => YES_CORE.has(token) || YES_EXTRA.has(token)) && tokens.some((token) => YES_CORE.has(token))) return { kind: "YES" };
-  if (tokens.every((token) => NO_CORE.has(token) || NO_EXTRA.has(token)) && tokens.some((token) => NO_CORE.has(token))) return { kind: "NO" };
+  const tokens = normalizeStudyKey(text.slice(0, 80)).split(" ").filter(Boolean);
+  if (tokens.length === 0 || tokens.length > 8) return undefined;
+  if (tokens.length <= 5) {
+    if (YES_PHRASES.test(tokens.join(" "))) return { kind: "YES" };
+    if (tokens.every((token) => YES_CORE.has(token) || YES_EXTRA.has(token)) && tokens.some((token) => YES_CORE.has(token))) return { kind: "YES" };
+    if (tokens.every((token) => NO_CORE.has(token) || NO_EXTRA.has(token)) && tokens.some((token) => NO_CORE.has(token))) return { kind: "NO" };
+  }
+  if (tokens.length > 5) return parseChattyChoice(tokens);
   let start = 0;
   while (start < tokens.length && CHOICE_LEAD.has(tokens[start]!)) start++;
   const index = ORDINALS[tokens[start] ?? ""];
@@ -675,7 +678,18 @@ export function parseSessionReply(text: string): SessionReply | undefined {
   const rest = tokens.slice(start).filter((token) => !CHOICE_JOINERS.has(token) && !CHOICE_TRAIL.has(token) && !CHOICE_LEAD.has(token));
   const picked = [...new Set(rest.map((token) => ORDINALS[token]))];
   if (rest.length >= 2 && rest.length <= 6 && picked.length >= 2 && picked.every((value): value is number => value !== undefined)) return { kind: "CHOICE", index: picked[0]!, indexes: picked };
-  return undefined;
+  return parseChattyChoice(tokens);
+}
+
+// «estaría bien la 1», «mejor la 2», «me quedo con la 1 por favor», «la 1 está bien»: el número va rodeado de palabras de cortesía o de acuerdo, y nada más. Cualquier otra palabra (un estudio, una cantidad:
+// «quiero 2 hemogramas») deja de ser una elección.
+const CHOICE_FILLER = new Set(["estaria", "estarian", "esta", "bien", "ok", "okay", "mejor", "me", "quedo", "con", "dame", "deme", "quisiera", "quiero", "elijo", "escojo", "prefiero", "opcion", "opciones", "numero", "la", "las", "el", "lo", "los", "por", "favor", "porfa", "gracias", "seria", "sera", "es", "vale", "dale", "pues", "entonces", "creo", "que", "si", "va", "vamos", "seleccionar", "selecciono", "pongo", "pon", "ese", "esa", "esos", "esas", "de", "y", "e", "mas", "tambien"]);
+function parseChattyChoice(tokens: readonly string[]): SessionReply | undefined {
+  const numbers = tokens.filter((token) => ORDINALS[token] !== undefined);
+  const others = tokens.filter((token) => ORDINALS[token] === undefined);
+  if (numbers.length === 0 || numbers.length > 6 || !others.every((token) => CHOICE_FILLER.has(token))) return undefined;
+  const picks = [...new Set(numbers.map((token) => ORDINALS[token]!))];
+  return picks.length === 1 ? { kind: "CHOICE", index: picks[0]! } : { kind: "CHOICE", index: picks[0]!, indexes: picks };
 }
 
 // Una pregunta general («¿qué es el hemograma?», «¿para qué sirve la glucosa?») no es una lista de estudios aunque nombre uno: la atiende el manejador de siempre (y el prompt de conversación). Si
