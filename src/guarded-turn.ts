@@ -250,6 +250,16 @@ export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claime
       }
       if (reservation !== "reserved") {
         deps.log("reply_withheld", { reason: reservation });
+        // El tope de respuestas (o la guarda antibucles) impidió contestar: el paciente no puede quedarse sin respuesta Y sin aviso. Se registra un caso en el CRM para que una persona lo atienda.
+        // Nunca cambia el resultado del turno: si el aviso falla, se registra y sigue igual.
+        if (reservation === "limited" && deps.turns?.crmHandoff) {
+          try {
+            const [outcome] = await deps.turns.crmHandoff.submit(context, [{ kapsoMessageId: ref.messageId, contactPhone: ref.from, kind: "CONVERSATION", reasons: ["HUMAN_REQUEST"] }]);
+            deps.log("reply_withheld_handoff", { state: outcome?.state ?? "NONE" });
+          } catch {
+            deps.log("reply_withheld_handoff", { state: "FAILED" });
+          }
+        }
         // Espera agotada: el turno no se pierde. Se libera su lease (marcado BUSY_TIMEOUT) para que un reenvío del mensaje lo reclame de nuevo, o el recuperador lo
         // cierre sin responder. Liberar nunca envía ni reserva: no puede producir un envío duplicado.
         if (reservation === "busy_timeout") await context.persist("release", (audit, runId, held) => audit.releaseTurn?.(runId, "BUSY_TIMEOUT", held) ?? Promise.resolve());

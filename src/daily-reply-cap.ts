@@ -16,6 +16,7 @@ export interface DailyReplyCap {
   windowSeconds: number;
 }
 
+// 6 respuestas cada 24 h por contacto (decisión del dueño, 12-nov: se mantiene en 6). Al alcanzarlo, el paciente bloqueado se avisa al CRM (ver guarded-turn.ts).
 export const DAILY_REPLY_CAP_DEFAULTS: DailyReplyCap = { max: 6, windowSeconds: 24 * 3600 };
 
 export type DailyReplyCapConfigError = "TURNS_REQUIRED" | "INVALID_MAX" | "INVALID_HOURS";
