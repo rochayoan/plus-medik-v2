@@ -141,7 +141,9 @@ function classify(fragment: BatchFragment, order: number, input: UnderstandInput
   // La seguridad se decide ANTES que cualquier respuesta corta: «no» o «2» dentro de un mensaje médico siguen siendo médicos.
   if (category === "MEDICAL") return { ...base, kind: "MEDICAL" };
   if (category === "HUMAN_REQUEST") return { ...base, kind: "HUMAN" };
-  const reply = parseSessionReply(text);
+  const parsedReply = parseSessionReply(text);
+  // Elegir varias opciones a la vez solo lo entiende el flujo de sesiones: aquí sigue siendo un texto como antes.
+  const reply = parsedReply?.kind === "CHOICE" && parsedReply.indexes ? undefined : parsedReply;
   if (reply) return { ...base, kind: "COMMAND", command: reply.kind === "CHOICE" ? { fragmentId: fragment.id, kind: "CHOICE", index: reply.index } : { fragmentId: fragment.id, kind: reply.kind } };
   if (category === "INFO_REQUEST" || input.isInfoQuestion?.(text) || isGeneralQuestion(text)) return { ...base, kind: "QUESTION" };
   if (category === "GREETING") return { ...base, kind: "GREETING" };

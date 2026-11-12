@@ -143,6 +143,26 @@ describe("foto en modo sesión", () => {
     expect(w.audit.recordFailure).toHaveBeenCalled();
   });
 
+  it("si el análisis de la foto falla, se avisa al CRM para que una persona la vea (el paciente no queda sin atención)", async () => {
+    const w = setup();
+    const submit = vi.fn(async (_ctx: unknown, _cases: unknown) => [{ state: "REGISTERED" }]);
+    (w.deps.turns as unknown as { crmHandoff: unknown }).crmHandoff = { submit };
+    w.analyze.mockRejectedValueOnce(new Error("429"));
+    await processTurns([image("m-fail")], w.deps);
+    expect(w.sends).toEqual([TECHNICAL_ISSUE_MESSAGE]);
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(submit.mock.calls[0]![1]).toEqual([{ kapsoMessageId: "m-fail", mediaId: "media", contactPhone: "59170000000", kind: "REVIEW_CASE", reasons: ["UNREADABLE_IMAGE"] }]);
+  });
+
+  it("si el aviso al CRM falla, la respuesta técnica sale igual", async () => {
+    const w = setup();
+    (w.deps.turns as unknown as { crmHandoff: unknown }).crmHandoff = { submit: vi.fn(async () => { throw new Error("CRM caído"); }) };
+    w.analyze.mockRejectedValueOnce(new Error("429"));
+    await processTurns([image("m-fail2")], w.deps);
+    expect(w.sends).toEqual([TECHNICAL_ISSUE_MESSAGE]);
+    expect(w.audit.recordFailure).toHaveBeenCalled();
+  });
+
   it("FALLA CERRADO: un repositorio sin las operaciones de sesión (migración 11 ausente) no anota ni cotiza nada: aviso técnico", async () => {
     const w = setup({ audit: fakeAudit({ noQuoteMethods: true }) });
     await processTurns([image()], w.deps);

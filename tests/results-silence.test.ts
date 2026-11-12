@@ -167,3 +167,12 @@ describe("resultados: silencio determinista sin IA ni mensajes", () => {
     });
   });
 });
+
+describe("retirar lo ya hecho y el filtro médico (11-nov)", () => {
+  it.each(["Quería recoger mis estudios", "Quiero retirar mis exámenes", "Voy a buscar mis análisis", "Buenas tardes, quería recoger mis estudios por favor"])("«%s» es una consulta de resultados ya realizados", (text) => {
+    expect(routeResultsMessage(text)).toBe("READY_CHECK");
+  });
+  it.each(["Quiero cotizar unos exámenes", "Quiero recoger la muestra a domicilio", "Dónde puedo buscar la receta de mis estudios"])("«%s» sigue su flujo normal", (text) => {
+    expect(routeResultsMessage(text)).toBe("NORMAL");
+  });
+});

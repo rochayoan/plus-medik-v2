@@ -213,10 +213,11 @@ describe.skipIf(!bin)("sesiones de cotización de extremo a extremo contra Postg
     expect(await db.ok(`select count(*) from public.plusmedik_quote_results where session_id = '${session!.id}'`)).toBe("0");
 
     const q = patient();
+    // Lo que el catálogo no tiene ya no bloquea: se cotiza lo identificado y se dice cuál falta (nunca se inventa).
     await say(w, q.phone, "quiero cotizar hemograma y examen de la vista");
-    await say(w, q.phone, "listo");
-    expect(last(w)).toBe(QUOTE_TEXTS.review);
-    expect((await sessionsOf(q.key))[0]).toMatchObject({ status: "NEEDS_REVIEW", reasons: ["UNRESOLVED_TEXT"] });
+    expect(last(w)).toContain("HEMOGRAMA COMPLETO — Bs 45");
+    expect(last(w)).toContain("No encontré en nuestro catálogo: «examen de la vista»");
+    expect((await sessionsOf(q.key))[0]).toMatchObject({ status: "QUOTED" });
   });
 
   it("un resultado PARCIAL del motor en una foto vuelve incierta toda la solicitud: no se cotiza lo seguro a medias", async () => {
@@ -397,9 +398,10 @@ describe.skipIf(!bin)("sesiones de cotización de extremo a extremo contra Postg
       expect(last(w)).toContain("GLUCOSA EN AYUNAS — Bs 30,50");
       const q = patient();
       await say(w, q.phone, "cotiza hemograma y VSG");
-      expect(hasPrice(last(w))).toBe(false);
-      expect(last(w)).toContain(QUOTE_TEXTS.ask_unresolved);
-      expect((await sessionsOf(q.key))[0]).toMatchObject({ status: "OPEN" });
+      expect(last(w)).toContain("HEMOGRAMA COMPLETO — Bs 45");
+      expect(last(w)).toContain("No encontré en nuestro catálogo: «VSG»");
+      expect(last(w)).not.toContain("ERITROSEDIMENTACION");
+      expect((await sessionsOf(q.key))[0]).toMatchObject({ status: "QUOTED" });
     });
 
     it("una lista sin pedido de cotizar se acumula y se pregunta si eso es todo; «sí» cotiza, y un «sí» posterior ya no tiene solicitud que cerrar", async () => {
@@ -491,16 +493,14 @@ describe.skipIf(!bin)("sesiones de cotización de extremo a extremo contra Postg
       expect((await sessionsOf(p.key))[0]).toMatchObject({ status: "NEEDS_REVIEW", reasons: ["AMBIGUOUS_STUDY"] });
     });
 
-    it("lo que no se identifica se pregunta; no se cotiza a medias, y «listo» lo deja en revisión como siempre", async () => {
+    it("lo que el catálogo no tiene se dice y se cotiza el resto; nunca se promete una persona", async () => {
       const p = patient();
       const w = setup();
       await say(w, p.phone, "cotiza hemograma y examen de la vista");
-      expect(hasPrice(last(w))).toBe(false);
-      expect(last(w)).toContain(QUOTE_TEXTS.ask_unresolved);
+      expect(last(w)).toContain("HEMOGRAMA COMPLETO — Bs 45");
+      expect(last(w)).toContain("No encontré en nuestro catálogo: «examen de la vista»");
       expect(last(w)).not.toMatch(/persona|equipo|asesor/i);
-      await say(w, p.phone, "listo");
-      expect(last(w)).toBe(QUOTE_TEXTS.review);
-      expect((await sessionsOf(p.key))[0]).toMatchObject({ status: "NEEDS_REVIEW", reasons: ["UNRESOLVED_TEXT"] });
+      expect((await sessionsOf(p.key))[0]).toMatchObject({ status: "QUOTED" });
     });
 
     it("después de cotizar la conversación sigue: preguntas, saludos y un estudio nuevo abren otra solicitud que no arrastra la anterior", async () => {

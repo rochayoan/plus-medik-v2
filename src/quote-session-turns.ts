@@ -4,7 +4,7 @@ import { catalogFingerprint, processingFailureCode, type AuditLease, type AuditR
 import { withAiCallObserver, type AiCallEvent } from "./cache.js";
 import type { PhotoReport, Produced, TurnContext, TurnProducer } from "./guarded-turn.js";
 import {
-  assertSafeInterpreterTexts, assertSafeQuoteTexts, DEFAULT_QUOTE_SESSIONS, evaluateSession, extractStudyRequests, formatAck, formatInterpretationNote, formatSessionQuote, formatTextReply, isGeneralQuestion, mergeInterpretation, optionsOf, parseSessionCommand, parseSessionReply, QUOTE_TEXTS,
+  assertSafeInterpreterTexts, assertSafeQuoteTexts, DEFAULT_QUOTE_SESSIONS, evaluateSession, extractWithNotes, formatAck, formatInterpretationNote, formatSessionQuote, formatTextReply, isGeneralQuestion, mergeInterpretation, optionsOf, parseSessionCommand, parseSessionReply, QUOTE_TEXTS,
   summarizeSession, withNote, compactQuote, type ItemResult, type QuoteBeginResult, type QuoteCloseInput, type QuoteCloseResult, type QuoteReadResult, type QuoteSessionsConfig, type QuoteTexts, type SessionItem, type SessionReply, type TextDoubt
 } from "./quote-session.js";
 import { summarizeAiFailures } from "./provider-error.js";
@@ -166,6 +166,15 @@ export function sessionImageProducer(image: IncomingImage, deps: QuoteDeps, conf
         await ctx.persist("quote_finish", async (audit, runId, lease) => {
           await needs(audit, "quoteFinish")(runId, lease, { status: "UNCERTAIN", studyIds: [], ambiguous: [], unresolved: 0, reasons: ["ENGINE_PARTIAL"] });
         });
+      }
+      // Una foto que no se pudo procesar (p. ej. límite del proveedor) no puede dejar al paciente sin atención: se avisa al CRM para que una persona la vea. Nunca bloquea ni cambia la respuesta técnica.
+      const crm = deps.turns?.crmHandoff;
+      if (crm) {
+        try {
+          await crm.submit(ctx, [{ kapsoMessageId: image.messageId, ...(image.mediaId ? { mediaId: image.mediaId } : {}), contactPhone: image.from, kind: "REVIEW_CASE", reasons: ["UNREADABLE_IMAGE"] }]);
+        } catch {
+          deps.log("quote_session", { event: "photo_failure_handoff_failed" });
+        }
       }
       await ctx.persist("failure", (audit, runId, lease) => audit.recordFailure(runId, errorCode, lease));
       return failureReply();
@@ -378,10 +387,11 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
     if (!group) return handOver(ctx);
     const catalog = await catalogForText();
     const options = optionsOf(group, catalog);
-    const chosen = options.length >= 2 ? options[reply.index - 1] : undefined;
-    if (!chosen) return ask(texts.choose_invalid, read.items.length);
-    // La opción elegida entra a la sesión como un estudio identificado con certeza; eso aclara el grupo ambiguo (la base aplica la misma regla al cerrar).
-    const own: ItemResult = { status: "RESOLVED", studyIds: [chosen.id], ambiguous: [], unresolved: 0, reasons: [] };
+    const wanted = reply.indexes ?? [reply.index];
+    const chosen = options.length >= 2 ? wanted.map((index) => options[index - 1]) : [];
+    if (chosen.length === 0 || chosen.some((option) => !option)) return ask(texts.choose_invalid, read.items.length);
+    // Las opciones elegidas (una o varias) entran a la sesión como estudios identificados con certeza; eso aclara el grupo ambiguo (la base aplica la misma regla al cerrar).
+    const own: ItemResult = { status: "RESOLVED", studyIds: [...new Set(chosen.map((option) => option!.id))], ambiguous: [], unresolved: 0, reasons: [] };
     const begun = await beginText(ctx, own);
     deps.log("quote_session", { event: "choice_item", status: begun.status });
     if (begun.status === "full") return plain(texts.full);
@@ -420,11 +430,15 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
         deps.log("quote_session", { event: "catalog_unavailable_for_text" });
         return await handOver(ctx);
       }
-      let extraction = extractStudyRequests(text, catalog);
+      // Búsqueda por parecido con opciones: lo que el catálogo no reconoce de forma exacta se resuelve con claridad, se le pregunta al paciente (opciones numeradas) o se le dice que no está; nunca bloquea al resto.
+      const first = extractWithNotes(text, catalog, { fuzzy: true });
+      let extraction = first.extraction;
       // Intérprete de estudios (apagado si falta): solo cuando el resolvedor exacto no basta (no reconoció nada, o algo quedó sin resolver). Lo que devuelve ya está validado contra el catálogo; si falla, sigue
       // el resultado exacto de siempre.
-      let note: string | undefined;
-      if (config.interpreter && (!extraction || extraction.result.unresolved > 0)) {
+      let note: string | undefined = formatInterpretationNote(first.notes);
+      let notFoundCount = first.notes.notFound.length;
+      let modelUsed = false;
+      if (config.interpreter && (!extraction || extraction.result.unresolved > 0 || first.notes.notFound.length > 0)) {
         let interpreted: Awaited<ReturnType<NonNullable<typeof config.interpreter>>>;
         try {
           interpreted = await config.interpreter(text, catalog, { hasDoubt: extraction !== undefined });
@@ -435,14 +449,17 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
         if (interpreted) {
           const merged = mergeInterpretation(text, extraction, interpreted);
           extraction = merged.extraction;
-          note = formatInterpretationNote(merged.notes);
+          modelUsed = true;
+          notFoundCount = merged.notes.notFound.length;
+          // Lo que interpretó la búsqueda por parecido y lo que interpretó el modelo van juntos; lo que el modelo sí encontró ya no se da por inexistente.
+          note = formatInterpretationNote({ notFound: merged.notes.notFound, interpreted: [...first.notes.interpreted.filter((item) => !merged.notes.interpreted.some((other) => other.studyName === item.studyName)), ...merged.notes.interpreted] });
           deps.log("quote_session", { event: "interpreted", matched: merged.extraction?.matched.length ?? 0, notFound: merged.notes.notFound.length, interpretedAs: merged.notes.interpreted.length, ambiguous: merged.extraction?.result.ambiguous.length ?? 0, unclear: merged.extraction?.result.unresolved ?? 0 });
-          // Pidió solo estudios que el catálogo no tiene: se le dice cuáles y no se toca la solicitud.
-          if (!extraction && merged.notes.notFound.length > 0 && note) {
-            retire();
-            return ask(note, 0);
-          }
         }
+      }
+      // Pidió solo estudios que el catálogo no tiene: se le dice cuáles y no se toca la solicitud.
+      if (!extraction && note && notFoundCount > 0 && (modelUsed || classifyText(text) === "RECIPE_OR_QUOTE")) {
+        retire();
+        return ask(note, 0);
       }
       if (!extraction) {
         // «¿cuánto es en total?» sin estudios nuevos: pide el precio de lo que ya está anotado. Sin una solicitud abierta es un mensaje cualquiera.

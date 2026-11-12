@@ -9,11 +9,11 @@ import { normalizeStudyKey } from "./consensus.js";
 // equivalencia clínica dudosa: ante la duda la frase NO se incluye («examen de orina» o «heces» nombran estudios distintos según el laboratorio).
 export const STUDY_SYNONYM_GROUPS: ReadonlyArray<readonly string[]> = [
   ["hemograma completo", "hemograma", "biometria hematica", "bh", "cuadro hematico", "hematologia completa"],
-  ["glucosa", "glucosa en ayunas", "glucosa basal", "glucosa en sangre", "glicemia", "glucemia", "azucar en sangre"],
+  ["glucosa", "glucosa en ayunas", "glucosa basal", "glucosa en sangre", "glicemia", "glucemia", "azucar en sangre", "glicemia basal", "glicemia en ayunas", "glucemia basal", "glucemia en ayunas"],
   ["tgo", "ast", "got", "aspartato aminotransferasa", "transaminasa glutamico oxalacetica", "transaminasa oxalacetica"],
   ["tgp", "alt", "gpt", "alanina aminotransferasa", "transaminasa glutamico piruvica", "transaminasa piruvica"],
   ["vsg", "vhs", "eritrosedimentacion", "velocidad de sedimentacion globular", "velocidad de sedimentacion"],
-  ["examen general de orina", "ego", "uroanalisis", "orina completa", "general de orina"],
+  ["examen general de orina", "ego", "uroanalisis", "urianalisis", "urinalisis", "orina completa", "general de orina"],
   ["urocultivo", "cultivo de orina"],
   ["hemoglobina glicosilada", "hemoglobina glicada", "hba1c", "a1c", "hb a1c"],
   ["acido urico", "uricemia"],

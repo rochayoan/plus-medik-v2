@@ -175,6 +175,12 @@ export function classifyAiError(error: unknown, context: { invalidAttempts?: num
   return (context.invalidAttempts ?? 0) > 0 ? "SCHEMA_INVALID" : "UNKNOWN";
 }
 
+// Reintentos ante un límite de uso temporal (AI_RATE_LIMIT_RETRIES: 0 a 3, por defecto 2).
+function rateLimitRetries(): number {
+  const raw = (process.env.AI_RATE_LIMIT_RETRIES ?? "").trim();
+  return /^[0-3]$/.test(raw) ? Number(raw) : 2;
+}
+
 type CacheMode = "on" | "off" | "refresh";
 
 // AI_CACHE=off: no lee ni escribe cache (el usage de llamadas reales sí se registra).
@@ -276,6 +282,8 @@ export async function cachedAiCall<T>(options: {
   // Debe lanzar si la respuesta no es válida: solo lo válido llega al cache.
   // `reasoningEffort` (opcional) es solo telemetría: el esfuerzo con el que se hizo el intento que devolvió el valor, si difiere del configurado.
   call: () => Promise<{ value: T; usage?: AiUsage; reasoningEffort?: string }>;
+  // Solo pruebas: espera entre reintentos por límite de uso (por defecto una espera real).
+  retrySleep?: (ms: number) => Promise<void>;
 }): Promise<T> {
   const mode = cacheMode();
   const { label, provider, model } = options;
@@ -318,7 +326,21 @@ export async function cachedAiCall<T>(options: {
     // Modo offline: ANTES de la guarda de gasto, para que ninguna guarda permisiva pueda dejar pasar una llamada real.
     assertModelCallsAllowed(label, provider, model);
     await realCallGate?.({ label, provider, model });
-    ({ value, usage, reasoningEffort: attemptEffort } = await (telemetry ? callScope.run(telemetry, () => options.call()) : options.call()));
+    const run = () => (telemetry ? callScope.run(telemetry, () => options.call()) : options.call());
+    // Un 429 por «vas demasiado rápido» (varias llamadas a la vez) casi siempre se resuelve esperando un instante: se reintenta, con tope. Uno por cuota o saldo NO se reintenta (no se arregla esperando).
+    const retries = rateLimitRetries();
+    for (let attempt = 0; ; attempt++) {
+      try {
+        ({ value, usage, reasoningEffort: attemptEffort } = await run());
+        break;
+      } catch (error) {
+        const info = describeProviderError(error);
+        if (attempt >= retries || info.httpStatus !== 429 || info.cause === "QUOTA_OR_BILLING") throw error;
+        const waitMs = Math.min(5000, info.retryAfterS !== undefined ? info.retryAfterS * 1000 : 1200 * (attempt + 1) + Math.floor(Math.random() * 600));
+        console.error(`RATE LIMIT ${label} (${model}): reintento ${attempt + 1} en ${waitMs} ms`);
+        await (options.retrySleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))))(waitMs);
+      }
+    }
   } catch (error) {
     if (telemetry) emitAttempt(telemetry, { cacheHit: false, outcome: "FAILED", errorKind: classifyAiError(error, { invalidAttempts: telemetry.invalidAttempts }), failure: describeProviderError(error) });
     throw error;

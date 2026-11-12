@@ -283,7 +283,7 @@ describe("G4.0: dónde pueden aparecer las sesiones de cotización", () => {
   });
 
   it("el módulo puro no toca la red ni la base: solo catálogo, normalización, formato de cotización y clasificación de texto", () => {
-    expect(importsOf(join(root, "src/quote-session.ts")).sort()).toEqual(["./catalog.js", "./consensus.js", "./partial-auto.js", "./study-synonyms.js", "./text-handler.js", "./text-normalize.js", "./types.js", "./whatsapp-quote.js"].sort());
+    expect(importsOf(join(root, "src/quote-session.ts")).sort()).toEqual(["./catalog-search.js", "./catalog.js", "./consensus.js", "./partial-auto.js", "./study-synonyms.js", "./text-handler.js", "./text-normalize.js", "./types.js", "./whatsapp-quote.js"].sort());
     expect(code(join(root, "src/quote-session.ts"))).not.toMatch(/\bfetch\s*\(|process\.env|supabase|createClient/i);
   });
 

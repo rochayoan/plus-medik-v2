@@ -7,7 +7,8 @@ import { createStudyInterpreter, type InterpreterClient, type InterpreterRun } f
 import { createTextHandler } from "../src/text-handler.js";
 import { processTurns, type IncomingTurn } from "../src/turns.js";
 import type { QuoteDeps } from "../src/whatsapp-quote.js";
-import { CATALOG, COLESTEROL, GLUCOSA, HEMOGRAMA, TRIGLICERIDOS, TSH_ECLIA, TSH_NEO } from "./support/study-catalog.js";
+import { CATALOG, COLESTEROL, GLUCOSA, HEMOGRAMA, study, TRIGLICERIDOS, TSH_ECLIA, TSH_NEO } from "./support/study-catalog.js";
+import type { CatalogStudy } from "../src/types.js";
 
 // Cotizaciones inteligentes por texto, de extremo a extremo SIN base de datos real: mensaje -> sesión -> resolvedor exacto -> intérprete (cliente simulado, ninguna llamada a OpenAI) -> cotización con precios
 // del catálogo. La sesión de cotización es un doble con estado que imita al repositorio real.
@@ -72,7 +73,7 @@ function fakeKnowledge(approved: Record<string, { fastingHours: number }>) {
   return { knowledge: { getStudyPreparation } as never, getStudyPreparation };
 }
 
-function world(options: { interpret?: (run: InterpreterRun) => string | Promise<string>; noInterpreter?: boolean; approved?: Record<string, { fastingHours: number }> } = {}) {
+function world(options: { interpret?: (run: InterpreterRun) => string | Promise<string>; noInterpreter?: boolean; approved?: Record<string, { fastingHours: number }>; catalog?: CatalogStudy[] } = {}) {
   const { repo, closes, open } = sessionAudit();
   const sends: string[] = [];
   const logs: Array<[string, Record<string, unknown>]> = [];
@@ -88,7 +89,7 @@ function world(options: { interpret?: (run: InterpreterRun) => string | Promise<
   const traces: unknown[] = [];
   const deps: QuoteDeps = {
     downloadImage: vi.fn(async () => ({ bytes: new Uint8Array() })),
-    loadCatalog: vi.fn(async () => structuredClone(CATALOG)),
+    loadCatalog: vi.fn(async () => structuredClone(options.catalog ?? CATALOG)),
     analyze: vi.fn(async () => { throw new Error("no se usa"); }),
     sendText: vi.fn(async (_to: string, body: string) => { sends.push(body); return { providerMessageId: "wamid.out" }; }),
     log: (event, data) => logs.push([event, data]),
@@ -165,22 +166,22 @@ describe("cotización por texto con el intérprete", () => {
   });
 
   it("un modelo que inventa un estudio (nunca lo buscó) no consigue una cotización: se pide el nombre exacto", async () => {
-    const w = world({ interpret: () => output([match("trigliceridoz", TRIGLICERIDOS.id)], true) });
-    const reply = await w.say("cotiza trigliceridoz");
+    const w = world({ interpret: () => output([match("zzqxv", TRIGLICERIDOS.id)], true) });
+    const reply = await w.say("cotiza zzqxv");
     expect(w.closes).toEqual([]);
     expect(reply).toContain(QUOTE_TEXTS.ask_unresolved);
   });
 
   it("poca seguridad del modelo tampoco se cotiza", async () => {
-    const w = world({ interpret: (run) => { const id = JSON.parse(run.runTool("search_studies", { query: "glucoza" })).results[0].id; return output([match("glucoza", id, "LOW")], true); } });
-    const reply = await w.say("cotiza glucoza");
+    const w = world({ interpret: (run) => { const id = JSON.parse(run.runTool("search_studies", { query: "glucoza" })).results[0].id; return output([match("zzqxv", id, "LOW")], true); } });
+    const reply = await w.say("cotiza zzqxv");
     expect(w.closes).toEqual([]);
     expect(reply).toContain(QUOTE_TEXTS.ask_unresolved);
   });
 
   it("si el modelo dice que no existe algo que el catálogo sí tiene, no se le dice al paciente que falta: se le ofrecen las opciones", async () => {
     const w = world({ interpret: () => output([missing("glucosa")], true) });
-    const reply = await w.say("cotiza glucoza");
+    const reply = await w.say("cotiza zzqxv");
     expect(w.closes).toEqual([]);
     expect(reply).not.toContain("No encontré en nuestro catálogo");
     expect(reply).toContain(QUOTE_TEXTS.ask_option_intro);
@@ -212,16 +213,25 @@ describe("cotización por texto con el intérprete", () => {
 
   it("si el intérprete falla, el mensaje se procesa como siempre (sin interpretación)", async () => {
     const w = world({ interpret: () => { throw new Error("modelo caído"); } });
-    const reply = await w.say("cotiza glucoza");
+    const reply = await w.say("cotiza zzqxv");
     expect(w.client.run).toHaveBeenCalled();
-    expect(reply).toContain(QUOTE_TEXTS.ask_unresolved);
+    expect(reply).toContain("No encontré en nuestro catálogo: «zzqxv»");
     expect(w.closes).toEqual([]);
+  });
+
+  it("un error de ortografía lo resuelve la búsqueda por parecido sin gastar el modelo, y se le dice al paciente cómo se interpretó", async () => {
+    const w = world({ interpret: searchingModel([]) });
+    const reply = await w.say("cotiza glucoza");
+    expect(w.client.run).not.toHaveBeenCalled();
+    expect(reply).toContain("GLUCOSA");
+    expect(reply).toContain(`Interpreté «glucoza» como ${GLUCOSA.name}.`);
+    expect(quotedLines(w.closes)!.totalBs).toBe(GLUCOSA.priceBs);
   });
 
   it("sin intérprete configurado el comportamiento es el de siempre y el modelo no existe", async () => {
     const w = world({ noInterpreter: true });
-    const reply = await w.say("cotiza glucoza");
-    expect(reply).toContain(QUOTE_TEXTS.ask_unresolved);
+    const reply = await w.say("cotiza zzqxv");
+    expect(reply).toContain("No encontré en nuestro catálogo: «zzqxv»");
     expect(w.client.run).not.toHaveBeenCalled();
   });
 
@@ -245,6 +255,39 @@ describe("cotización por texto con el intérprete", () => {
     await w.say("cotiza glucoza");
     expect(JSON.stringify(w.runs.map((run) => run.runTool("search_studies", { query: "glucosa" })))).not.toMatch(/price|precio|\b30\b/i);
     expect(JSON.stringify(w.logs)).not.toContain("glucoza");
+  });
+});
+
+describe("lista real con dudas: se pregunta con opciones y se puede elegir más de una", () => {
+  const VDRL = study(31, "TEST VDRL ( Semi Cuantitativo)", [], 60);
+  const HEP_AG = study(32, "HEPATITIS B ANTIGENO DE SUP. (PRUEBA RAPIDA)", [], 65);
+  const HEP_AC = study(33, "HEPATITIS B ANTICUERPO DE SUP. PRUEBA RAPIDA", [], 66);
+  const catalog = [...CATALOG, VDRL, HEP_AG, HEP_AC];
+  it("anota lo claro, pregunta solo la hepatitis con opciones numeradas, acepta «1 y 2» y cotiza todo", async () => {
+    const w = world({ catalog, noInterpreter: true });
+    const ask = await w.say("HEMATOLOGIA\n* Hemograma Completo\nQUIMICA SANGUINEA\n* Glicemia (Basal)\nSEROLOGIA\n* V.D.R.L\n* Hepatitis B Ag.De Sup (P. Rápida)");
+    expect(ask).toContain("Estudios anotados:");
+    expect(ask).toContain("GLUCOSA");
+    expect(ask).toContain("TEST VDRL");
+    expect(ask).toContain(QUOTE_TEXTS.ask_option_intro);
+    expect(ask).toContain("1. HEPATITIS B ANTIGENO");
+    expect(ask).toContain("2. HEPATITIS B ANTICUERPO");
+    expect(ask).toContain(QUOTE_TEXTS.ask_option_outro);
+    expect(w.closes).toEqual([]);
+    const chosen = await w.say("1 y 2");
+    expect(chosen).toContain("Estudios anotados:");
+    expect(chosen).toContain(QUOTE_TEXTS.confirm_done);
+    await w.say("sí");
+    const quoted = quotedLines(w.closes)!;
+    expect(quoted.lines.map((line) => line.studyId).sort()).toEqual([HEMOGRAMA, GLUCOSA, VDRL, HEP_AG, HEP_AC].map((item) => item.id).sort());
+    expect(quoted.totalBs).toBe(HEMOGRAMA.priceBs + GLUCOSA.priceBs + VDRL.priceBs + HEP_AG.priceBs + HEP_AC.priceBs);
+  });
+  it("una opción fuera de la lista se rechaza sin perder lo anotado", async () => {
+    const w = world({ catalog, noInterpreter: true });
+    await w.say("Hemograma, Hepatitis B Ag.De Sup (P. Rápida)");
+    const invalid = await w.say("1 y 5");
+    expect(invalid).toContain(QUOTE_TEXTS.choose_invalid);
+    expect(w.closes).toEqual([]);
   });
 });
 

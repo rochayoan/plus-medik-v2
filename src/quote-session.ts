@@ -1,4 +1,5 @@
 import { ExactAliasCatalogResolver } from "./catalog.js";
+import { searchCatalog, type SearchHit } from "./catalog-search.js";
 import { normalizeStudyKey } from "./consensus.js";
 import { formatQuoteMessage, QUOTE_FOOTER } from "./whatsapp-quote.js";
 import { buildPublicQuote } from "./partial-auto.js";
@@ -115,9 +116,29 @@ export function parseSessionCommand(text: string): "FINALIZE" | "CANCEL" | undef
 
 // Palabras de cortesía y de pedido que pueden rodear al nombre de un estudio. Solo se quitan de los EXTREMOS del fragmento, nunca del interior, y nunca palabras que formen
 // parte de un nombre (estudio, examen, análisis, perfil...): ante la duda el fragmento no se resuelve y el caso va a revisión.
-const FILLER = new Set(["hola", "oye", "oiga", "buenas", "buenos", "dias", "tardes", "noches", "quiero", "quisiera", "necesito", "deseo", "quería", "queria", "cotizar", "cotizarme", "cotizacion", "cotiza", "cotizame", "cotice", "cotices", "precio", "precios", "cuanto", "cuesta", "cuestan", "sale", "salen", "costo", "me", "te", "se", "mi", "mis", "pueden", "puedes", "podrian", "podrias", "favor", "por", "gracias", "tambien", "ademas", "otro", "otra", "mas", "y", "e", "el", "la", "los", "las", "un", "una", "unos", "unas", "para", "si", "tengo", "que", "hacer", "hacerme", "hacerse", "realizar", "realizarme", "sacar", "sacarme", "saber", "ver", "es", "son", "de", "del", "gustaria", "interesa", "consultar", "averiguar", "solicito", "solicitar", "dame", "darme", "pasame", "enviame", "mandame", "todo", "todos", "eso", "esto", "estos", "esos", "junto", "juntos", "total", "en", "agrega", "agregame", "agregar", "agregale", "agregue", "agregues", "anade", "anadir", "anademe", "anadele", "suma", "sumame", "sumale", "incluye", "incluyeme", "incluir", "pon", "ponme", "ponle", "falta", "faltan", "nomas"]);
+const FILLER = new Set(["hola", "oye", "oiga", "buenas", "buenos", "dias", "tardes", "noches", "quiero", "quisiera", "necesito", "deseo", "quería", "queria", "cotizar", "cotizarme", "cotizacion", "cotiza", "cotizame", "cotice", "cotices", "precio", "precios", "cuanto", "cuesta", "cuestan", "sale", "salen", "costo", "me", "te", "se", "mi", "mis", "pueden", "puedes", "podrian", "podrias", "favor", "por", "gracias", "tambien", "ademas", "otro", "otra", "mas", "y", "e", "el", "la", "los", "las", "un", "una", "unos", "unas", "para", "si", "tengo", "que", "hacer", "hacerme", "hacerse", "realizar", "realizarme", "sacar", "sacarme", "saber", "ver", "es", "son", "de", "del", "gustaria", "interesa", "consultar", "averiguar", "solicito", "solicitar", "dame", "darme", "pasame", "enviame", "mandame", "todo", "todos", "eso", "esto", "estos", "esos", "junto", "juntos", "total", "en", "agrega", "agregame", "agregar", "agregale", "agregue", "agregues", "anade", "anadir", "anademe", "anadele", "suma", "sumame", "sumale", "incluye", "incluyeme", "incluir", "pon", "ponme", "ponle", "falta", "faltan", "nomas", "seria", "serian", "sera", "saldria", "saldrian", "costaria", "costarian", "cuestan", "cobran", "cobrarian", "valen", "vale", "valdria", "podria", "podrian", "tendria", "tienen", "hacen", "realizan", "informacion", "consulta", "duda", "pregunta", "pregunto", "preguntar", "disculpe", "disculpa", "perdon", "perdone", "porfa", "porfis", "porfavor"]);
 // Palabras que nombran «estudios» en general, sin decir cuál: un fragmento hecho solo de relleno y de estas palabras («quiero cotizar unos análisis») no es un estudio sin resolver, no dice nada.
-const GENERIC = new Set(["analisis", "estudio", "estudios", "examen", "examenes", "laboratorio", "laboratorios", "receta", "orden", "medica", "medico", "chequeo", "varios", "algunos"]);
+const GENERIC = new Set(["analisis", "estudio", "estudios", "examen", "examenes", "laboratorio", "laboratorios", "receta", "orden", "medica", "medico", "chequeo", "varios", "algunos", "antibiograma", "antibiogramas", "hijo", "hija", "hijos", "mama", "papa", "esposo", "esposa", "bebe", "nino", "nina", "paciente", "familiar", "senora", "senor", "doctor", "doctora", "urgente", "hoy", "manana", "ahora", "pronto"]);
+// Títulos de sección de una orden médica («HEMATOLOGIA», «QUIMICA SANGUINEA»): no son estudios. Solo se ignoran en una lista (3 o más fragmentos) y solo si el fragmento ES el título.
+const MODIFIER_WORDS = new Set(["completo", "completa", "total", "totales", "general", "simple", "basal", "automatizado", "serico", "serica", "cuantitativo", "cuantitativa", "cualitativo", "cualitativa", "rapida", "rapido", "prueba", "pruebas", "test", "adulto", "pediatrico", "convencional", "orina", "sangre", "heces", "suero", "muestra", "muestras"]);
+const SECTION_HEADINGS = new Set(["hematologia", "quimica sanguinea", "quimica clinica", "quimica", "bioquimica", "serologia", "inmunologia", "microbiologia", "bacteriologia", "parasitologia", "coprologia", "urianalisis", "uroanalisis", "hormonas", "hormonal", "coagulacion", "inmunoserologia", "otros", "otros estudios", "laboratorio clinico"]);
+// Calificativos de muestra que no cambian de qué estudio se trata («gasometría arterial o venosa», «complemento sérico C3»): se usan solo como segundo intento.
+const QUALIFIERS = new Set(["arterial", "venosa", "venoso", "serico", "serica", "sanguineo", "sanguinea", "o"]);
+// «V.D.R.L» → «VDRL», «H.I.V.» → «HIV».
+const collapseDots = (value: string): string => value.replace(/\b(?:[A-Za-z]\.)+[A-Za-z]\b\.?/g, (match) => match.replace(/\./g, ""));
+const stripParens = (value: string): string => value.replace(/\([^)]*\)/g, " ").replace(/\s+/g, " ").trim();
+const stripQualifiers = (value: string): string => normalizeStudyKey(value).split(" ").filter((token) => token !== "" && !QUALIFIERS.has(token)).join(" ");
+// Segundo intento EXACTO: siglas sin puntos y sin calificativos de muestra (nunca se quitan paréntesis aquí: «(P. Rápida)» distingue un estudio de otro).
+function exactRelaxedForms(segment: string): string[] {
+  const dots = collapseDots(segment);
+  return [...new Set([dots, stripQualifiers(dots)].map((form) => form.trim()).filter((form) => form !== "" && normalizeStudyKey(form) !== normalizeStudyKey(segment)))];
+}
+// Formas alternativas de un fragmento para la búsqueda por parecido (sin repetir ni devolver el original).
+function relaxedForms(segment: string): string[] {
+  const base = collapseDots(segment);
+  const noParens = stripParens(base);
+  return [...new Set([base, noParens, stripQualifiers(noParens), stripQualifiers(base)].map((form) => form.trim()).filter((form) => form !== "" && normalizeStudyKey(form) !== normalizeStudyKey(segment)))];
+}
 const MAX_SEGMENTS = 20;
 const MAX_TOTAL_SEGMENTS = 40;
 // Frases más largas que un nombre de estudio de buen tamaño no se buscan como un solo nombre.
@@ -161,11 +182,54 @@ export interface TextExtraction {
   isRequest: boolean;
   // true si el mensaje pide cotizar o pregunta un precio (cotiza, precio, cuánto cuesta...).
   wantsQuote: boolean;
+  // Solo con la búsqueda por parecido: qué se interpretó como qué estudio y qué no está en el catálogo (se le dice al paciente; nunca bloquea la cotización del resto).
+  notes?: InterpretationNotes;
 }
 
-type Segment = { kind: "MATCHED"; study: CatalogStudy } | { kind: "AMBIGUOUS"; candidates: CatalogStudy[] } | { kind: "UNMATCHED" } | { kind: "EMPTY" };
+type Segment =
+  | { kind: "MATCHED"; study: CatalogStudy; via?: string }
+  | { kind: "AMBIGUOUS"; candidates: CatalogStudy[] }
+  | { kind: "UNMATCHED" }
+  | { kind: "EMPTY" }
+  | { kind: "NOTFOUND"; mention: string };
 
-export function extractStudyRequests(text: string, catalog: readonly CatalogStudy[]): TextExtraction | undefined {
+// Búsqueda por parecido (solo para decidir, nunca para dar precio: el precio lo calcula el catálogo al cotizar). Se acepta un estudio solo si lidera con claridad; si hay varios plausibles se le pregunta al
+// paciente con opciones del catálogo; si no hay nada parecido, se le dice que el catálogo no lo tiene y se cotiza el resto.
+export const FUZZY = { strong: 0.88, strongGap: 0.1, unique: 0.75, uniqueGap: 0.12, lone: 0.65, group: 0.6, span: 0.15, maxOptions: 4, minScore: 0.45 } as const;
+
+function mergeHits(lists: readonly SearchHit[][]): SearchHit[] {
+  const best = new Map<string, SearchHit>();
+  for (const list of lists) for (const hit of list) if (!best.has(hit.study.id) || best.get(hit.study.id)!.score < hit.score) best.set(hit.study.id, hit);
+  return [...best.values()].sort((a, b) => b.score - a.score || (a.study.id < b.study.id ? -1 : 1));
+}
+
+export function decideFuzzy(allHits: readonly SearchHit[], mention: string, mode: "ANY" | "STRONG_ONLY" = "ANY"): Segment {
+  // Un nombre mucho más largo que lo escrito que solo coincide en una palabra suelta («hijo» → «ADN paternidad padre e hijo») no es un candidato plausible, salvo que el parecido sea muy alto.
+  const queryWords = Math.max(1, normalizeStudyKey(mention).split(" ").filter(Boolean).length);
+  const hits = allHits.filter((hit) => hit.score >= FUZZY.strong || hit.via.split(" ").length <= queryWords + 3);
+  const top = hits[0];
+  if (!top || top.score < FUZZY.group) return mode === "STRONG_ONLY" ? { kind: "UNMATCHED" } : { kind: "NOTFOUND", mention };
+  const second = hits[1];
+  const gap = top.score - (second?.score ?? 0);
+  const strong = (top.score >= FUZZY.strong && gap >= FUZZY.strongGap) || (top.score >= FUZZY.unique && gap >= FUZZY.uniqueGap) || (!second && top.score >= FUZZY.lone);
+  if (strong) return { kind: "MATCHED", study: top.study, via: mention };
+  if (mode === "STRONG_ONLY") return { kind: "UNMATCHED" };
+  const plausible = hits.filter((hit) => hit.score >= Math.max(FUZZY.group, top.score - FUZZY.span)).slice(0, FUZZY.maxOptions);
+  const padded = plausible.length >= 2 ? plausible : hits.slice(0, 2);
+  return padded.length >= 2 ? { kind: "AMBIGUOUS", candidates: padded.map((hit) => hit.study) } : { kind: "NOTFOUND", mention };
+}
+
+export interface ExtractionOptions {
+  // Búsqueda por parecido, encabezados de sección y siglas con puntos. Apagado: solo el resolvedor exacto de siempre.
+  fuzzy?: boolean;
+}
+
+export function extractStudyRequests(text: string, catalog: readonly CatalogStudy[], options: ExtractionOptions = {}): TextExtraction | undefined {
+  return extractWithNotes(text, catalog, options).extraction;
+}
+
+export function extractWithNotes(text: string, catalog: readonly CatalogStudy[], options: ExtractionOptions = {}): { extraction: TextExtraction | undefined; notes: InterpretationNotes } {
+  const fuzzy = options.fuzzy === true;
   const resolver = new ExactAliasCatalogResolver([...catalog]);
   const direct = (key: string): Segment => {
     const resolution = resolver.resolve(observation(key));
@@ -209,8 +273,44 @@ export function extractStudyRequests(text: string, catalog: readonly CatalogStud
       if (resolution.kind === "MATCHED") return resolution;
       if (resolution.kind === "AMBIGUOUS" && viaSynonym.kind === "UNMATCHED") viaSynonym = resolution;
     }
+    // Siglas con puntos («V.D.R.L») y calificativos de muestra («arterial o venosa»): segundo intento con el mismo resolvedor exacto.
+    if (fuzzy && viaSynonym.kind === "UNMATCHED") {
+      for (const form of exactRelaxedForms(segment)) {
+        for (const option of variants(form)) {
+          if (option === "") continue;
+          const resolution = resolvePhrase(option);
+          if (resolution.kind === "MATCHED") return resolution;
+          if (resolution.kind === "AMBIGUOUS" && viaSynonym.kind === "UNMATCHED") viaSynonym = resolution;
+        }
+      }
+    }
     // Ningún candidato único: ¿había al menos una frase del fragmento que no sea solo relleno? Entonces es un estudio que no se resolvió.
     return viaSynonym;
+  };
+
+  // Búsqueda por parecido de un fragmento sin resolver (apagada por defecto). `mode` STRONG_ONLY solo acepta un estudio que lidera con claridad (sin preguntar ni dar por inexistente).
+  const approximate = (segment: string, mode: "ANY" | "STRONG_ONLY"): Segment => {
+    // Sin el relleno de los extremos («quisiera saber cuánto cuesta una tiroides» → «tiroides»): eso es lo que se busca y lo que se le muestra al paciente.
+    const stripped = variants(segment).filter((form) => form !== "");
+    const core = stripped.length > 0 ? stripped[stripped.length - 1]! : normalizeStudyKey(segment);
+    // Si no hubo relleno que quitar se muestra tal como lo escribió el paciente; si lo hubo, solo el nombre.
+    const mention = cleanMention(core.split(" ").length === normalizeStudyKey(segment).split(" ").filter(Boolean).length ? segment : core);
+    // Una frase larga no es el nombre de un estudio: no se adivina nada ni se le dice al paciente que «no existe».
+    const coreForms = variants(stripParens(collapseDots(segment))).filter((form) => form !== "");
+    const words = (coreForms.length > 0 ? coreForms[coreForms.length - 1]! : core).split(" ").filter(Boolean).length;
+    if (words > 6) return mode === "STRONG_ONLY" ? { kind: "UNMATCHED" } : { kind: "EMPTY" };
+    const search = (forms: readonly string[]): SearchHit[] => mergeHits([...new Set(forms.map((form) => normalizeStudyKey(form)).filter((form) => form !== ""))].slice(0, 8).map((query) => searchCatalog(query, catalog, { limit: 6, minScore: FUZZY.minScore })));
+    // Primero tal como lo escribió (con sus paréntesis: «(P. Rápida)» distingue un estudio de otro); solo si nada se parece, sin paréntesis ni calificativos.
+    const direct = search([segment, ...stripped]);
+    // Una palabra suelta que es solo un calificativo o una muestra («completo», «total», «orina») no identifica ningún estudio: no se adivina ni se ofrecen opciones.
+    if (MODIFIER_WORDS.has(core)) return mode === "STRONG_ONLY" ? { kind: "UNMATCHED" } : { kind: "EMPTY" };
+    if (direct[0] && direct[0].score >= FUZZY.group) return decideFuzzy(direct, mention, mode);
+    return decideFuzzy(mergeHits([direct, search(relaxedForms(segment).flatMap((form) => [form, ...variants(form)]))]), mention, mode);
+  };
+  const interpreted: Array<{ mention: string; studyName: string }> = [];
+  const finish = (segment: Segment, mention: string): Segment => {
+    if (segment.kind === "MATCHED" && segment.via !== undefined) interpreted.push({ mention: segment.via || mention, studyName: segment.study.name });
+    return segment;
   };
 
   // Una línea sin separadores («hemograma glucosa urea») se divide en los nombres que el catálogo reconoce, de izquierda a derecha y el más largo primero. Solo vale si TODA la línea queda cubierta
@@ -241,8 +341,11 @@ export function extractStudyRequests(text: string, catalog: readonly CatalogStud
     return one.kind === "UNMATCHED" ? (tile(piece) ?? [one]) : [one];
   };
 
-  const coarse = text.slice(0, 2000).split(/[,;\n+/]|\s&\s/).map((part) => part.replace(LIST_MARKER, "").trim()).filter(Boolean).slice(0, MAX_SEGMENTS);
+  let coarse = text.slice(0, 2000).split(/[,;\n+/]|\s&\s/).map((part) => part.replace(LIST_MARKER, "").trim()).filter(Boolean).slice(0, MAX_SEGMENTS);
+  // En una lista, un fragmento que ES el título de una sección de la orden («SEROLOGIA») no es un estudio.
+  if (fuzzy && coarse.length >= 3) coarse = coarse.filter((part) => !SECTION_HEADINGS.has(normalizeStudyKey(part.replace(/[:.\-–—]+$/, ""))));
   const segments: Segment[] = [];
+  const notFound: string[] = [];
   for (const part of coarse) {
     const whole = resolveSegment(part);
     if (whole.kind !== "UNMATCHED") {
@@ -251,8 +354,29 @@ export function extractStudyRequests(text: string, catalog: readonly CatalogStud
     }
     // Un nombre puede contener «y»: primero se intenta el fragmento entero y solo si no resuelve se separa en « y ».
     const pieces = part.split(/\s+(?:y|e|tambien|ademas)\s+/i).map((piece) => piece.trim()).filter(Boolean);
-    if (pieces.length > 1) for (const piece of pieces.slice(0, MAX_SEGMENTS)) segments.push(...resolveOrTile(piece));
-    else segments.push(...(tile(part) ?? [whole]));
+    if (!fuzzy) {
+      if (pieces.length > 1) for (const piece of pieces.slice(0, MAX_SEGMENTS)) segments.push(...resolveOrTile(piece));
+      else segments.push(...(tile(part) ?? [whole]));
+      if (segments.length >= MAX_TOTAL_SEGMENTS) break;
+      continue;
+    }
+    // Con la búsqueda por parecido: (1) las piezas exactas; (2) el fragmento entero si un estudio lidera con claridad («bilirrubinas totales y fracciones»); (3) cada pieza sin resolver por parecido.
+    if (pieces.length > 1) {
+      const pieceSegments = pieces.slice(0, MAX_SEGMENTS).map((piece) => ({ piece, segments: resolveOrTile(piece) }));
+      if (pieceSegments.every((entry) => entry.segments.every((segment) => segment.kind !== "UNMATCHED"))) {
+        for (const entry of pieceSegments) segments.push(...entry.segments);
+      } else {
+        // El fragmento entero solo vale si NINGUNA pieza se resolvió por separado: si no, «hemograma y vsg» se confundiría con «hemograma» y se perdería un estudio.
+        const anyPiece = pieceSegments.some((entry) => entry.segments.some((segment) => segment.kind !== "UNMATCHED"));
+        const strong = anyPiece ? ({ kind: "UNMATCHED" } as Segment) : approximate(part, "STRONG_ONLY");
+        if (strong.kind === "MATCHED") segments.push(finish(strong, cleanMention(part)));
+        else for (const entry of pieceSegments) for (const segment of entry.segments) segments.push(segment.kind === "UNMATCHED" ? finish(approximate(entry.piece, "ANY"), cleanMention(entry.piece)) : segment);
+      }
+    } else {
+      const tiled = tile(part);
+      if (tiled) segments.push(...tiled);
+      else segments.push(finish(approximate(part, "ANY"), cleanMention(part)));
+    }
     if (segments.length >= MAX_TOTAL_SEGMENTS) break;
   }
 
@@ -267,23 +391,31 @@ export function extractStudyRequests(text: string, catalog: readonly CatalogStud
     } else if (segment.kind === "AMBIGUOUS") {
       if (segment.candidates.length > MAX_AMBIGUOUS) unresolved++;
       else ambiguous.push(segment.candidates.map((candidate) => candidate.id));
+    } else if (segment.kind === "NOTFOUND") {
+      if (segment.mention !== "") notFound.push(segment.mention);
     } else if (segment.kind === "UNMATCHED") unresolved++;
   }
+  const notes: InterpretationNotes = { notFound: [...new Set(notFound)].slice(0, 8), interpreted: interpreted.filter((item) => matchedById.has(catalog.find((study) => study.name === item.studyName)?.id ?? "")).slice(0, 8) };
   const recognised = matchedById.size + ambiguous.length;
   // Un mensaje sin ningún estudio reconocible solo cuenta como solicitud si habla de cotizar/estudios (RECIPE_OR_QUOTE): «gracias» o «hola» no abren un caso sin resolver.
-  const isRequest = recognised > 0 || (unresolved > 0 && classifyText(text) === "RECIPE_OR_QUOTE");
-  if (!isRequest) return undefined;
+  const isRequest = recognised > 0 || ((unresolved > 0 || notes.notFound.length > 0) && classifyText(text) === "RECIPE_OR_QUOTE");
+  // Nada identificado y solo estudios que el catálogo no tiene: no hay solicitud que anotar (se le dice cuáles faltan).
+  if (!isRequest || (recognised === 0 && unresolved === 0)) return { extraction: undefined, notes };
 
   const reasons: ItemReason[] = [];
   if (ambiguous.length > 0) reasons.push("AMBIGUOUS_STUDY");
   if (unresolved > 0) reasons.push("UNRESOLVED_TEXT");
   const status: ItemStatus = unresolved > 0 ? "UNRESOLVED" : ambiguous.length > 0 ? "AMBIGUOUS" : "RESOLVED";
   return {
-    result: { status, studyIds: [...matchedById.keys()], ambiguous: ambiguous.slice(0, 20), unresolved: Math.min(unresolved, 50), reasons },
-    matched: [...matchedById.values()],
-    repeatedInMessage: repeated,
-    isRequest,
-    wantsQuote: wantsQuoteNow(text)
+    extraction: {
+      result: { status, studyIds: [...matchedById.keys()], ambiguous: ambiguous.slice(0, 20), unresolved: Math.min(unresolved, 50), reasons },
+      matched: [...matchedById.values()],
+      repeatedInMessage: repeated,
+      isRequest,
+      wantsQuote: wantsQuoteNow(text),
+      ...(fuzzy ? { notes } : {})
+    },
+    notes
   };
 }
 
@@ -486,7 +618,7 @@ export function optionsOf(group: readonly string[], catalog: readonly CatalogStu
 }
 
 // Respuestas cortas a lo que el agente preguntó: «sí» (eso es todo), «no» (falta algo) o el número/ordinal de una opción. Solo significan algo con una sesión abierta; sin ella son mensajes cualquiera.
-export type SessionReply = { kind: "YES" } | { kind: "NO" } | { kind: "CHOICE"; index: number };
+export type SessionReply = { kind: "YES" } | { kind: "NO" } | { kind: "CHOICE"; index: number; indexes?: number[] };
 const YES_CORE = new Set(["si", "sii", "siii", "sip", "claro", "correcto", "exacto", "afirmativo", "adelante", "procede", "acuerdo", "seguro"]);
 // G6.1: ni «gracias» ni «ok»/«dale»/«vale» confirman nada: solo una confirmación EXPLÍCITA cierra («sí», «sí, esos estudios», «eso es todo», «listo»). Un agradecimiento o un acuse no son una orden.
 const YES_EXTRA = new Set(["que", "por", "favor", "eso", "es", "todo", "nada", "mas", "de", "esta", "bien", "asi", "cotiza", "cotizar", "cotizame", "cotizalo", "cotizalos", "ya", "listo", "esos", "estos", "esas", "estas", "estudio", "estudios", "son", "los", "las", "mismos", "correctos"]);
@@ -494,7 +626,8 @@ const NO_CORE = new Set(["no", "falta", "faltan", "espera", "esperame", "momento
 const NO_EXTRA = new Set(["un", "uno", "una", "otro", "otra", "mas", "tengo", "hay", "estudio", "estudios", "foto", "fotos", "por", "favor", "ahora", "ya", "que", "agregar"]);
 const ORDINALS: Record<string, number> = { "1": 1, primero: 1, primera: 1, uno: 1, "2": 2, segundo: 2, segunda: 2, dos: 2, "3": 3, tercero: 3, tercera: 3, tres: 3, "4": 4, cuarto: 4, cuarta: 4, cuatro: 4, "5": 5, quinto: 5, quinta: 5, cinco: 5, "6": 6, sexto: 6, sexta: 6, seis: 6, "7": 7, septimo: 7, septima: 7, siete: 7, "8": 8, octavo: 8, octava: 8, ocho: 8 };
 const CHOICE_LEAD = new Set(["el", "la", "opcion", "numero", "quiero", "elijo", "prefiero", "es", "sera", "seria"]);
-const CHOICE_TRAIL = new Set(["opcion", "por", "favor", "gracias"]);
+const CHOICE_TRAIL = new Set(["opcion", "opciones", "por", "favor", "gracias"]);
+const CHOICE_JOINERS = new Set(["y", "e", "con", "tambien", "mas"]);
 
 // «eso nomás», «solo eso»: dicen que no falta nada (G6.0). Frases completas: «solo» o «nomás» sueltos no significan nada.
 const YES_PHRASES = /^(?:(?:si|claro|pues|bueno) )?(?:(?:solo|solamente|nomas|unicamente) (?:eso|esto)(?: nomas)?|(?:eso|esto) (?:nomas|solo|solamente|unicamente)|eso es lo unico)$/;
@@ -509,6 +642,10 @@ export function parseSessionReply(text: string): SessionReply | undefined {
   while (start < tokens.length && CHOICE_LEAD.has(tokens[start]!)) start++;
   const index = ORDINALS[tokens[start] ?? ""];
   if (index !== undefined && tokens.slice(start + 1).every((token) => CHOICE_TRAIL.has(token))) return { kind: "CHOICE", index };
+  // Varias opciones a la vez («1 y 3», «1, 2 y 4», «la 1 y la 2»): como una votación de «una o más».
+  const rest = tokens.slice(start).filter((token) => !CHOICE_JOINERS.has(token) && !CHOICE_TRAIL.has(token) && !CHOICE_LEAD.has(token));
+  const picked = [...new Set(rest.map((token) => ORDINALS[token]))];
+  if (rest.length >= 2 && rest.length <= 6 && picked.length >= 2 && picked.every((value): value is number => value !== undefined)) return { kind: "CHOICE", index: picked[0]!, indexes: picked };
   return undefined;
 }
 
@@ -571,7 +708,7 @@ export const QUOTE_TEXTS: QuoteTexts = {
   identified_so_far: "Estudios anotados:",
   confirm_done: "¿Eso es todo? Responde SÍ y te paso la cotización, o envíame los estudios que falten.",
   ask_option_intro: "Para uno de los estudios tengo varias opciones:",
-  ask_option_outro: "Responde con el número o escribe el nombre exacto del estudio.",
+  ask_option_outro: "Responde con el número de la opción (si quieres más de una, escribe sus números separados por «y») o escribe el nombre exacto del estudio.",
   ask_unresolved: "No pude identificar con certeza algunos estudios. Escribe el nombre exacto de cada uno o envía una foto de tu receta. Si no los encuentras, escribe LISTO y dejaré tu solicitud en revisión.",
   choose_invalid: "No encontré esa opción. Responde con el número de la lista o escribe el nombre exacto del estudio.",
   not_done: "De acuerdo, sigo esperando. Envíame los estudios que faltan y después responde SÍ o escribe LISTO."

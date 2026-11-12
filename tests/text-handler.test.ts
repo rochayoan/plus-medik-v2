@@ -177,3 +177,14 @@ describe("derivación a una persona: bloqueada mientras su persistencia no esté
     expect(DRAFT_TEXTS.medical_unavailable).not.toMatch(/tom(a|e)r|medicament|dosis|diagn[oó]stic|normal|grave/i);
   });
 });
+
+describe("«sangría» y «sangre» como estudios (11-nov)", () => {
+  it("el estudio «tiempo de sangría» y las muestras de sangre no son una consulta médica", async () => {
+    const { classifyText } = await import("../src/text-handler.js");
+    for (const text of ["Tiempo de coagulación y tiempo de sangría", "Hemocultivo: cultivo de sangre", "Sangre oculta en heces", "Examen de sangre completo"]) expect(classifyText(text)).not.toBe("MEDICAL");
+  });
+  it("un síntoma de sangrado sí sigue siendo médico", async () => {
+    const { classifyText } = await import("../src/text-handler.js");
+    for (const text of ["Me sangra la nariz", "Tengo sangre en la orina", "estoy sangrando mucho", "orino con sangre"]) expect(classifyText(text)).toBe("MEDICAL");
+  });
+});

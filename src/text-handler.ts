@@ -25,7 +25,7 @@ export const asksForPrice = (text: string): boolean => PRICE_WORDS.test(plain(te
 
 // Palabras raíz, sin tildes. El orden de las categorías es la prioridad (la más conservadora primero): lo médico gana a todo, pedir a una persona gana a la información,
 // y la información gana a cotizar. Ante la duda el mensaje va a la rama que NO inventa una respuesta.
-const MEDICAL = /\b(dolor\w*|duele\w*|fiebre\w*|sintoma\w*|mareo\w*|vomit\w*|sangr\w*|medicament\w*|medicina\w*|pastilla\w*|dosis|diagnostic\w*|interpret\w*|enferm\w*|emergencia\w*|urgencia\w*|urgente\w*|embaraz\w*|diabet\w*|hipertens\w*|infeccion\w*|alergi\w*)\b/;
+const MEDICAL = /\b(dolor\w*|duele\w*|fiebre\w*|sintoma\w*|mareo\w*|vomit\w*|sangr(?:a|o)\w*|(?:con|hay|tengo|veo|boto|botando|echo|echando|expulso|expulsando) sangre|medicament\w*|medicina\w*|pastilla\w*|dosis|diagnostic\w*|interpret\w*|enferm\w*|emergencia\w*|urgencia\w*|urgente\w*|embaraz\w*|diabet\w*|hipertens\w*|infeccion\w*|alergi\w*)\b/;
 const HUMAN = /\b(persona|personas|humano|humana|asesor\w*|agente|recepcion\w*|operador\w*|ejecutiv\w*|encargad\w*|hablar con|comunicar\w* con|comunicame|llamenme|llamame|llamen me|llamada\w*)\b/;
 const INFO = /\b(horario\w*|abren|abre|cierran|atienden|atencion|direccion\w*|ubicaci\w*|ubicad\w*|donde (esta|estan|queda|quedan|los encuentro)|sucursal\w*|pago\w*|pagar|pagamos|tarjeta\w*|qr|transferencia\w*|factura\w*|ayuno\w*|preparaci\w*|prepararme|domicilio\w*|resultado\w*|convenio\w*|seguro\w*|promocion\w*|descuento\w*|feriado\w*|sabado\w*|domingo\w*|requisito\w*)\b/;
 const RECIPE = /\b(cotiz\w*|receta\w*|precio\w*|cuanto (cuesta|cuestan|sale|salen|es|vale|valen|cobran)|costo\w*|tarifa\w*|presupuesto\w*|orden medica|estudio\w*|analisis|examen\w*|laboratorio)\b/;
