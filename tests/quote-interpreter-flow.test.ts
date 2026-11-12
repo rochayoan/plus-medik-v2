@@ -200,15 +200,29 @@ describe("cotización por texto con el intérprete", () => {
   });
 
   it("varias opciones válidas: pregunta con las del catálogo y, al elegir, cotiza lo elegido", async () => {
-    const w = world({ interpret: (run) => { const ids = (JSON.parse(run.runTool("search_studies", { query: "tsh" })).results as Array<{ id: string }>).map((hit) => hit.id).filter((id) => [TSH_ECLIA.id, TSH_NEO.id].includes(id)); return output([{ mention: "tsh", outcome: "AMBIGUOUS", confidence: "HIGH", studyIds: ids }], true); } });
-    const ask = await w.say("cotiza tsh");
+    const ANTI_SS = study(51, "ANTI-DNA ss (Simple Cadena) IgG (Elisa)", [], 90);
+    const ANTI_DS = study(52, "ANTI-DNA ds (Doble Cadena) IgG (Elisa)", [], 95);
+    const w = world({ catalog: [...CATALOG, ANTI_SS, ANTI_DS], noInterpreter: true });
+    const ask = await w.say("cotiza anti-dna");
     expect(ask).toContain(QUOTE_TEXTS.ask_option_intro);
-    expect(ask).toMatch(/1\. TSH/);
+    expect(ask).toMatch(/1. ANTI-DNA/);
     expect(w.closes).toEqual([]);
     const chosen = await w.say("2");
     expect(chosen).toContain("Estudios anotados:");
     await w.say("listo");
     expect(quotedLines(w.closes)!.lines).toHaveLength(1);
+  });
+
+  it("si el paciente no dice el método, se asume el más rápido (ECLIA) y se le dice; si lo dice, se respeta", async () => {
+    const w = world({ noInterpreter: true });
+    const reply = await w.say("cotiza tsh");
+    expect(reply).toContain("TSH (ECLIA)");
+    expect(reply).not.toContain("NEONATAL");
+    expect(reply).toContain("Interpreté «tsh» como TSH (ECLIA).");
+    expect(quotedLines(w.closes)!.lines.map((line) => line.studyId)).toEqual([TSH_ECLIA.id]);
+    const neonatal = world({ noInterpreter: true });
+    await neonatal.say("cotiza tsh neonatal");
+    expect(quotedLines(neonatal.closes)!.lines.map((line) => line.studyId)).toEqual([TSH_NEO.id]);
   });
 
   it("si el intérprete falla, el mensaje se procesa como siempre (sin interpretación)", async () => {

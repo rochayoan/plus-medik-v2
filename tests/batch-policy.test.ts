@@ -417,10 +417,10 @@ describe("de punta a punta: la misma solicitud da el mismo plan, sea cual sea la
     expect((await run(["hemograma", "completo", "sí"])).core).toEqual({ kind: "QUOTE", studyIds: [HEMO], closeBy: "YES" });
   });
 
-  it("un estudio que no se identifica NO se descarta en silencio: con intención de cotizar se pide su nombre, no se cotiza sin él", async () => {
+  it("un estudio que el catálogo no tiene NO se descarta en silencio: se cotiza lo identificado y se avisa cuál falta", async () => {
     const p = await run(["quiero cotizar", "hemograma", "xhq"]);
-    expect(p.core).toMatchObject({ kind: "CLARIFY", questions: [{ kind: "NAME" }] });
-    expect(p.core.kind).not.toBe("QUOTE");
+    expect(p.core).toMatchObject({ kind: "QUOTE", studyIds: [HEMO] });
+    expect(p.notices).toContainEqual({ kind: "STUDIES_NOT_IN_CATALOG", mentions: ["xhq"] });
   });
 
   it("SESIÓN ACTIVA: lo anotado antes se suma; una duda de la sesión que el lote aclara deja de preguntarse", async () => {
@@ -473,13 +473,14 @@ describe("de punta a punta: la misma solicitud da el mismo plan, sea cual sea la
     const wants = async () => ({ isQuoteRequest: true, wantsQuote: true, matched: [], ambiguous: [], unclear: [], notFound: [] });
     const natural = await run(["hemograma", "completo", "agradecería el valor total"], { interpret: wants });
     expect(natural.core).toEqual({ kind: "QUOTE", studyIds: [HEMO], closeBy: "INTENT" });
-    // el modelo quiere cotizar pero hay un nombre sin identificar y él no lo resuelve: no se cotiza
+    // el modelo quiere cotizar y hay un nombre que el catálogo no tiene: se cotiza lo identificado y se avisa cuál falta
     const unresolved = await run(["hemograma", "xhq", "agradecería el valor total"], { interpret: wants });
-    expect(unresolved.core.kind).toBe("CLARIFY");
+    expect(unresolved.core.kind).toBe("QUOTE");
+    expect(unresolved.notices).toContainEqual({ kind: "STUDIES_NOT_IN_CATALOG", mentions: ["xhq"] });
     // el modelo inventa un estudio: se ignora
     const invented = async () => ({ isQuoteRequest: true, wantsQuote: true, matched: [{ study: { id: "00000000-0000-4000-8000-0000000000ff" }, mention: "x", exact: true }], ambiguous: [], unclear: [], notFound: [] });
     const withInvented = await run(["quiero cotizar", "xhq"], { interpret: invented as never });
-    expect(withInvented.core).toMatchObject({ kind: "CLARIFY" });
+    expect(withInvented.core.kind).not.toBe("QUOTE");
     expect(JSON.stringify(withInvented)).not.toContain("0000000000ff");
   });
 });

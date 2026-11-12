@@ -188,7 +188,7 @@ export interface TextExtraction {
 
 type Segment =
   | { kind: "MATCHED"; study: CatalogStudy; via?: string }
-  | { kind: "AMBIGUOUS"; candidates: CatalogStudy[] }
+  | { kind: "AMBIGUOUS"; candidates: CatalogStudy[]; label?: string }
   | { kind: "UNMATCHED" }
   | { kind: "EMPTY" }
   | { kind: "NOTFOUND"; mention: string };
@@ -206,7 +206,7 @@ function mergeHits(lists: readonly SearchHit[][]): SearchHit[] {
 export function decideFuzzy(allHits: readonly SearchHit[], mention: string, mode: "ANY" | "STRONG_ONLY" = "ANY"): Segment {
   // Un nombre mucho más largo que lo escrito que solo coincide en una palabra suelta («hijo» → «ADN paternidad padre e hijo») no es un candidato plausible, salvo que el parecido sea muy alto.
   const queryWords = Math.max(1, normalizeStudyKey(mention).split(" ").filter(Boolean).length);
-  const hits = allHits.filter((hit) => hit.score >= FUZZY.strong || hit.via.split(" ").length <= queryWords + 3);
+  const hits = allHits.filter((hit) => hit.score >= FUZZY.strong || queryWords > 1 || hit.score >= 0.7 || hit.via.split(" ").length <= 4);
   const top = hits[0];
   if (!top || top.score < FUZZY.group) return mode === "STRONG_ONLY" ? { kind: "UNMATCHED" } : { kind: "NOTFOUND", mention };
   const second = hits[1];
@@ -217,6 +217,17 @@ export function decideFuzzy(allHits: readonly SearchHit[], mention: string, mode
   const plausible = hits.filter((hit) => hit.score >= Math.max(FUZZY.group, top.score - FUZZY.span)).slice(0, FUZZY.maxOptions);
   const padded = plausible.length >= 2 ? plausible : hits.slice(0, 2);
   return padded.length >= 2 ? { kind: "AMBIGUOUS", candidates: padded.map((hit) => hit.study) } : { kind: "NOTFOUND", mention };
+}
+
+// Método de análisis más rápido: ECLIA primero y CLIA después (definido por el laboratorio, 12-nov). Si el paciente no dice el método, se elige ese; solo si hay UN candidato con el mejor método.
+const FAST_METHODS: ReadonlyArray<RegExp> = [/\beclia\b/i, /\bclia\b/i];
+export function preferredByMethod(candidates: readonly CatalogStudy[]): CatalogStudy | undefined {
+  for (const method of FAST_METHODS) {
+    const withMethod = candidates.filter((candidate) => method.test(candidate.name));
+    if (withMethod.length === 1) return withMethod[0];
+    if (withMethod.length > 1) return undefined;
+  }
+  return undefined;
 }
 
 export interface ExtractionOptions {
@@ -308,6 +319,13 @@ export function extractWithNotes(text: string, catalog: readonly CatalogStudy[],
     return decideFuzzy(mergeHits([direct, search(relaxedForms(segment).flatMap((form) => [form, ...variants(form)]))]), mention, mode);
   };
   const interpreted: Array<{ mention: string; studyName: string }> = [];
+  // Estampa el texto del paciente en una duda (solo la primera vez).
+  const displayMention = (text: string): string => {
+    const stripped = variants(text).filter((form) => form !== "");
+    const core = stripped.length > 0 ? stripped[stripped.length - 1]! : normalizeStudyKey(text);
+    return cleanMention(core.split(" ").length === normalizeStudyKey(text).split(" ").filter(Boolean).length ? text : core);
+  };
+  const labelled = (segment: Segment, text: string): Segment => (segment.kind === "AMBIGUOUS" && segment.label === undefined ? { ...segment, label: displayMention(text) } : segment);
   const finish = (segment: Segment, mention: string): Segment => {
     if (segment.kind === "MATCHED" && segment.via !== undefined) interpreted.push({ mention: segment.via || mention, studyName: segment.study.name });
     return segment;
@@ -346,37 +364,42 @@ export function extractWithNotes(text: string, catalog: readonly CatalogStudy[],
   if (fuzzy && coarse.length >= 3) coarse = coarse.filter((part) => !SECTION_HEADINGS.has(normalizeStudyKey(part.replace(/[:.\-–—]+$/, ""))));
   const segments: Segment[] = [];
   const notFound: string[] = [];
-  for (const part of coarse) {
+  // Cada fragmento aporta sus segmentos; los ambiguos llevan el texto del paciente (para decirle cómo se interpretó).
+  const resolvePart = (part: string): void => {
     const whole = resolveSegment(part);
     if (whole.kind !== "UNMATCHED") {
       segments.push(whole);
-      continue;
+      return;
     }
     // Un nombre puede contener «y»: primero se intenta el fragmento entero y solo si no resuelve se separa en « y ».
     const pieces = part.split(/\s+(?:y|e|tambien|ademas)\s+/i).map((piece) => piece.trim()).filter(Boolean);
     if (!fuzzy) {
       if (pieces.length > 1) for (const piece of pieces.slice(0, MAX_SEGMENTS)) segments.push(...resolveOrTile(piece));
       else segments.push(...(tile(part) ?? [whole]));
-      if (segments.length >= MAX_TOTAL_SEGMENTS) break;
-      continue;
+      return;
     }
     // Con la búsqueda por parecido: (1) las piezas exactas; (2) el fragmento entero si un estudio lidera con claridad («bilirrubinas totales y fracciones»); (3) cada pieza sin resolver por parecido.
     if (pieces.length > 1) {
       const pieceSegments = pieces.slice(0, MAX_SEGMENTS).map((piece) => ({ piece, segments: resolveOrTile(piece) }));
       if (pieceSegments.every((entry) => entry.segments.every((segment) => segment.kind !== "UNMATCHED"))) {
-        for (const entry of pieceSegments) segments.push(...entry.segments);
+        for (const entry of pieceSegments) segments.push(...entry.segments.map((segment) => labelled(segment, entry.piece)));
       } else {
         // El fragmento entero solo vale si NINGUNA pieza se resolvió por separado: si no, «hemograma y vsg» se confundiría con «hemograma» y se perdería un estudio.
         const anyPiece = pieceSegments.some((entry) => entry.segments.some((segment) => segment.kind !== "UNMATCHED"));
         const strong = anyPiece ? ({ kind: "UNMATCHED" } as Segment) : approximate(part, "STRONG_ONLY");
         if (strong.kind === "MATCHED") segments.push(finish(strong, cleanMention(part)));
-        else for (const entry of pieceSegments) for (const segment of entry.segments) segments.push(segment.kind === "UNMATCHED" ? finish(approximate(entry.piece, "ANY"), cleanMention(entry.piece)) : segment);
+        else for (const entry of pieceSegments) for (const segment of entry.segments) segments.push(segment.kind === "UNMATCHED" ? finish(approximate(entry.piece, "ANY"), cleanMention(entry.piece)) : labelled(segment, entry.piece));
       }
     } else {
       const tiled = tile(part);
-      if (tiled) segments.push(...tiled);
+      if (tiled) segments.push(...tiled.map((segment) => labelled(segment, part)));
       else segments.push(finish(approximate(part, "ANY"), cleanMention(part)));
     }
+  };
+  for (const part of coarse) {
+    const before = segments.length;
+    resolvePart(part);
+    for (let index = before; index < segments.length; index++) segments[index] = labelled(segments[index]!, part);
     if (segments.length >= MAX_TOTAL_SEGMENTS) break;
   }
 
@@ -389,7 +412,13 @@ export function extractWithNotes(text: string, catalog: readonly CatalogStudy[],
       if (matchedById.has(segment.study.id)) repeated++;
       else matchedById.set(segment.study.id, segment.study);
     } else if (segment.kind === "AMBIGUOUS") {
-      if (segment.candidates.length > MAX_AMBIGUOUS) unresolved++;
+      // Sin método especificado se asume el más rápido (ECLIA, luego CLIA) si hay uno solo; se le dice al paciente cómo se interpretó.
+      const fast = fuzzy ? preferredByMethod(segment.candidates) : undefined;
+      if (fast) {
+        if (matchedById.has(fast.id)) repeated++;
+        else matchedById.set(fast.id, fast);
+        if (segment.label) interpreted.push({ mention: segment.label, studyName: fast.name });
+      } else if (segment.candidates.length > MAX_AMBIGUOUS) unresolved++;
       else ambiguous.push(segment.candidates.map((candidate) => candidate.id));
     } else if (segment.kind === "NOTFOUND") {
       if (segment.mention !== "") notFound.push(segment.mention);

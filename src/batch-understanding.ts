@@ -1,8 +1,8 @@
 import { mentionsKnownStudy } from "./catalog-search.js";
 import { normalizeStudyKey } from "./consensus.js";
 import {
-  cleanMention, extractStudyRequests, isGeneralQuestion, mergeInterpretation, optionsOf, parseSessionCommand, parseSessionReply, wantsQuoteNow,
-  type InterpretedStudyRequest, type ItemResult, type StudyInterpreter, type TextExtraction
+  cleanMention, extractStudyRequests, extractWithNotes, isGeneralQuestion, mergeInterpretation, optionsOf, parseSessionCommand, parseSessionReply, wantsQuoteNow,
+  type InterpretationNotes, type InterpretedStudyRequest, type ItemResult, type StudyInterpreter, type TextExtraction
 } from "./quote-session.js";
 import { asksForPrice, classifyText } from "./text-handler.js";
 import type { CatalogStudy } from "./types.js";
@@ -45,7 +45,7 @@ export const EMPTY_SESSION: SessionContext = { open: false, studyIds: [], pendin
 
 export type BatchCommand =
   | { fragmentId: string; kind: "FINALIZE" | "CANCEL" | "YES" | "NO" }
-  | { fragmentId: string; kind: "CHOICE"; index: number };
+  | { fragmentId: string; kind: "CHOICE"; index: number; indexes?: number[] };
 
 // QUOTE: pide cotizar o el precio. CONFIRM: confirma («listo», «sí»). CANCEL: cancela. MORE: dice que falta algo («no»). DECLINE: pide NO cotizar («no quiero cotizar»). NONE: no hay intención de cotizar.
 export type BatchIntent = "QUOTE" | "CONFIRM" | "CANCEL" | "MORE" | "DECLINE" | "NONE";
@@ -141,10 +141,8 @@ function classify(fragment: BatchFragment, order: number, input: UnderstandInput
   // La seguridad se decide ANTES que cualquier respuesta corta: «no» o «2» dentro de un mensaje médico siguen siendo médicos.
   if (category === "MEDICAL") return { ...base, kind: "MEDICAL" };
   if (category === "HUMAN_REQUEST") return { ...base, kind: "HUMAN" };
-  const parsedReply = parseSessionReply(text);
-  // Elegir varias opciones a la vez solo lo entiende el flujo de sesiones: aquí sigue siendo un texto como antes.
-  const reply = parsedReply?.kind === "CHOICE" && parsedReply.indexes ? undefined : parsedReply;
-  if (reply) return { ...base, kind: "COMMAND", command: reply.kind === "CHOICE" ? { fragmentId: fragment.id, kind: "CHOICE", index: reply.index } : { fragmentId: fragment.id, kind: reply.kind } };
+  const reply = parseSessionReply(text);
+  if (reply) return { ...base, kind: "COMMAND", command: reply.kind === "CHOICE" ? { fragmentId: fragment.id, kind: "CHOICE", index: reply.index, ...(reply.indexes ? { indexes: reply.indexes } : {}) } : { fragmentId: fragment.id, kind: reply.kind } };
   if (category === "INFO_REQUEST" || input.isInfoQuestion?.(text) || isGeneralQuestion(text)) return { ...base, kind: "QUESTION" };
   if (category === "GREETING") return { ...base, kind: "GREETING" };
   if (input.isSocial?.(text)) return { ...base, kind: "SOCIAL" };
@@ -166,6 +164,8 @@ interface GroupScore {
   text: string;
   score: number;
   extraction: TextExtraction | undefined;
+  // Lo que el catálogo no tiene y lo que se interpretó por parecido en este grupo.
+  notes: InterpretationNotes;
   // Palabras del grupo que explican los estudios reconocidos (nombre o alias).
   explained: ReadonlySet<string>;
 }
@@ -185,7 +185,8 @@ function makeScorer(catalog: readonly CatalogStudy[]) {
   return (text: string): GroupScore => {
     const cached = cache.get(text);
     if (cached) return cached;
-    const extraction = extractStudyRequests(text, catalog);
+    // Búsqueda por parecido con opciones: lo dudoso se pregunta, lo inexistente se dice, y nada bloquea la cotización del resto.
+    const { extraction, notes } = extractWithNotes(text, catalog, { fuzzy: true });
     let score = 0;
     const explained = new Set<string>();
     if (extraction) {
@@ -197,7 +198,7 @@ function makeScorer(catalog: readonly CatalogStudy[]) {
       const covered = new Set(tokensOf(text).filter((token) => explained.has(token))).size;
       score = W_MATCHED * extraction.matched.length + W_AMBIGUOUS * extraction.result.ambiguous.length + W_COVERED * covered - W_UNRESOLVED * extraction.result.unresolved;
     }
-    const scored: GroupScore = { text, score, extraction, explained };
+    const scored: GroupScore = { text, score, extraction, notes, explained };
     cache.set(text, scored);
     return scored;
   };
@@ -507,13 +508,24 @@ export async function understandBatch(input: UnderstandInput): Promise<BatchUnde
   // Por cada texto sin identificar, las palabras que el catálogo NO explica (para saber si el modelo se hizo cargo de él).
   const residues: Array<{ mention: string; tokens: string[]; requiresMention: boolean }> = [];
   const talkTexts: string[] = [];
+  const textNotFound: string[] = [];
+  const textInterpreted: Array<{ mention: string; studyName: string }> = [];
   let repeated = 0;
   let unresolvedCount = 0;
   for (const run of runs) {
     for (const group of bestGrouping(run, score)) {
       const fragmentIds = group.members.map((member) => member.fragment.id);
       const extraction = group.scored.extraction;
+      // Solo cuenta como «estudio que el catálogo no tiene» lo que parece un estudio (sigla, parecido con el catálogo) o viene en un mensaje que habla de estudios o de cotizar; una frase corriente no.
+      const missing = group.scored.notes.notFound.filter((mention) => looksLikeStudyMention(mention, catalog) || classifyText(group.scored.text) === "RECIPE_OR_QUOTE");
+      textNotFound.push(...missing);
+      textInterpreted.push(...group.scored.notes.interpreted);
       if (!extraction || extraction.matched.length + extraction.result.ambiguous.length === 0) {
+        // Solo estudios que el catálogo no tiene: se le dice cuáles faltan; no es una duda que bloquee ni conversación.
+        if (missing.length > 0 && extraction === undefined) {
+          groups.push({ fragmentIds, kind: "TALK" });
+          continue;
+        }
         // El catálogo no reconoce ningún estudio en este texto (el extractor puede incluso marcarlo «sin resolver», p. ej. «no quiero cotizar»): ¿es un posible estudio sin identificar, o conversación?
         if (looksLikeStudyMention(group.scored.text, catalog)) {
           const mention = cleanMention(group.scored.text) || "estudio";
@@ -572,8 +584,8 @@ export async function understandBatch(input: UnderstandInput): Promise<BatchUnde
   const modelMode = input.modelUse ?? "when-needed";
   let model: ModelUse = input.interpret && modelMode !== "never" ? "NOT_NEEDED" : "OFF";
   let modelWantsQuote: boolean | undefined;
-  let notFoundList: string[] = [];
-  let interpretedNotes: Array<{ mention: string; studyName: string }> = [];
+  let notFoundList: string[] = [...new Set(textNotFound)].slice(0, 8);
+  let interpretedNotes: Array<{ mention: string; studyName: string }> = [...textInterpreted].slice(0, 8);
   const activeJoined = active.map((item) => item.text).join(" ");
   // La intención de cotizar es la de la ÚLTIMA petición o negativa (regla 5): se pide cotizar (en lo no anulado) o se niega el cotizar o el precio (en lo anulado). Si ninguna cláusula por sí sola pide
   // cotizar pero el texto no anulado unido sí («quiero» + «cotizar»), cuenta como pedido en el último mensaje.
@@ -588,7 +600,7 @@ export async function understandBatch(input: UnderstandInput): Promise<BatchUnde
   const hasDoubt = unresolvedCount > 0 || ambiguous.length > 0;
   const confirmOrderPre = Math.max(-1, ...classified.filter((item) => item.command?.kind === "FINALIZE" || item.command?.kind === "YES").map((item) => item.order));
   const hasConfirmPre = confirmOrderPre > lastCancelOrder && !candidates.some((item) => item.order > confirmOrderPre);
-  const needsStudyHelp = unresolvedCount > 0;
+  const needsStudyHelp = unresolvedCount > 0 || textNotFound.length > 0;
   const needsIntentHelp = active.length > 0 && !hasConfirmPre && ((matched.size > 0 && !lexiconWantsQuote) || (modelMode === "always" && lexiconWantsQuote));
   const modelWouldHelp = {
     studies: candidates.length > 0 && (needsStudyHelp || groups.some((group) => group.kind === "TALK")),
@@ -631,8 +643,10 @@ export async function understandBatch(input: UnderstandInput): Promise<BatchUnde
           unclear.length = 0;
           unclear.push(...stillUnaddressed, ...interpreted.unclear);
           unresolvedCount = unclear.length;
-          notFoundList = merged.notes.notFound;
-          interpretedNotes = merged.notes.interpreted;
+          // Lo que el catálogo no tiene y el modelo ni mencionó sigue figurando (nunca se descarta en silencio un estudio que el paciente pidió).
+          const stillMissing = textNotFound.filter((mention) => !modelMentions.some((set) => tokensOf(mention).some((token) => set.has(token))));
+          notFoundList = [...new Set([...stillMissing, ...merged.notes.notFound])].slice(0, 8);
+          interpretedNotes = [...interpretedNotes.filter((item) => !merged.notes.interpreted.some((other) => other.studyName === item.studyName)), ...merged.notes.interpreted];
         }
       } catch {
         model = "FAILED";
@@ -656,15 +670,18 @@ export async function understandBatch(input: UnderstandInput): Promise<BatchUnde
       continue;
     }
     const options = optionsOf(group, catalog);
-    const chosen = options.length >= 2 ? options[command.index - 1] : undefined;
-    if (!chosen) {
+    const wanted = command.indexes ?? [command.index];
+    const picks = options.length >= 2 ? wanted.map((index) => options[index - 1]) : [];
+    if (picks.length === 0 || picks.some((pick) => !pick)) {
       invalidChoices++;
       continue;
     }
-    chosenIds.push(chosen.id);
-    matchedIds.add(chosen.id);
     stillPending.shift();
-    for (let index = stillPending.length - 1; index >= 0; index--) if (stillPending[index]!.includes(chosen.id)) stillPending.splice(index, 1);
+    for (const chosen of picks as Array<{ id: string; name: string }>) {
+      chosenIds.push(chosen.id);
+      matchedIds.add(chosen.id);
+      for (let index = stillPending.length - 1; index >= 0; index--) if (stillPending[index]!.includes(chosen.id)) stillPending.splice(index, 1);
+    }
   }
   const batchMatchedIds = [...new Set([...matched.keys(), ...chosenIds])];
   const clearedAmbiguous = ambiguous.filter((group) => !group.candidateIds.some((id) => matchedIds.has(id)));

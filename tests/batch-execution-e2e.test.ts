@@ -229,20 +229,20 @@ describe.skipIf(!bin)("ejecutores del plan de un lote contra PostgreSQL real", (
     expect(lastBody(w)).not.toContain(QUOTE_TEXTS.ask_option_intro);
   });
 
-  it("un estudio que no se identifica NO se descarta: se pide su nombre y no se cotiza sin él", async () => {
+  it("un estudio que el catálogo no tiene NO se descarta: se cotiza lo identificado y se dice cuál falta", async () => {
     const p = patient();
     const w = setup();
     await batch(w, p.phone, ["quiero cotizar", "hemograma", "xhq"]);
-    expect(lastBody(w)).toContain(QUOTE_TEXTS.ask_unresolved);
-    expect(hasPrice(lastBody(w))).toBe(false);
-    expect(await itemStatuses(p.key)).toEqual(["UNRESOLVED"]);
-    expect((await sessionsOf(p.key))[0]).toMatchObject({ status: "OPEN" });
+    expect(lastBody(w)).toContain("No encontré en nuestro catálogo: «xhq»");
+    expect(hasPrice(lastBody(w))).toBe(true);
+    expect(await itemStatuses(p.key)).toEqual(["RESOLVED"]);
+    expect((await sessionsOf(p.key))[0]).toMatchObject({ status: "QUOTED" });
   });
 
   it("«listo» con dudas sin aclarar cierra a REVISIÓN (nunca cotiza a medias)", async () => {
     const p = patient();
     const w = setup();
-    await batch(w, p.phone, ["hemograma", "xhq"]);
+    await batch(w, p.phone, ["hemograma", "creatinina"]);
     await batch(w, p.phone, ["listo"]);
     expect(lastBody(w)).toBe(QUOTE_TEXTS.review);
     expect(hasPrice(lastBody(w))).toBe(false);

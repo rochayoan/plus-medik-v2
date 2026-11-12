@@ -163,10 +163,11 @@ describe("ambigüedad: nunca se adivina y solo se pregunta lo necesario", () => 
     expect(u.studies.matchedIds).toEqual([]);
   });
 
-  it("un fragmento que parece un estudio y no se identifica queda sin resolver (bloquea); la conversación suelta no", async () => {
+  it("una sigla que el catálogo no tiene se dice como «no está en el catálogo» y NO bloquea el resto; la conversación suelta tampoco", async () => {
     const sigla = await understand(["hemograma", "xhq"]);
-    expect(sigla.studies.unclear).toHaveLength(1);
-    expect(sigla.request.unresolved).toBe(1);
+    expect(sigla.studies.unclear).toEqual([]);
+    expect(sigla.studies.notFound).toEqual(["xhq"]);
+    expect(sigla.request.unresolved).toBe(0);
     expect(sigla.studies.matchedIds).toEqual([HEMOGRAMA]);
     const talk = await understand(["hemograma", "para mañana por favor"]);
     expect(talk.studies.unclear).toEqual([]);
@@ -392,7 +393,8 @@ describe("OpenAI como apoyo: solo cuando hace falta, validado contra el catálog
     const u = await understand(["hemograma", "xhq"], { interpret, modelUse: "never" });
     expect(interpret).not.toHaveBeenCalled();
     expect(u.model).toBe("OFF");
-    expect(u.request.unresolved).toBe(1);
+    expect(u.request.unresolved).toBe(0);
+    expect(u.studies.notFound).toEqual(["xhq"]);
   });
 
   it("su salida NO es confiable: ids inventados o inactivos, ambigüedades con una sola opción y campos extra (precios) se descartan", async () => {
@@ -412,7 +414,8 @@ describe("OpenAI como apoyo: solo cuando hace falta, validado contra el catálog
     expect(u.studies.matchedIds).not.toContain(uuid(555));
     expect(u.studies.matchedIds).not.toContain(uuid(99));
     expect(u.request.pendingGroups).toEqual([]);
-    expect(u.studies.notFound).toEqual(["pet scan"]);
+    // lo que el modelo no mencionó (xhq) sigue figurando como «no está en el catálogo»: nunca se descarta en silencio
+    expect(u.studies.notFound).toEqual(["xhq", "pet scan"]);
     // lo que sobrevive del texto del modelo es solo texto simple (sin marcas, enlaces ni contactos) y no queda ningún campo de precio o total
     expect(u.studies.unclear.every((mention) => /^[\p{L}\p{N} .,()+/-]+$/u.test(mention))).toBe(true);
     expect(u.studies.unclear.join(" ")).not.toMatch(/https?|<|>/);
@@ -425,7 +428,8 @@ describe("OpenAI como apoyo: solo cuando hace falta, validado contra el catálog
     const broken = await understand(["hemograma", "xhq"], { interpret: failing });
     expect(broken.model).toBe("FAILED");
     expect(broken.studies.matchedIds).toEqual([HEMOGRAMA]);
-    expect(broken.request.unresolved).toBe(1);
+    expect(broken.request.unresolved).toBe(0);
+    expect(broken.studies.notFound).toEqual(["xhq"]);
     const undef = await understand(["hemograma", "xhq"], { interpret: async () => undefined });
     expect(undef.model).toBe("FAILED");
     const garbage = await understand(["hemograma", "xhq"], { interpret: async () => "no es un objeto" as never });

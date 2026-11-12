@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decideFuzzy, extractStudyRequests, extractWithNotes, FUZZY, parseSessionReply } from "../src/quote-session.js";
+import { decideFuzzy, extractStudyRequests, extractWithNotes, FUZZY, parseSessionReply, preferredByMethod } from "../src/quote-session.js";
 import type { SearchHit } from "../src/catalog-search.js";
 import { study } from "./support/study-catalog.js";
 
@@ -128,5 +128,46 @@ describe("elegir una o varias opciones, como en una votación", () => {
   it("un mensaje que mezcla números con otras palabras no es una elección", () => {
     expect(parseSessionReply("1 y hemograma")).toBeUndefined();
     expect(parseSessionReply("quiero 2 hemogramas")).toBeUndefined();
+  });
+});
+
+describe("sin método especificado se asume el más rápido (ECLIA, luego CLIA) — regla del laboratorio, 12-nov", () => {
+  const TSH_E = study(61, "TSH (ECLIA)", ["tsh"], 80);
+  const TSH_F = study(62, "TSH (FIA Fluorescencia)", ["tsh"], 70);
+  const TSH_N = study(63, "TSH NEONATAL", ["tsh"], 60);
+  const VIT_E = study(64, "VITAMINA D 25 (OH) (ECLIA)", ["vitamina d"], 120);
+  const VIT_F = study(65, "VITAMINA D 25 (OH) (FIA Fluorescencia)", ["vitamina d"], 100);
+  const VIT_1 = study(66, "VITAMINA D 1,25 Dihidroxi Calciferol", ["vitamina d"], 200);
+  const FER_C = study(67, "FERRITINA (CLIA)", ["ferritina"], 90);
+  const FER_P = study(68, "PERFIL FERROCINETICO (HIERRO, FERRITINA, TRANSFERRINA)", ["ferritina"], 150);
+  const ANTI_S = study(69, "ANTI-DNA ss (Simple Cadena) IgG (Elisa)", ["anti dna"], 90);
+  const ANTI_D = study(70, "ANTI-DNA ds (Doble Cadena) IgG (Elisa)", ["anti dna"], 95);
+  const M = [TSH_E, TSH_F, TSH_N, VIT_E, VIT_F, VIT_1, FER_C, FER_P, ANTI_S, ANTI_D];
+  const ids = (text: string) => (extractStudyRequests(text, M, { fuzzy: true })?.matched ?? []).map((s) => s.id);
+
+  it("TSH, vitamina D y ferritina sin método van a la versión ECLIA/CLIA y se le dice al paciente", () => {
+    expect(ids("tsh")).toEqual([TSH_E.id]);
+    expect(ids("vitamina D")).toEqual([VIT_E.id]);
+    expect(ids("ferritina")).toEqual([FER_C.id]);
+    expect(extractWithNotes("tsh", M, { fuzzy: true }).notes.interpreted).toEqual([{ mention: "tsh", studyName: "TSH (ECLIA)" }]);
+  });
+  it("si el paciente dice el método o la variante, se respeta", () => {
+    expect(ids("tsh neonatal")).toEqual([TSH_N.id]);
+    expect(ids("tsh fia")).toEqual([TSH_F.id]);
+  });
+  it("sin un método rápido único (estudios distintos entre sí) se sigue preguntando: anti-DNA simple o doble cadena", () => {
+    const result = extractStudyRequests("anti dna", M, { fuzzy: true })!;
+    expect(result.matched).toEqual([]);
+    expect(result.result.ambiguous).toHaveLength(1);
+  });
+  it("sin la búsqueda por parecido (por defecto) nada cambia: «tsh» sigue siendo una duda", () => {
+    expect(extractStudyRequests("tsh", M)!.result.ambiguous).toHaveLength(1);
+  });
+  it("preferredByMethod: uno solo con el mejor método; dos con ECLIA no se eligen; sin ECLIA ni CLIA no hay preferida", () => {
+    expect(preferredByMethod([TSH_E, TSH_F])).toBe(TSH_E);
+    expect(preferredByMethod([FER_C, FER_P])).toBe(FER_C);
+    expect(preferredByMethod([TSH_E, VIT_E])).toBeUndefined();
+    expect(preferredByMethod([ANTI_S, ANTI_D])).toBeUndefined();
+    expect(preferredByMethod([study(71, "X (ECLIA)", [], 1), study(72, "Y (CLIA)", [], 1)])).toMatchObject({ name: "X (ECLIA)" });
   });
 });
