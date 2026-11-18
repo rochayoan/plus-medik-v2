@@ -220,15 +220,16 @@ describe("la derivación humana al CRM", () => {
   const script: ModelScript = { plan: { handoff: "HUMAN_REQUEST" }, text: "Claro, te paso con una persona del laboratorio." };
   const turns = [turn("w1", "quiero hablar con una persona")];
 
-  it("sin ejecutor (no hay cola al CRM) o sin habilitar, no existe: el texto que lo promete se rechaza y responde el modo esencial", async () => {
+  it("sin ejecutor (no hay cola al CRM) o sin habilitar, no existe: el modelo ni se consulta (no puede prometerlo) y responde el modo esencial", async () => {
     const none = make({ handoffEnabled: true }, script);
     expect(await none.pilot.produce({ from: PHONE, turns })).toBeUndefined();
-    expect(pilotLogs(none.logs)[0]).toMatchObject({ status: "REJECTED", violations: ["UNREGISTERED_HANDOFF_PROMISE"] });
+    expect(pilotLogs(none.logs)[0]).toMatchObject({ status: "FALLBACK", reason: "HUMAN_NO_HANDOFF" });
+    expect(none.model.responds).toHaveLength(0);
     const disabled = make({ handoffEnabled: false }, script);
     const handoff = vi.fn(async () => true);
     expect(await disabled.pilot.produce({ from: PHONE, turns, handoff })).toBeUndefined();
     expect(handoff).not.toHaveBeenCalled();
-    expect(disabled.model.responds.at(0)!.capabilities.handoff).toBe(false);
+    expect(disabled.model.responds).toHaveLength(0);
   });
 
   it("con la derivación habilitada y un ejecutor: el caso se registra UNA vez ANTES de entregar el mensaje, y el mensaje puede decir que una persona atenderá", async () => {

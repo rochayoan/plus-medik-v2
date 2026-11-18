@@ -228,13 +228,21 @@ const knowledgeOptions = knowledgeAnswersEnabled
 // INTERRUPTOR DE EMERGENCIA: select plusmedik_agent_pilot_set(false, 'motivo') (migración 25) lo apaga en segundos sin redesplegar; nace apagado y falla cerrado. Apagado, o si el modelo no puede responder, atiende el
 // MODO ESENCIAL (textos fijos, catálogo, cotización y derivación deterministas): el funcionamiento básico no se pierde.
 const agentSettings = resolveAgentSettings(process.env, logLine);
+logLine("agent_webhook_config", {
+  agentSettingsAvailable: Boolean(agentSettings),
+  agentModelAvailable: Boolean(agentSettings?.model),
+  turnsEnabled,
+  textHandlerEnabled,
+  llmEnabled: process.env.PLUSMEDIK_LLM_CONVERSATION?.trim().toLowerCase() === "on"
+});
 if (agentSettings && !(turnsEnabled && textHandlerEnabled)) logLine("agent_config_invalid", { error: "TURNS_AND_TEXT_HANDLER_REQUIRED" });
 const agentPilot = agentSettings && turnsEnabled && textHandlerEnabled
   ? createAgentPilot({
       model: agentSettings.model,
       modelName: agentSettings.modelName,
       everyone: { exclude: new Set<string>(), contactKeyFor },
-      switch: createPilotSwitch({ log: logLine }),
+      // Interruptor de emergencia en la base (migración 25). SOLO para desarrollo local sin esa migración: PLUSMEDIK_AGENT_SWITCH_LOCAL=on lo reemplaza. Nunca en producción.
+      switch: process.env.PLUSMEDIK_AGENT_SWITCH_LOCAL?.trim().toLowerCase() === "on" ? { enabled: async () => true } : createPilotSwitch({ log: logLine }),
       // La derivación a una persona usa la cola al CRM de siempre: solo existe si esa cola está configurada y encendida (PLUSMEDIK_CRM_HANDOFF).
       handoffEnabled: crmOutbox !== undefined,
       context: {

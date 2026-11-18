@@ -523,7 +523,7 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
       await switchTo(true);
       await say(w, p.phone, "quiero hablar con una persona");
       expect(w.sends.map((s) => s.body)).not.toContain("Claro, te paso con una persona del laboratorio.");
-      expect(pilotLogs(w).at(-1)).toMatchObject({ status: "REJECTED", violations: ["UNREGISTERED_HANDOFF_PROMISE"] });
+      expect(pilotLogs(w).at(-1)).toMatchObject({ status: "FALLBACK", reason: "HUMAN_NO_HANDOFF" });
     });
 
     it("con la cola al CRM y la derivación habilitada: el caso se registra con el mensaje del lote ANTES de responder, y solo entonces el agente dice que una persona atenderá", async () => {
