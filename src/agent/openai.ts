@@ -36,8 +36,8 @@ function emptyReason(response: unknown): string {
   return "empty";
 }
 
-// Solo los modelos de razonamiento (o1, o3, o4, gpt-5…) admiten el parámetro `reasoning`; gpt-4o, gpt-4.1 y similares responden 400 «unsupported_parameter» si se les envía.
-export const supportsReasoning = (model: string): boolean => /^(o\d|gpt-5)/i.test(model.trim());
+// La familia gpt-3.x/gpt-4.x (gpt-4o, gpt-4.1…) NO admite el parámetro `reasoning`: responde 400 «unsupported_parameter» y el agente caía al modo esencial en cada mensaje. El resto (gpt-5, o-series…) sí.
+export const supportsReasoning = (model: string): boolean => !/^gpt-[34]/i.test(model.trim());
 
 export function createOpenAiAgentClient(options: { apiKey: string; model: string; reasoningEffort?: Effort }): AgentClient {
   let client: OpenAI | undefined;

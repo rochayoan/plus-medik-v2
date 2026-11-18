@@ -2,9 +2,8 @@ import { auditErrorFields, createSupabaseRpc } from "../audit.js";
 import type { ObservedTurn } from "../conversation-state-store.js";
 import type { ReplyQuality } from "../conversation-state.js";
 import type { AgentModel, Capabilities, HandoffReason, RecentEntry } from "./contracts.js";
-import { asksForPrice } from "../text-handler.js";
 import { runAgentTurn } from "./pipeline.js";
-import { prepareAgentTurn, summarizeDecision, type AgentContextOptions } from "./shadow.js";
+import { asksPersonOnly, prepareAgentTurn, summarizeDecision, type AgentContextOptions } from "./shadow.js";
 
 // PILOTO del nuevo agente (G7, Fase 4): el núcleo conversacional RESPONDE de verdad, pero SOLO a los números de una lista permitida y SOLO mientras el interruptor de la base diga «encendido». Para todos los demás
 // contactos nada cambia: no hay llamadas al modelo, no hay lecturas nuevas y responde el agente de siempre.
@@ -172,7 +171,7 @@ export function createAgentPilot(options: AgentPilotOptions): AgentPilot {
           const capabilities: Capabilities = { handoff: Boolean(options.handoffEnabled && handoff), quote: options.context.capabilities?.quote ?? true };
           // Pide una persona y aquí NO se puede registrar la derivación (sin cola al CRM): el modelo no responde «no puedo pasarle con alguien» (suena a sistema roto); lo atiende el modo esencial, que da el texto fijo de derivación.
           // Si en el mismo mensaje piden precios, el agente los atiende.
-          if (!capabilities.handoff && prepared.utterances.some((utterance) => utterance.topic === "HUMAN_REQUEST") && !prepared.utterances.some((utterance) => asksForPrice(utterance.text))) return fallback("HUMAN_NO_HANDOFF");
+          if (!capabilities.handoff && asksPersonOnly(prepared.utterances)) return fallback("HUMAN_NO_HANDOFF");
           // 3. Decide (plan → herramientas → texto libre → verificación por procedencia → derivación registrada si hace falta).
           const decision = await runAgentTurn(
             { model: options.model, tools: prepared.tools, ...(capabilities.handoff && handoff ? { handoff } : {}), cancelled: () => cancelled },

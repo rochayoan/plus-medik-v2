@@ -82,6 +82,9 @@ export function buildAgentTools(options: AgentContextOptions, contactKey: string
   return createToolRegistry(tools);
 }
 
+// ¿Pide hablar con una persona sin pedir precios? (el pilot la deriva al modo esencial cuando no se puede registrar la derivación)
+export const asksPersonOnly = (utterances: readonly Utterance[]): boolean => utterances.some((utterance) => utterance.topic === "HUMAN_REQUEST") && !utterances.some((utterance) => asksForPrice(utterance.text));
+
 // Una frase de salud o de pedir a una persona se conserva aunque nombre un pago.
 const keepSafety = (clause: string): boolean => { const category = classifyText(clause); return category === "MEDICAL" || category === "HUMAN_REQUEST"; };
 
