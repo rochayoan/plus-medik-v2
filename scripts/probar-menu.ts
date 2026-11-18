@@ -10,15 +10,15 @@ if (!settings) { console.error("Agente apagado o mal configurado."); process.exi
 const catalog = await loadActiveCatalog();
 const MENU = [
   "¡Hola! 👋 ¿En qué te puedo ayudar?",
-  "💰 Cotizar estudios",
-  "📍 Ubicación y horarios",
-  "👤 Hablar con una persona",
-  "Escríbeme la opción que necesitas o cuéntame qué buscas."
+  "1️⃣ Cotizar estudios",
+  "2️⃣ Ubicación y horarios",
+  "3️⃣ Hablar con una persona",
+  "Responde con el número o cuéntame qué necesitas."
 ].join("\n");
 const CASOS: Array<{ text: string; menu: boolean }> = [
   { text: "hola", menu: false },
   { text: "buenas tardes", menu: false },
-  { text: "cotizar", menu: true },
+  { text: "1", menu: true }, { text: "2", menu: true }, { text: "3", menu: true }, { text: "quiero hablar con alguien", menu: true }, { text: "cotizar", menu: true },
   { text: "ubicación y horarios", menu: true },
   { text: "hablar con una persona", menu: true }
 ];
