@@ -313,7 +313,7 @@ export const hasProcessableTurns = (turns: IncomingTurn[], deps: QuoteDeps): boo
 //   1. los claims se hacen UNO por UNO, en ese orden, así la numeración del contacto respeta el orden en que el paciente escribió;
 //   2. el trabajo de los turnos reclamados corre después en paralelo; la reserva de envío de la base impide que dos respuestas al mismo contacto se crucen y
 //      descarta las que quedaron obsoletas.
-// Lote de Kapso (buffering de 15 s, ver turn-batch.ts): si un contacto trae VARIOS mensajes en el mismo envío, todos se reclaman igual (deduplicación por mensaje), pero se atienden como UNA
+// Lote de Kapso (buffering de 20 s, ver turn-batch.ts): si un contacto trae VARIOS mensajes en el mismo envío, todos se reclaman igual (deduplicación por mensaje), pero se atienden como UNA
 // solicitud con UNA respuesta: los textos seguidos se leen como uno, cada foto conserva su análisis y todo sale en un solo mensaje, con una sola reserva de envío (cuenta una vez para el
 // tope de respuestas, y la pausa humana se comprueba una vez). Un contacto con un solo mensaje sigue exactamente la ruta de siempre.
 // Un fallo en un turno no impide los demás. Nunca se registra el contenido de un mensaje.

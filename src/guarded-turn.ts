@@ -127,7 +127,7 @@ export type TurnOutcome = SendableResult | "ignored";
 
 export interface ClaimedTurn {
   run(produce: TurnProducer): Promise<TurnOutcome>;
-  // Lote de Kapso (buffering de 15 s): varios mensajes del MISMO contacto se atienden como una sola solicitud con UNA sola respuesta, enviada por el turno que responde (`run`).
+  // Lote de Kapso (buffering de 20 s): varios mensajes del MISMO contacto se atienden como una sola solicitud con UNA sola respuesta, enviada por el turno que responde (`run`).
   // `absorb` hace el trabajo de este turno (sesión de cotización, análisis de la foto, etc., con su propio lease) pero NO reserva ni envía nada: devuelve lo que habría respondido para que
   // el turno que responde lo integre, y cierra esta corrida como «sin respuesta propia». Las escrituras de las etapas `redirectStages` (rastro de las versiones aprobadas
   // usadas en la respuesta) se hacen en la corrida que SÍ envía (`into`), para que ese rastro sea el de la corrida que envió el mensaje.

@@ -7,7 +7,7 @@ import { processTurns, type IncomingTurn, type TurnHandlers, type TurnReply } fr
 import { DRAFT_TEXTS } from "../src/text-handler.js";
 import { TECHNICAL_ISSUE_MESSAGE, type QuoteDeps } from "../src/whatsapp-quote.js";
 
-// Buffering nativo de Kapso (lotes de 15 s: batch:true + data[]) SIN base de datos: la fusión de mensajes y de respuestas (funciones puras) y el procesamiento de un lote con una
+// Buffering nativo de Kapso (lotes de 20 s: batch:true + data[]) SIN base de datos: la fusión de mensajes y de respuestas (funciones puras) y el procesamiento de un lote con una
 // auditoría simulada, que permite comprobar EXACTAMENTE qué corrida reserva el envío, cuál se cierra sin respuesta y dónde cae el rastro. La garantía contra PostgreSQL real
 // (pausa humana, tope de 5 respuestas, duplicados, sesiones de cotización) está en tests/kapso-batch-e2e.test.ts.
 
