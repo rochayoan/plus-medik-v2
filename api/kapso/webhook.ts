@@ -16,6 +16,8 @@ import { ANSWER_TEXTS, answerFromKnowledge, detectTopics, lazyKnowledge, ttlCach
 import { resolveAgentSettings } from "../../src/agent/openai.js";
 import { createAgentPilot, createPilotSwitch, createRecentProvider } from "../../src/agent/pilot.js";
 import { resolveAgentMode } from "../../src/agent/pipeline.js";
+import { GREETING_WAIT_MS, isMenuMessage, lastAssistantMessage, menuChoiceOf } from "../../src/greeting-menu.js";
+import { createMenuEventRecorder } from "../../src/menu-events.js";
 import { createConversationReader, createSupabaseConversationStore, resolveConversationState } from "../../src/conversation-state-store.js";
 import { resolveDailyReplyCap } from "../../src/daily-reply-cap.js";
 import { resolveMessageHistory } from "../../src/message-history.js";
@@ -129,6 +131,8 @@ const pauseExpiry = pauseExpiryHours === undefined ? undefined : (contactKey: st
 const awaitingPerson = createAwaitingPersonCheck();
 const photoWaitMs = resolvePhotoContextWaitMs(process.env);
 const photoContextWait = photoWaitMs > 0 ? { waitMs: photoWaitMs, newerTurn: createNewerTurnCheck() } : undefined;
+// Menú del saludo: espera FIJA (src/greeting-menu.ts, sin variable) antes de enviarlo por si el paciente sigue escribiendo. Se suma a la agrupación de mensajes de Kapso.
+const greetingWait = { waitMs: GREETING_WAIT_MS, newerTurn: createNewerTurnCheck() };
 const contactKeyFor = (phone: string) => contactKeyOf({ hmacKey: process.env.PLUSMEDIK_CONTACT_HMAC_KEY, labPhoneNumberId: process.env.KAPSO_PHONE_NUMBER_ID, contactPhone: phone });
 // Historial de TODOS los mensajes (ENCENDIDO por defecto, sin variables nuevas; ver docs/g6/05-historial-de-mensajes.md y src/message-history.ts): guarda en Supabase lo que escriben los pacientes, las respuestas del agente
 // y los mensajes de la recepción humana, para conservarlos y usarlos desde otros proyectos. Exige las migraciones 21 y 22 aplicadas (sin ellas la escritura falla sin afectar al agente), PLUSMEDIK_CONTACT_HMAC_KEY y
@@ -228,13 +232,37 @@ const knowledgeOptions = knowledgeAnswersEnabled
 // INTERRUPTOR DE EMERGENCIA: select plusmedik_agent_pilot_set(false, 'motivo') (migración 25) lo apaga en segundos sin redesplegar; nace apagado y falla cerrado. Apagado, o si el modelo no puede responder, atiende el
 // MODO ESENCIAL (textos fijos, catálogo, cotización y derivación deterministas): el funcionamiento básico no se pierde.
 const agentSettings = resolveAgentSettings(process.env, logLine);
+logLine("agent_webhook_config", {
+  agentSettingsAvailable: Boolean(agentSettings),
+  agentModelAvailable: Boolean(agentSettings?.model),
+  turnsEnabled,
+  textHandlerEnabled,
+  llmEnabled: process.env.PLUSMEDIK_LLM_CONVERSATION?.trim().toLowerCase() === "on"
+});
 if (agentSettings && !(turnsEnabled && textHandlerEnabled)) logLine("agent_config_invalid", { error: "TURNS_AND_TEXT_HANDLER_REQUIRED" });
+// Un número suelto justo después del menú («2») es la elección de esa opción: se lee el último mensaje del asistente en el historial (solo ante un número).
+const recentForMenu = createRecentProvider({});
+const menuChoice = async ({ from, messageId, text, excludeIds }: { from: string; text: string; messageId: string; excludeIds: readonly string[] }): Promise<string | undefined> => {
+  const contactKey = contactKeyFor(from);
+  if (!contactKey) return undefined;
+  return menuChoiceOf(text, await recentForMenu({ from, messageId, contactKey, excludeIds }))?.canonical;
+};
+// ¿El último mensaje del asistente fue el menú? (solo para medir una elección de «resultados» escrita con palabras).
+const afterMenu = async ({ from, messageId, excludeIds }: { from: string; messageId: string; excludeIds: readonly string[] }): Promise<boolean> => {
+  const contactKey = contactKeyFor(from);
+  if (!contactKey) return false;
+  const last = lastAssistantMessage(await recentForMenu({ from, messageId, contactKey, excludeIds }));
+  return last !== undefined && isMenuMessage(last);
+};
+// Medición del menú (migración 26). Sin la migración solo se registra un código; el paciente no nota nada.
+const menuEvents = createMenuEventRecorder({ log: logLine });
 const agentPilot = agentSettings && turnsEnabled && textHandlerEnabled
   ? createAgentPilot({
       model: agentSettings.model,
       modelName: agentSettings.modelName,
       everyone: { exclude: new Set<string>(), contactKeyFor },
-      switch: createPilotSwitch({ log: logLine }),
+      // Interruptor de emergencia en la base (migración 25). SOLO para desarrollo local sin esa migración: PLUSMEDIK_AGENT_SWITCH_LOCAL=on lo reemplaza. Nunca en producción.
+      switch: process.env.PLUSMEDIK_AGENT_SWITCH_LOCAL?.trim().toLowerCase() === "on" ? { enabled: async () => true } : createPilotSwitch({ log: logLine }),
       // La derivación a una persona usa la cola al CRM de siempre: solo existe si esa cola está configurada y encendida (PLUSMEDIK_CRM_HANDOFF).
       handoffEnabled: crmOutbox !== undefined,
       context: {
@@ -329,7 +357,7 @@ const realDeps: QuoteDeps = {
   requireAuditGuard: humanControlEnabled || turnsEnabled || on("REQUIRE_AUDIT_GUARD"),
   humanControl: humanControlEnabled ? { contactKeyFor, ...(pauseExpiry ? { pauseExpiry } : {}) } : undefined,
   scopedControl: scopedContactControl ? { contactKeyFor, covers: scopedContactControl.covers } : undefined,
-  turns: turnsEnabled ? { contactKeyFor, ...(pauseExpiry ? { pauseExpiry } : {}), awaitingPerson, ...(photoContextWait ? { photoContextWait } : {}), replyGuard: replyGuardConfig, attention: attentionConfig, instantPhotoQuotes: instantPhotoQuotesEnabled, dailyCap: dailyReplyCap, ...(convState ? { convState } : {}), ...(agentPilot ? { agentPilot } : {}),
+  turns: turnsEnabled ? { contactKeyFor, ...(pauseExpiry ? { pauseExpiry } : {}), awaitingPerson, ...(photoContextWait ? { photoContextWait } : {}), replyGuard: replyGuardConfig, attention: attentionConfig, instantPhotoQuotes: instantPhotoQuotesEnabled, dailyCap: dailyReplyCap, ...(convState ? { convState } : {}), ...(agentPilot ? { agentPilot } : {}), ...(agentPilot ? { menuChoice, afterMenu, menuEvents } : {}), ...(agentPilot && greetingWait ? { greetingWait } : {}),
     crmHandoff: crmOutbox,
     // Métodos de pago ignorados hasta que se implementen (decisión del dueño): ni agente de siempre ni agente nuevo dicen nada de pagos; el resto del mensaje se atiende.
     ignorePayment: true,

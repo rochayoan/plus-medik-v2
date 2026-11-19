@@ -219,7 +219,7 @@ type Segment =
 
 // Búsqueda por parecido (solo para decidir, nunca para dar precio: el precio lo calcula el catálogo al cotizar). Se acepta un estudio solo si lidera con claridad; si hay varios plausibles se le pregunta al
 // paciente con opciones del catálogo; si no hay nada parecido, se le dice que el catálogo no lo tiene y se cotiza el resto.
-export const FUZZY = { strong: 0.88, strongGap: 0.1, unique: 0.75, uniqueGap: 0.12, lone: 0.65, group: 0.6, span: 0.12, maxOptions: 4, minScore: 0.45 } as const;
+export const FUZZY = { strong: 0.88, strongGap: 0.1, unique: 0.75, uniqueGap: 0.12, lone: 0.65, group: 0.6, span: 0.12, maxOptions: 4, minScore: 0.45, maxAutoWords: 8 } as const;
 
 function mergeHits(lists: readonly SearchHit[][]): SearchHit[] {
   const best = new Map<string, SearchHit>();
@@ -243,7 +243,9 @@ export function decideFuzzy(allHits: readonly SearchHit[], mention: string, mode
   if (!top || top.score < FUZZY.group) return mode === "STRONG_ONLY" ? { kind: "UNMATCHED" } : { kind: "NOTFOUND", mention };
   const second = hits[1];
   const gap = top.score - (second?.score ?? 0);
-  const strong = (top.score >= FUZZY.strong && gap >= FUZZY.strongGap) || (top.score >= FUZZY.unique && gap >= FUZZY.uniqueGap) || (!second && top.score >= FUZZY.lone);
+  // Un nombre del catálogo MUCHO más largo que lo escrito (un panel que solo menciona la palabra: «vih» → «PANEL … 32 PATÓGENOS … VIH …») nunca se acepta solo por parecido: queda como opción a confirmar.
+  const panelLike = top.via.split(" ").length > Math.max(FUZZY.maxAutoWords, queryWords * 4);
+  const strong = !panelLike && ((top.score >= FUZZY.strong && gap >= FUZZY.strongGap) || (top.score >= FUZZY.unique && gap >= FUZZY.uniqueGap) || (!second && top.score >= FUZZY.lone));
   if (strong) return { kind: "MATCHED", study: top.study, via: mention };
   if (mode === "STRONG_ONLY") return { kind: "UNMATCHED" };
   const plausible = hits.filter((hit) => hit.score >= Math.max(FUZZY.group, top.score - FUZZY.span)).slice(0, FUZZY.maxOptions);
@@ -260,6 +262,30 @@ export function preferredByMethod(candidates: readonly CatalogStudy[]): CatalogS
     if (withMethod.length > 1) return undefined;
   }
   return undefined;
+}
+
+// Muestra por defecto: EN SANGRE (decidido por el dueño, 19-nov). Si el paciente nombra un estudio a secas («fósforo», «calcio», «magnesio», «creatinina») sin decir orina ni otra muestra, y una opción es
+// EXACTAMENTE ese nombre en sangre («FOSFORO (P)», «CALCIO SERICO», «MAGNESIO (Mg)»), se elige esa. Nunca elige entre dos versiones en sangre distintas («CALCIO IONICO» o un «IONOGRAMA» no son «calcio» a secas).
+const OTHER_SAMPLE = /\b(orina|urin\w*|\w+uria|24 ?h\w*|heces|liquido|lcr|esputo|semen|saliva|hisopado|secrecion)\b/;
+const BLOOD_WORDS = new Set(["serico", "serica", "sangre", "en", "sanguineo", "sanguinea", "plasmatico", "plasmatica"]);
+const bareName = (value: string): string => normalizeStudyKey(value.replace(/\([^)]*\)/g, " ")).split(" ").filter((token) => token !== "" && !BLOOD_WORDS.has(token)).join(" ");
+const askedOf = (mention: string): string => normalizeStudyKey(mention).split(" ").filter((token) => token !== "" && !FILLER.has(token) && !GENERIC.has(token)).join(" ");
+// ¿Las palabras de `needle` aparecen seguidas dentro de `hay`? («fosforo» dentro de «colesterol fosforo»).
+const containsWords = (hay: string, needle: string): boolean => needle !== "" && ` ${hay} `.includes(` ${needle} `);
+export function preferredBySample(candidates: readonly CatalogStudy[], mention: string | undefined): CatalogStudy | undefined {
+  if (!mention) return undefined;
+  const asked = askedOf(mention);
+  if (asked === "" || OTHER_SAMPLE.test(asked)) return undefined;
+  const bare = bareName(asked);
+  const blood = candidates.filter((candidate) => !OTHER_SAMPLE.test(normalizeStudyKey(candidate.name)) && containsWords(bare, bareName(candidate.name)));
+  return blood.length === 1 ? blood[0] : undefined;
+}
+
+// El método preferido solo vale si el estudio elegido ES lo que el paciente nombró: «TSH» → «TSH (ECLIA)», «vitamina d» → «VITAMINA D 25 (OH) (ECLIA)»; pero «proteínas» NO es «AFP (Alfa Feto Proteínas) (ECLIA)».
+export function sameStudyAsAsked(study: CatalogStudy, mention: string | undefined): boolean {
+  if (!mention) return true;
+  const asked = bareName(askedOf(mention));
+  return asked === "" || containsWords(bareName(study.name), asked) || containsWords(asked, bareName(study.name));
 }
 
 export interface ExtractionOptions {
@@ -462,7 +488,9 @@ export function extractWithNotes(text: string, catalog: readonly CatalogStudy[],
     } else if (segment.kind === "AMBIGUOUS") {
       // Sin método especificado se asume el más rápido (ECLIA, luego CLIA) si hay uno solo; se le dice al paciente cómo se interpretó.
       // (Las ofertas por tema son estudios distintos entre sí: nunca se elige uno por su método.)
-      const fast = fuzzy && !segment.topic ? preferredByMethod(segment.candidates) : undefined;
+      // (Solo si el estudio de ese método ES lo que el paciente nombró: «proteínas» no es la AFP ECLIA.)
+      const byMethod = fuzzy && !segment.topic ? preferredByMethod(segment.candidates) : undefined;
+      const fast = byMethod && sameStudyAsAsked(byMethod, segment.label) ? byMethod : undefined;
       if (fast) {
         if (matchedById.has(fast.id)) repeated++;
         else matchedById.set(fast.id, fast);

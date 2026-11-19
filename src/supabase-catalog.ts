@@ -9,7 +9,7 @@ const labTestRow = z.object({
   code: z.string().nullable(),
   name: z.string(),
   normalized_name: z.string(),
-  price_bs: z.number().finite(),
+  price_bs: z.preprocess((val) => (val === undefined || val === null ? undefined : Number(val)), z.number().finite()),
   active: z.boolean(),
   category: z.string().nullable().optional(),
   sample_type: z.string().nullable().optional(),

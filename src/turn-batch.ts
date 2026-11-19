@@ -1,7 +1,7 @@
 import type { Produced, TurnContext } from "./guarded-turn.js";
 import type { IncomingTurn } from "./turns.js";
 
-// Buffering nativo de Kapso (lotes de 15 s: batch:true + data[]). Kapso ya agrupa los mensajes; aquí NO hay otro buffer ni espera: solo se interpreta lo que llegó junto.
+// Buffering nativo de Kapso (lotes de 20 s: batch:true + data[]). Kapso ya agrupa los mensajes; aquí NO hay otro buffer ni espera: solo se interpreta lo que llegó junto.
 // Los mensajes del MISMO contacto dentro de un lote son UNA solicitud con UNA respuesta:
 //   · varios textos seguidos se leen como un solo texto (en el orden en que se escribieron), salvo «listo», «cancelar», «sí», «no» o el número de una opción, que se quedan solos
 //     porque solo significan algo como mensaje completo;

@@ -1,3 +1,4 @@
+import { MENU_OPTIONS, mightBeMenuChoice } from "./greeting-menu.js";
 import { repeatCandidate } from "./attention-filter.js";
 import { withPhotoContextWait } from "./photo-context-wait.js";
 import { looksLikeIdentification, resultsCheckMessage, routeResultsMessage } from "./results-silence.js";
@@ -312,7 +313,7 @@ export const hasProcessableTurns = (turns: IncomingTurn[], deps: QuoteDeps): boo
 //   1. los claims se hacen UNO por UNO, en ese orden, así la numeración del contacto respeta el orden en que el paciente escribió;
 //   2. el trabajo de los turnos reclamados corre después en paralelo; la reserva de envío de la base impide que dos respuestas al mismo contacto se crucen y
 //      descarta las que quedaron obsoletas.
-// Lote de Kapso (buffering de 15 s, ver turn-batch.ts): si un contacto trae VARIOS mensajes en el mismo envío, todos se reclaman igual (deduplicación por mensaje), pero se atienden como UNA
+// Lote de Kapso (buffering de 20 s, ver turn-batch.ts): si un contacto trae VARIOS mensajes en el mismo envío, todos se reclaman igual (deduplicación por mensaje), pero se atienden como UNA
 // solicitud con UNA respuesta: los textos seguidos se leen como uno, cada foto conserva su análisis y todo sale en un solo mensaje, con una sola reserva de envío (cuenta una vez para el
 // tope de respuestas, y la pausa humana se comprueba una vez). Un contacto con un solo mensaje sigue exactamente la ruta de siempre.
 // Un fallo en un turno no impide los demás. Nunca se registra el contenido de un mensaje.
@@ -354,6 +355,27 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
     const from = turns[index]!.from;
     perContact.set(from, [...(perContact.get(from) ?? []), index]);
   }
+  // Elección del MENÚ por número («2» justo después del menú del saludo): se traduce a la frase de esa opción ANTES de las demás reglas, para que siga su camino (resultados → recepción, persona → derivación…).
+  // Solo un texto que es apenas un número; el historial se lee solo en ese caso.
+  const menuChoice = deps.turns?.menuChoice;
+  const chosenByNumber = new Set<string>();
+  if (menuChoice) {
+    for (const [from, indices] of perContact) {
+      for (const index of indices) {
+        const turn = turns[index]!;
+        if (turn.kind !== "TEXT" || typeof turn.text !== "string" || !mightBeMenuChoice(turn.text)) continue;
+        const canonical = await menuChoice({ from, text: turn.text, messageId: turn.messageId, excludeIds: indices.map((other) => turns[other]!.messageId) }).catch(() => undefined);
+        if (canonical) {
+          turn.text = canonical;
+          const option = MENU_OPTIONS.find((candidate) => candidate.canonical === canonical)?.code ?? "OTHER";
+          deps.log("agent_menu", { event: "CHOSEN", via: "NUMBER", option });
+          chosenByNumber.add(from);
+          const key = deps.turns!.contactKeyFor(from);
+          if (key) void deps.turns?.menuEvents?.(key, { event: "CHOSEN", option, via: "NUMBER" });
+        }
+      }
+    }
+  }
   // Silencio SOLO si TODOS los turnos del contacto en este lote son texto y
   // la solicitud completa se refiere únicamente al estado/acceso a resultados.
   // Se evalúa ANTES de consultar modelos o catálogos y sin reservar envíos.
@@ -368,6 +390,17 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
   }));
   // Consulta por un resultado ya realizado: responde UNA vez (el último mensaje del lote) con el texto cálido de recepción y deriva el caso al CRM; el resto del lote se cierra sin respuesta.
   const readyCheck = new Set([...resultsRouting.entries()].filter(([, action]) => action === "READY_CHECK").map(([from]) => from));
+  // Medición: «resultados» escrito con palabras justo después del menú también es elegir esa opción (solo se lee el historial para estos contactos y si la medición está activa).
+  const menuEvents = deps.turns?.menuEvents;
+  const afterMenu = deps.turns?.afterMenu;
+  if (menuEvents && afterMenu) {
+    for (const from of readyCheck) {
+      if (chosenByNumber.has(from)) continue;
+      const key = deps.turns!.contactKeyFor(from);
+      const indices = perContact.get(from) ?? [];
+      if (key && (await afterMenu({ from, messageId: turns[indices[0]!]!.messageId, excludeIds: indices.map((index) => turns[index]!.messageId) }).catch(() => false))) void menuEvents(key, { event: "CHOSEN", option: "RESULTS", via: "WORDS" });
+    }
+  }
   const readyResponder = new Map([...perContact.entries()].filter(([from]) => readyCheck.has(from)).map(([from, indices]) => [from, indices[indices.length - 1]!] as const));
   const resultsOnly = new Set([...resultsRouting.entries()].filter(([, action]) => action === "SILENT").map(([from]) => from));
   // Ya se le pidió el dato de un resultado y espera a una persona: lo que llega ahora y parece ese dato (un nombre, un comprobante, una foto) no se contesta; la persona de recepción lo atiende.
@@ -721,6 +754,30 @@ async function processContactBatch(
         if (piloted.silent) {
           deps.turns?.convState?.agentReply({ from, messageId: `silent:${leadId}`, replyTo: leadId, reply: { body: "", result: "silent", quality: "ANSWER" } });
           return { kind: "none" };
+        }
+        // MENÚ del saludo: se espera un poco por si el paciente sigue escribiendo; si escribe, el menú no sale (su mensaje nuevo se atiende con el saludo en el contexto).
+        const greetingWait = deps.turns?.greetingWait;
+        const contactKey = deps.turns?.contactKeyFor(from);
+        if (piloted.menu && greetingWait && greetingWait.waitMs > 0 && ctx.seq !== undefined && contactKey) {
+          const sleep = greetingWait.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+          const pollMs = greetingWait.pollMs ?? 3000;
+          let waited = 0;
+          while (waited < greetingWait.waitMs) {
+            const step = Math.min(pollMs, greetingWait.waitMs - waited);
+            await sleep(step);
+            waited += step;
+            if (await greetingWait.newerTurn(contactKey, ctx.seq).catch(() => false)) {
+              deps.log("agent_menu", { event: "SKIPPED", reason: "PATIENT_KEPT_WRITING", waitedMs: waited });
+              void deps.turns?.menuEvents?.(contactKey, { event: "SKIPPED" });
+              deps.turns?.convState?.agentReply({ from, messageId: `silent:${leadId}`, replyTo: leadId, reply: { body: "", result: "silent", quality: "ANSWER" } });
+              return { kind: "none" };
+            }
+          }
+        }
+        // Medición del menú: salió el menú, eligió una opción con palabras, o escribió un número que no está en el menú.
+        if (contactKey && deps.turns?.menuEvents) {
+          if (piloted.menu) void deps.turns.menuEvents(contactKey, { event: "SHOWN" });
+          if (piloted.menuEvent) void deps.turns.menuEvents(contactKey, piloted.menuEvent);
         }
         if (piloted.quotedStudyIds.length > 0) deps.turns?.convState?.artifact({ from, key: leadId, kind: "QUOTE", studyIds: piloted.quotedStudyIds });
         // Una cotización del agente por texto lleva las mismas indicaciones que la de una foto (preparación y tiempo de entrega); si no se pueden añadir, sale tal cual.

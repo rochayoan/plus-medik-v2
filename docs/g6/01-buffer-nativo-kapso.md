@@ -1,6 +1,6 @@
-# G6.1 · Buffering nativo de Kapso (lotes de 15 s)
+# G6.1 · Buffering nativo de Kapso (lotes de 20 s)
 
-Kapso agrupa los mensajes de un contacto durante 15 segundos y los entrega en un solo POST (`batch: true`, `data[]`). El webhook **no agrega ningún otro buffer** (ni espera ni tabla en Supabase): solo interpreta lo que llegó junto.
+Kapso agrupa los mensajes de un contacto durante 20 segundos (configurado en el panel de Kapso, 19-nov-2026) y los entrega en un solo POST (`batch: true`, `data[]`). El webhook **no agrega ningún otro buffer** (ni espera ni tabla en Supabase): solo interpreta lo que llegó junto.
 
 ## Qué hace el webhook con un lote
 

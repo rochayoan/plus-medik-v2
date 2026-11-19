@@ -104,6 +104,14 @@ export async function runAgentTurn(deps: AgentDeps, input: AgentTurnInput): Prom
   const handoff = plan.handoff !== undefined && capabilities.handoff && Boolean(deps.handoff) ? plan.handoff : undefined;
   const base = { toolRuns: runs, facts, ...planInfo };
 
+  // Estudios a DOMICILIO: texto fijo definido por el dueño (19-nov, como responde la Dra), sin redactor. Si además pidió precios, la cotización del catálogo va debajo. La promesa de que una persona confirma
+  // solo se agrega si el caso QUEDÓ registrado.
+  if (plan.handoff === "HOME_VISIT") {
+    const registered = handoff !== undefined && deps.handoff && !deps.cancelled?.() ? await deps.handoff("HOME_VISIT").catch(() => false) : false;
+    const reply = [homeVisitMessage(registered), ...blocks].join("\n\n");
+    return done({ status: "VERIFIED", ...base, reply, ...(hasQuoteBlock ? { quoted: true, ...(quotePartial ? { quotePartial: true } : {}) } : {}), handoffRequested: true, ...(registered ? { handoffRegistered: true } : {}) });
+  }
+
   // 3. y 4. Redacción en texto libre y verificación. Hasta DOS intentos: si la verificación rechaza el primero, el modelo recibe solo los códigos de lo que falló. Nunca más (costo y tiempo acotados).
   let feedback: Violation[] | undefined;
   let firstViolations: Violation[] | undefined;
@@ -133,4 +141,15 @@ export async function runAgentTurn(deps: AgentDeps, input: AgentTurnInput): Prom
     feedback = firstViolations = problems;
   }
   return done({ status: "REJECTED", ...base });
+}
+
+// Respuesta fija ante un pedido de estudios a domicilio: confirma el servicio, avisa del transporte (sin cifras) y pide lo que la Dra siempre pide para ir (ubicación, estudios, nombre y edad; internado: servicio, piso y cama).
+export function homeVisitMessage(registered: boolean): string {
+  return [
+    "¡Sí ofrecemos ese servicio! 🏠 Enseguida veremos si hay personal disponible para ir; el transporte tiene un costo aparte. Ve pasándome, por favor:",
+    "📍 La ubicación (puedes enviarla por WhatsApp)",
+    "🧪 Qué estudios necesitas (o la foto de la receta)",
+    "👤 Nombre completo y edad del paciente (si está internado: servicio, piso y cama)",
+    ...(registered ? ["", "Una persona del laboratorio te confirmará por este chat."] : [])
+  ].join("\n");
 }

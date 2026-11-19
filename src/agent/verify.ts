@@ -19,6 +19,11 @@ const CURRENCY = new RegExp(`[$€£¥]|\\d\\s*${UNIT}\\b|\\b${UNIT}\\.?\\s*\\d|
 const HUMAN_PROMISE = /\b(deriv\w*|registr\w* (tu|su|el|este) (caso|solicitud|pedido|consulta)|(te|le|les) (llam|escrib|contact|atend)\w*|(una|la) persona (de (recepcion|atencion|nuestro|la)|del (laboratorio|equipo)|que (te|le|les))|un asesor|una asesora|un agente|un operador|un ejecutivo|(nuestro|el) equipo (te|le|les|se) \w+|recepcion (te|le|les|se) \w+|alguien (te|le|les))\b/;
 // Una negativa honesta («no puedo pasarte con una persona por este medio») menciona a una persona sin prometerla: esa oración no cuenta como promesa.
 const REFUSAL = /\b(no (puedo|podemos|es posible|tengo|disponemos|cuento|contamos|esta disponible|hay)|por (ahora|el momento) no|todavia no|aun no)\b/;
+// Marcadores de lista de un menú de opciones («1️⃣ Cotizar», «2. Ubicación»): un número SOLO al inicio de línea, seguido de la insignia de teclado o de «.»/«)», y del 1 al 5. No cuenta como cifra; cualquier otro
+// número («2 estudios», «Bs 45», un horario) sigue exigiendo procedencia. Se aplica al texto original, antes de normalizarlo (la normalización borra la insignia y dejaría «1 »).
+const LIST_MARKER = /^[ 	]*[1-5](?:️?⃣|[.)])[ 	]+/gm;
+// Voseo (el laboratorio trata de «tú»): formas verbales inequívocas del voseo, CON su tilde (sin tilde, «pasame» o «mira» también son de «tú»). Se pide reescribir.
+const VOSEO = /(?<![\p{L}])(querés|podés|tenés|sabés|venís|decís|hacés|necesitás|preferís|decime|contame|escribime|avisá|mirá)(?![\p{L}])/iu;
 // Cortesías que parecen datos pero no lo son.
 const COURTESY = /\bbuen(os|as)? (dias?|tardes?|noches?)\b/g;
 
@@ -32,10 +37,11 @@ export function verifyReply(input: { text: string; facts: readonly Fact[]; patie
   // Pueden aparecer las cifras del paciente y las de lo que devolvieron las herramientas (los nombres de estudios del catálogo, que pueden llevar números como «vitamina B12», no llevan precios).
   const allowed = new Set<string>(extractTokens(input.patientText ?? ""));
   for (const fact of input.facts) for (const token of extractTokens(fact.text)) allowed.add(token);
-  const folded = fold(body).replace(COURTESY, " ");
+  const folded = fold(body.replace(LIST_MARKER, "- ")).replace(COURTESY, " ");
   if (CURRENCY.test(folded)) problems.push({ code: "PRICE_OUTSIDE_QUOTE" });
   const loose = [...extractTokens(folded)].filter((token) => !allowed.has(token));
   if (loose.length > 0) problems.push({ code: "UNGROUNDED_FIGURE", detail: loose.slice(0, 5).map((token) => token.split(":")[0]).join(",") });
+  if (VOSEO.test(body)) problems.push({ code: "VOSEO" });
   if (!input.handoff && folded.split(/[.!?¡¿\n,;]+|\bpero\b/).some((sentence) => HUMAN_PROMISE.test(sentence) && !REFUSAL.test(sentence))) problems.push({ code: "UNREGISTERED_HANDOFF_PROMISE" });
   return problems;
 }

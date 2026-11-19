@@ -17,7 +17,7 @@ import { TECHNICAL_ISSUE_MESSAGE, type QuoteDeps } from "../src/whatsapp-quote.j
 import { findPostgresBin, startEphemeralPostgres, SUPABASE_BOOTSTRAP_SQL, type EphemeralPostgres, type PgDatabase } from "./support/ephemeral-postgres.js";
 import { newNetwork, postgrestOverPsql } from "./support/postgrest-over-psql.js";
 
-// Buffering nativo de Kapso (lotes de 15 s: batch:true + data[]) de extremo a extremo: el webhook REAL + los turnos REALES + los repositorios REALES + PostgreSQL REAL con TODAS las
+// Buffering nativo de Kapso (lotes de 20 s: batch:true + data[]) de extremo a extremo: el webhook REAL + los turnos REALES + los repositorios REALES + PostgreSQL REAL con TODAS las
 // migraciones (incluida la del tope diario). Solo se simulan Kapso (contador de envíos), el catálogo y el motor de recetas. Se omite, con aviso, si no hay PostgreSQL.
 // Un lote del mismo contacto es UNA solicitud con UNA respuesta; conserva deduplicación, pausa humana, sesiones de cotización y el tope de 5 respuestas cada 24 h.
 

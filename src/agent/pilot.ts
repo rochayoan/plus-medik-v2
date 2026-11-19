@@ -2,8 +2,10 @@ import { auditErrorFields, createSupabaseRpc } from "../audit.js";
 import type { ObservedTurn } from "../conversation-state-store.js";
 import type { ReplyQuality } from "../conversation-state.js";
 import type { AgentModel, Capabilities, HandoffReason, RecentEntry } from "./contracts.js";
-import { runAgentTurn } from "./pipeline.js";
-import { prepareAgentTurn, summarizeDecision, type AgentContextOptions } from "./shadow.js";
+import { MAPS_LINK } from "../location-photo.js";
+import { greetingMenu, isMenuMessage, lastAssistantMessage, MENU_CLOSING, MENU_LINES, MENU_OPTIONS, menuNumberOf, shouldShowGreetingMenu } from "../greeting-menu.js";
+import { homeVisitMessage, runAgentTurn } from "./pipeline.js";
+import { asksPersonOnly, isGreetingOnly, prepareAgentTurn, summarizeDecision, type AgentContextOptions } from "./shadow.js";
 
 // PILOTO del nuevo agente (G7, Fase 4): el núcleo conversacional RESPONDE de verdad, pero SOLO a los números de una lista permitida y SOLO mientras el interruptor de la base diga «encendido». Para todos los demás
 // contactos nada cambia: no hay llamadas al modelo, no hay lecturas nuevas y responde el agente de siempre.
@@ -100,6 +102,10 @@ export interface PilotReply {
   quotedStudyIds: string[];
   // true: no hay nada que enviar (mensaje claramente ajeno al laboratorio); los turnos cierran el lote sin respuesta.
   silent?: true;
+  // true: es el MENÚ del saludo (texto fijo del sistema). Los turnos esperan un poco antes de enviarlo: si el paciente escribe algo más, el menú no sale y ese mensaje se atiende con su contexto.
+  menu?: true;
+  // Medición del menú (códigos): eligió una opción con palabras justo después del menú, o escribió un número que no está en el menú.
+  menuEvent?: { event: "INVALID_CHOICE" } | { event: "CHOSEN"; option: "QUOTE" | "RESULTS" | "LOCATION" | "HOME_VISIT" | "HUMAN" | "OTHER"; via: "WORDS" };
 }
 
 export interface AgentPilotOptions {
@@ -168,7 +174,23 @@ export function createAgentPilot(options: AgentPilotOptions): AgentPilot {
           // 2. Mensajes del lote, mensajes recientes y herramientas.
           const prepared = await prepareAgentTurn(options.context, from, turns);
           if (prepared.kind === "skip") return fallback(prepared.reason);
+          // Solo un saludo y sin conversación en las últimas 24 h: el menú de intención, texto fijo del sistema (sin modelo).
+          if (shouldShowGreetingMenu(isGreetingOnly(prepared.utterances), prepared.recent)) {
+            options.log("agent_pilot", { status: "MENU", utterances: prepared.utterances.length, latencyMs: now() - started, model: options.modelName });
+            options.log("agent_menu", { event: "SHOWN" });
+            return { body: greetingMenu(new Date(now())), result: "conversation", processingStatus: "COMPLETED", stale: "NEWER_TURN", signature: "AGENT:MENU", quality: "ANSWER", quotedStudyIds: [], menu: true };
+          }
+          // Un número que NO está en el menú, justo después del menú («7»): texto fijo que vuelve a mostrar las opciones (sin modelo). Los números válidos ya llegaron traducidos a su opción.
+          const lone = prepared.utterances.length === 1 ? menuNumberOf(prepared.utterances[0]!.text) : undefined;
+          const lastAssistant = lastAssistantMessage(prepared.recent);
+          if (lone !== undefined && lastAssistant && isMenuMessage(lastAssistant)) {
+            options.log("agent_menu", { event: "INVALID_CHOICE" });
+            return { body: ["Esa opción no está en el menú 😊 Elige una de estas:", "", ...MENU_LINES, "", MENU_CLOSING].join("\n"), result: "conversation", processingStatus: "COMPLETED", stale: "NEWER_TURN", signature: "AGENT:MENU", quality: "ANSWER", quotedStudyIds: [], menuEvent: { event: "INVALID_CHOICE" } };
+          }
           const capabilities: Capabilities = { handoff: Boolean(options.handoffEnabled && handoff), quote: options.context.capabilities?.quote ?? true };
+          // Pide una persona y aquí NO se puede registrar la derivación (sin cola al CRM): el modelo no responde «no puedo pasarle con alguien» (suena a sistema roto); lo atiende el modo esencial, que da el texto fijo de derivación.
+          // Si en el mismo mensaje piden precios, el agente los atiende.
+          if (!capabilities.handoff && asksPersonOnly(prepared.utterances)) return fallback("HUMAN_NO_HANDOFF");
           // 3. Decide (plan → herramientas → texto libre → verificación por procedencia → derivación registrada si hace falta).
           const decision = await runAgentTurn(
             { model: options.model, tools: prepared.tools, ...(capabilities.handoff && handoff ? { handoff } : {}), cancelled: () => cancelled },
@@ -180,7 +202,11 @@ export function createAgentPilot(options: AgentPilotOptions): AgentPilot {
           // Claramente ajeno al laboratorio y nada pendiente: no se responde (el turno se cierra sin respuesta, sin caer al modo esencial).
           if (decision.status === "SILENT" && !cancelled) return { body: "", result: "conversation", processingStatus: "COMPLETED", stale: "NEWER_TURN", quality: "ANSWER", quotedStudyIds: [], silent: true };
           if (decision.status !== "VERIFIED" || !decision.reply || cancelled) return undefined;
-          return replyOf(decision);
+          const reply = replyOf(decision);
+          // Respondió al menú con palabras: qué camino tomó el agente (cotizar, ubicación, domicilio, persona u otro).
+          // (Un número ya traducido a su opción llega como la frase canónica: ya se contó como NUMBER.)
+          const byNumber = prepared.utterances.some((utterance) => MENU_OPTIONS.some((option) => option.canonical === utterance.text));
+          return lastAssistant && isMenuMessage(lastAssistant) && !byNumber ? { ...reply, menuEvent: { event: "CHOSEN", option: chosenPath(decision), via: "WORDS" } } : reply;
         })();
         const limit = new Promise<"TIMEOUT">((resolve) => { timer = setTimeout(() => resolve("TIMEOUT"), deadlineMs); timer.unref?.(); });
         const winner = await Promise.race([run, limit]);
@@ -196,13 +222,29 @@ export function createAgentPilot(options: AgentPilotOptions): AgentPilot {
   };
 }
 
+// El camino que tomó el agente ante una respuesta al menú con palabras (solo para medir).
+function chosenPath(decision: Awaited<ReturnType<typeof runAgentTurn>>): "QUOTE" | "LOCATION" | "HOME_VISIT" | "HUMAN" | "OTHER" {
+  if (decision.reply?.startsWith(homeVisitMessage(false).slice(0, 40))) return "HOME_VISIT";
+  if (decision.handoffRequested) return "HUMAN";
+  if (decision.toolRuns.some((run) => run.tool === "quote_studies" || run.tool === "find_studies")) return "QUOTE";
+  if (decision.toolRuns.some((run) => run.tool === "lab_info")) return "LOCATION";
+  return "OTHER";
+}
+
+// Si el agente dio la ubicación sin el enlace del mapa (a veces lo omite), se agrega el enlace APROBADO que trajo lab_info: con él sale también la foto del laboratorio.
+export function withMapLink(body: string, facts: Awaited<ReturnType<typeof runAgentTurn>>["facts"]): string {
+  if (MAPS_LINK.test(body)) return body;
+  const link = facts.filter((fact) => fact.source === "LAB_INFO").map((fact) => MAPS_LINK.exec(fact.text)?.[0]).find((found): found is string => found !== undefined);
+  return link ? `${body}\n\n📍 Mapa: ${link}` : body;
+}
+
 function replyOf(decision: Awaited<ReturnType<typeof runAgentTurn>>): PilotReply {
   const quoted = decision.quoted === true;
   // Qué le pasa a lo que el paciente pidió, para la memoria: cotizado (completo o PARCIAL: lo que falta sigue a la vista) o atendido.
   const quality: ReplyQuality = quoted ? (decision.quotePartial ? "UNRESOLVED" : "QUOTE") : "ANSWER";
   const quotedStudyIds = quoted ? [...new Set(decision.facts.filter((fact) => fact.source === "QUOTE_ENGINE").flatMap((fact) => fact.refs).filter((ref) => ref.startsWith("study:")).map((ref) => ref.slice(6)))] : [];
   return {
-    body: decision.reply!,
+    body: withMapLink(decision.reply!, decision.facts),
     result: quoted ? "quoted" : "conversation",
     processingStatus: "COMPLETED",
     stale: "NEWER_TURN",

@@ -1,3 +1,4 @@
+import type { MenuEventRecorder } from "./menu-events.js";
 import { AuditWriteError, auditErrorFields, type AuditLease, type AuditRepository, type SendableResult, type SendConfirmation, type SendReservation, type StalePolicy, type TurnKind } from "./audit.js";
 import type { AttentionConfig } from "./attention-filter.js";
 import type { AudioPipeline } from "./audio/service.js";
@@ -34,6 +35,16 @@ export interface TurnsConfig {
   awaitingPerson?(contactKey: string): Promise<boolean>;
   // Espera de contexto de una foto dudosa que se atiende sola (src/photo-context-wait.ts): sin ella, la foto responde de inmediato.
   photoContextWait?: { waitMs: number; pollMs?: number; newerTurn(contactKey: string, seq: number): Promise<boolean>; sleep?(ms: number): Promise<void> };
+  // MENÚ del saludo: antes de enviarlo se espera hasta `waitMs` por si el paciente escribe algo más (suele hacerlo en segundos); si llega otro mensaje, el menú no sale y ese mensaje se atiende con su contexto.
+  // Sin esto el menú sale de inmediato.
+  greetingWait?: { waitMs: number; pollMs?: number; newerTurn(contactKey: string, seq: number): Promise<boolean>; sleep?(ms: number): Promise<void> };
+  // Elección del menú por NÚMERO («2» justo después del menú): devuelve la frase canónica de esa opción para que siga su camino de siempre (resultados, derivación, agente). Nunca lanza; sin esto el número
+  // llega tal cual.
+  menuChoice?(input: { from: string; text: string; messageId: string; excludeIds: readonly string[] }): Promise<string | undefined>;
+  // ¿El último mensaje del asistente a este contacto fue el menú? Solo para medir una elección con palabras que no pasa por el agente (resultados). Nunca lanza.
+  afterMenu?(input: { from: string; messageId: string; excludeIds: readonly string[] }): Promise<boolean>;
+  // Medición del menú (migración 26; apagada si falta). Mejor esfuerzo: nunca lanza ni retrasa la respuesta.
+  menuEvents?: MenuEventRecorder;
   // Cuántas veces se reintenta una reserva 'busy' (otro envío del contacto en vuelo) y cuánto se espera entre intentos. Superado el tope no se envía.
   busyRetries?: number;
   busyDelayMs?: number;
@@ -116,7 +127,7 @@ export type TurnOutcome = SendableResult | "ignored";
 
 export interface ClaimedTurn {
   run(produce: TurnProducer): Promise<TurnOutcome>;
-  // Lote de Kapso (buffering de 15 s): varios mensajes del MISMO contacto se atienden como una sola solicitud con UNA sola respuesta, enviada por el turno que responde (`run`).
+  // Lote de Kapso (buffering de 20 s): varios mensajes del MISMO contacto se atienden como una sola solicitud con UNA sola respuesta, enviada por el turno que responde (`run`).
   // `absorb` hace el trabajo de este turno (sesión de cotización, análisis de la foto, etc., con su propio lease) pero NO reserva ni envía nada: devuelve lo que habría respondido para que
   // el turno que responde lo integre, y cierra esta corrida como «sin respuesta propia». Las escrituras de las etapas `redirectStages` (rastro de las versiones aprobadas
   // usadas en la respuesta) se hacen en la corrida que SÍ envía (`into`), para que ese rastro sea el de la corrida que envió el mensaje.
