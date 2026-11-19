@@ -82,6 +82,9 @@ export function buildAgentTools(options: AgentContextOptions, contactKey: string
   return createToolRegistry(tools);
 }
 
+// ¿El lote es SOLO un saludo («hola», «buenas tardes doctora»)? Un «gracias» o un «ok» no abren el menú.
+export const isGreetingOnly = (utterances: readonly Utterance[]): boolean => utterances.length > 0 && utterances.every((utterance) => socialOf(utterance.text)?.kind === "GREETING");
+
 // ¿Pide hablar con una persona sin pedir precios? (el pilot la deriva al modo esencial cuando no se puede registrar la derivación)
 export const asksPersonOnly = (utterances: readonly Utterance[]): boolean => utterances.some((utterance) => utterance.topic === "HUMAN_REQUEST") && !utterances.some((utterance) => asksForPrice(utterance.text));
 

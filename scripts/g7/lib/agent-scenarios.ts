@@ -122,11 +122,11 @@ export const AGENT_SCENARIOS: AgentScenario[] = [
   {
     id: "estudio-desconocido",
     title: "Un estudio que no está en el catálogo: se dice con honestidad y se ofrece ayuda (antes, «sin datos» tumbaba el turno)",
-    turns: ["cotiza un perfil tiroideo completo por favor"],
+    turns: ["cotiza una ecografía abdominal por favor"],
     expect: { quoteBlock: false, tools: ["quote_studies"], replyNoMatch: NO_PRICES },
     good: [
-      { calls: [q("perfil tiroideo completo")], text: "No logré identificar ese estudio en nuestro catálogo. ¿Me dices cómo se llama exactamente o me envías la foto de tu receta?" },
-      { calls: [q("perfil tiroideo completo"), info("perfil tiroideo")], text: "Ese estudio no lo encuentro con ese nombre. ¿Puedes escribirlo de otra forma o enviar tu receta?" }
+      { calls: [q("ecografía abdominal")], text: "No logré identificar ese estudio en nuestro catálogo. ¿Me dices cómo se llama exactamente o me envías la foto de tu receta?" },
+      { calls: [q("ecografía abdominal"), info("ecografía abdominal")], text: "Ese estudio no lo encuentro con ese nombre. ¿Puedes escribirlo de otra forma o enviar tu receta?" }
     ]
   },
   {

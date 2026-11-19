@@ -19,9 +19,9 @@ describe("migración 24 (plusmedik_conversation_events): forma estática", () =>
   const raw = readFileSync(join(dir, FILE), "utf8").replaceAll("\r\n", "\n");
   const code = raw.split("\n").filter((line) => !/^\s*--/.test(line)).join("\n");
 
-  it("es la penúltima de la cadena (la última es la del piloto del agente), posterior a las del historial de mensajes", () => {
-    expect(MIGRATIONS.at(-2)).toBe(FILE);
-    expect(MIGRATIONS.at(-3)).toBe("20261111000000_plusmedik_message_history_phone.sql");
+  it("es la antepenúltima de la cadena (después vienen la del piloto del agente y la medición del menú), posterior a las del historial de mensajes", () => {
+    expect(MIGRATIONS.at(-3)).toBe(FILE);
+    expect(MIGRATIONS.at(-4)).toBe("20261111000000_plusmedik_message_history_phone.sql");
   });
 
   it("es ADITIVA: crea su tabla y sus funciones, y no toca el CRM, el catálogo ni lo existente", () => {

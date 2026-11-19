@@ -2,7 +2,8 @@ import { z } from "zod";
 import { searchCatalog } from "../catalog-search.js";
 import type { ConversationReader } from "../conversation-state-store.js";
 import { detectTopics, type KnowledgeAnswer } from "../knowledge-answers.js";
-import { evaluateSession, extractStudyRequests, formatSessionQuote, optionsOf, QUOTE_TEXTS, type SessionItem } from "../quote-session.js";
+import { DOUBTFUL_LIMIT, formatDoubtfulOptions } from "../quote-options.js";
+import { evaluateSession, extractWithNotes, formatSessionQuote, QUOTE_TEXTS, type SessionItem } from "../quote-session.js";
 import type { CatalogStudy } from "../types.js";
 import { emojiFor, formatBs } from "../whatsapp-quote.js";
 import type { Fact, ToolCall, ToolContext, ToolDef, ToolErrorCode, ToolRun } from "./contracts.js";
@@ -139,8 +140,12 @@ export function findStudiesTool(options: { loadCatalog: () => Promise<readonly C
 
 const quoteNote = "La cotización con los precios del catálogo la agrega el sistema al mensaje; no escribas precios ni totales.";
 
-// La cotización: usa el MISMO motor de texto de las sesiones de cotización (nombres exactos y sinónimos del catálogo, ambigüedades y precios válidos). Cotiza los estudios identificados con certeza; si algo
-// quedó dudoso, la cotización es PARCIAL y los hechos dicen qué aclarar (nombres de opciones, sin precios). Sin ningún estudio seguro no hay bloque, pero sí un hecho que dice qué no se pudo identificar.
+// Palabras de relleno delante del nombre de un estudio («prueba de», «dosaje de», «examen de»).
+const FILLER = /^(?:(?:la|el|una?|unos?|las|los)\s+)?(?:pruebas?|examen(?:es)?|analisis|estudios?|dosajes?|dosificacion|test|niveles?)\s+(?:de\s+(?:la\s+|el\s+|los\s+|las\s+)?|del\s+|para\s+(?:el\s+|la\s+)?)?/;
+export const coreOfMention = (text: string): string => text.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim().replace(FILLER, "").trim();
+// La cotización: usa el MISMO motor de texto de las sesiones de cotización, CON la búsqueda por parecido (erratas, nombres comunes, método preferido; el mismo umbral que la ruta de siempre). Cotiza los estudios
+// identificados con certeza; lo DUDOSO (varias opciones plausibles, o un nombre que solo se parece) no se rechaza: se ofrece debajo, con su precio y fuera del total, para que el paciente confirme. Solo lo que
+// no se parece a nada del catálogo queda como «no encontrado».
 export function quoteStudiesTool(options: { loadCatalog: () => Promise<readonly CatalogStudy[]> }): ToolDef {
   return {
     name: "quote_studies",
@@ -150,35 +155,53 @@ export function quoteStudiesTool(options: { loadCatalog: () => Promise<readonly 
     async run(input) {
       const { studies } = input as { studies: string[] };
       const catalog = await options.loadCatalog();
-      // El motor distingue «un pedido de estudios» de «charla» por el texto: un nombre que no está en el catálogo (o con una errata) solo cuenta como pedido si el texto habla de cotizar. Sin esta palabra la
-      // herramienta devolvía «nada» (NO_DATA) y el agente no sabía que el estudio no se encontró (prueba real del 6-nov).
-      const extraction = extractStudyRequests(`cotizar ${studies.join(", ")}`, catalog);
-      if (!extraction || !extraction.isRequest) return { noData: "NO_STUDY_IN_REQUEST" };
-      const result = extraction.result;
-      const facts: Array<Omit<Fact, "id">> = [];
-      if (extraction.matched.length > 0) facts.push({ source: "QUOTE_ENGINE", text: `Estudios identificados con certeza en el catálogo (${extraction.matched.length}): ${extraction.matched.map((study) => study.name).join("; ")}`, refs: extraction.matched.map((study) => `study:${study.id}`) });
-      for (const group of result.ambiguous) {
-        const names = optionsOf(group, catalog).map((option) => option.name);
-        if (names.length > 0) facts.push({ source: "QUOTE_ENGINE", text: `Hay más de una opción en el catálogo para un estudio del pedido: ${names.join("; ")}`, refs: group.map((id) => `option:${id}`) });
+      const byId = new Map(catalog.map((study) => [study.id, study]));
+      const sure = new Map<string, CatalogStudy>();
+      const doubtful = new Map<string, CatalogStudy>();
+      const notFound: string[] = [];
+      // Cada nombre por separado: así lo dudoso de uno no tapa lo seguro de otro. El motor distingue «un pedido de estudios» de «charla» por el texto: un nombre que no está en el catálogo (o con una errata)
+      // solo cuenta como pedido si el texto habla de cotizar (prueba real del 6-nov); por eso se antepone «cotizar».
+      for (const text of studies) {
+        // «prueba de vih», «dosaje de ácido valproico», «examen de orina»: también se prueba el nombre sin la palabra de relleno (la que no es parte del estudio).
+        const forms = [...new Set([text, coreOfMention(text)].filter((form) => form.length >= 2))];
+        let matched: CatalogStudy[] = [];
+        let groups: string[][] = [];
+        let unresolved = true;
+        for (const form of forms) {
+          const { extraction } = extractWithNotes(`cotizar ${form}`, catalog, { fuzzy: true });
+          if (!extraction?.isRequest || (extraction.matched.length === 0 && extraction.result.ambiguous.length === 0)) continue;
+          matched = extraction.matched;
+          groups = extraction.result.ambiguous;
+          unresolved = extraction.result.unresolved > 0;
+          break;
+        }
+        for (const study of matched) sure.set(study.id, study);
+        for (const group of groups) for (const id of group) { const study = byId.get(id); if (study) doubtful.set(id, study); }
+        if (!unresolved) continue;
+        // Lo que el motor no resolvió: los estudios más parecidos del catálogo como POSIBLES (nunca como cotización segura). Sin nada seguro en este nombre, la búsqueda es más amplia (como antes).
+        const nothing = matched.length === 0 && groups.length === 0;
+        const hits = forms.flatMap((form) => searchCatalog(form, catalog, { limit: nothing ? SUGGESTION_LIMIT : 3, minScore: nothing ? 0.5 : 0.6 })).sort((a, b) => b.score - a.score).map((hit) => hit.study).filter((study) => !sure.has(study.id));
+        if (hits.length > 0) for (const study of hits.slice(0, nothing ? SUGGESTION_LIMIT : 3)) doubtful.set(study.id, study);
+        else if (nothing) notFound.push(text);
       }
-      if (result.unresolved > 0) facts.push({ source: "QUOTE_ENGINE", text: `No se pudo identificar con certeza ${result.unresolved} estudio${result.unresolved === 1 ? "" : "s"} del pedido en el catálogo`, refs: [] });
-      const complete = result.status === "RESOLVED" && result.ambiguous.length === 0 && result.unresolved === 0 && extraction.matched.length > 0;
-      // Si solo una parte quedó identificada con certeza, se cotiza ESA parte (con los precios del catálogo) y se avisa al redactor de que es parcial para que pregunte por el resto.
-      if (extraction.matched.length > 0) {
-        const item: SessionItem = { id: "agent", seq: 1, kind: "TEXT", status: "RESOLVED", studyIds: complete ? result.studyIds : extraction.matched.map((study) => study.id), ambiguous: [], unresolved: 0, reasons: [] };
+      const possible = [...doubtful.values()].filter((study) => !sure.has(study.id));
+      const facts: Array<Omit<Fact, "id">> = [];
+      if (sure.size > 0) facts.push({ source: "QUOTE_ENGINE", text: `Estudios identificados con certeza en el catálogo (${sure.size}): ${[...sure.values()].map((study) => study.name).join("; ")}`, refs: [...sure.keys()].map((id) => `study:${id}`) });
+      if (possible.length > 0) facts.push({ source: "CATALOG", text: `Estudios POSIBLES para lo que pidió, sin confirmar (el sistema los muestra numerados con su precio, fuera del total): ${possible.slice(0, DOUBTFUL_LIMIT).map((study) => study.name).join("; ")}`, refs: possible.slice(0, DOUBTFUL_LIMIT).map((study) => `option:${study.id}`) });
+      if (notFound.length > 0) facts.push({ source: "QUOTE_ENGINE", text: `No se encontró en el catálogo nada parecido a: ${notFound.join("; ")}`, refs: [] });
+      const blocks: string[] = [];
+      if (sure.size > 0) {
+        const item: SessionItem = { id: "agent", seq: 1, kind: "TEXT", status: "RESOLVED", studyIds: [...sure.keys()], ambiguous: [], unresolved: 0, reasons: [] };
         const evaluation = evaluateSession([item], [...catalog]);
         if (evaluation.kind === "QUOTE") {
-          facts.push({ source: "QUOTE_ENGINE", text: complete ? quoteNote : `${quoteNote} La cotización es PARCIAL: solo incluye los estudios identificados con certeza; el total no cubre los que faltan por aclarar. Dilo y pregunta por ellos.`, refs: [] });
-          return { facts, blocks: [formatSessionQuote(evaluation.lines, evaluation.duplicates, QUOTE_TEXTS)] };
+          const complete = possible.length === 0 && notFound.length === 0;
+          facts.push({ source: "QUOTE_ENGINE", text: complete ? quoteNote : `${quoteNote} La cotización es PARCIAL: solo suma los estudios identificados con certeza.${possible.length > 0 ? " Debajo van los POSIBLES con su precio: pregunta en una frase si quiere agregar alguno." : ""}${notFound.length > 0 ? " Di cuál no encontraste." : ""}`, refs: [] });
+          blocks.push(formatSessionQuote(evaluation.lines, evaluation.duplicates, QUOTE_TEXTS));
         }
       }
-      // Nada identificado con certeza (nombre genérico o con erratas): se sugieren los estudios más parecidos del catálogo, con precio, para que el paciente elija. No es una cotización.
-      if (extraction.matched.length === 0) {
-        const seen = new Map<string, CatalogStudy>();
-        for (const text of studies) for (const hit of searchCatalog(text, catalog, { limit: SUGGESTION_LIMIT, minScore: 0.5 })) if (!seen.has(hit.study.id)) seen.set(hit.study.id, hit.study);
-        const block = formatStudyOptions([...seen.values()]);
-        if (block) return { facts: [...facts, { source: "CATALOG" as const, text: `Opciones parecidas en el catálogo (el sistema agrega sus precios): ${[...seen.values()].slice(0, SUGGESTION_LIMIT).map((study) => study.name).join("; ")}`, refs: [...seen.values()].slice(0, SUGGESTION_LIMIT).map((study) => `study:${study.id}`) }], blocks: [block] };
-      }
+      const optionsBlock = formatDoubtfulOptions(possible, blocks.length > 0);
+      if (optionsBlock) blocks.push(optionsBlock);
+      if (blocks.length > 0) return { facts, blocks };
       return facts.length > 0 ? { facts } : { noData: "NOT_QUOTABLE" };
     }
   };

@@ -251,7 +251,7 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
       const model = fakeAgentModel({ text: "Claro, aquí estoy para ayudarte." });
       const w = setup({ pilot: { phones: [p.phone], model }, guard: true });
       await switchTo(true);
-      await say(w, p.phone, "hola, buenas");
+      await say(w, p.phone, "hola, buenas, tienen atención hoy");
       expect(w.sends.map((s) => s.body)).toEqual(["Claro, aquí estoy para ayudarte."]);
       expect(w.logs.filter(([event]) => event === "audit_unavailable")).toEqual([]);
     });

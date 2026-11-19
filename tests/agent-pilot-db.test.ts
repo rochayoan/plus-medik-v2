@@ -18,9 +18,10 @@ describe("migración 25 (plusmedik_agent_pilot): forma estática", () => {
   const raw = readFileSync(join(dir, FILE), "utf8").replaceAll("\r\n", "\n");
   const code = raw.split("\n").filter((line) => !/^\s*--/.test(line)).join("\n");
 
-  it("es la última de la cadena, posterior a la de eventos de conversación", () => {
-    expect(MIGRATIONS.at(-1)).toBe(FILE);
-    expect(MIGRATIONS.at(-2)).toBe("20261112000000_plusmedik_conversation_events.sql");
+  it("es la vigesimoquinta, posterior a la de eventos de conversación y anterior a la medición del menú (26)", () => {
+    expect(MIGRATIONS.at(-2)).toBe(FILE);
+    expect(MIGRATIONS.at(-1)).toBe("20261119000000_plusmedik_agent_menu_events.sql");
+    expect(MIGRATIONS.at(-3)).toBe("20261112000000_plusmedik_conversation_events.sql");
   });
 
   it("es ADITIVA: no borra ni modifica nada existente y no toca el CRM ni el catálogo", () => {

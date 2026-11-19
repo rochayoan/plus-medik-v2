@@ -166,23 +166,41 @@ describe("herramientas: solo lectura, acotadas, que nunca lanzan, y «sin datos�
       noPrices(result);
     });
 
-    it("un estudio seguro junto a uno desconocido o ambiguo se cotiza como PARCIAL (el bloque solo trae el seguro)", async () => {
-      for (const other of ["perfil tiroideo completo", "creatinina"]) {
-        const result = (await quote.run({ studies: ["hemograma", other] }, ctx)) as { facts: Array<{ text: string }>; blocks: string[] };
-        expect(result.blocks).toHaveLength(1);
-        expect(result.blocks[0]).toContain("HEMOGRAMA COMPLETO");
-        expect(result.blocks[0]).not.toMatch(/CREATININA|PERFIL/);
-        expect(result.facts.some((f) => /PARCIAL/.test(f.text))).toBe(true);
-        noPrices(result);
-      }
+    it("un estudio seguro junto a uno dudoso: se cotiza el seguro (PARCIAL) y el dudoso va DEBAJO como posible, con precio y fuera del total", async () => {
+      const result = (await quote.run({ studies: ["hemograma", "creatinina"] }, ctx)) as { facts: Array<{ text: string }>; blocks: string[] };
+      expect(result.blocks).toHaveLength(2);
+      expect(result.blocks[0]).toContain("HEMOGRAMA COMPLETO");
+      expect(result.blocks[0]).not.toMatch(/CREATININA/);
+      expect(result.blocks[0]).toMatch(/Total de los estudios cotizados: Bs 45/);
+      expect(result.blocks[1]).toMatch(/Posiblemente también/);
+      expect(result.blocks[1]).toMatch(/no están sumados en el total/);
+      expect(result.blocks[1]).toMatch(/CREATININA SERICA — Bs 40/);
+      expect(result.blocks[1]).toMatch(/CREATININA EN ORINA — Bs 42/);
+      expect(result.facts.some((f) => /PARCIAL/.test(f.text))).toBe(true);
+      noPrices(result);
     });
 
-    it("estudios que no están en el catálogo (o con errata) dan el hecho «no se pudo identificar», no «sin datos»: el agente puede preguntar", async () => {
-      for (const studies of [["perfil tiroideo completo"], ["hemogrma"], ["ecografia abdominal", "resonancia"]]) {
+    it("un estudio seguro junto a uno que el catálogo no tiene: se cotiza el seguro (PARCIAL) y se dice cuál no se encontró", async () => {
+      const result = (await quote.run({ studies: ["hemograma", "ecografia abdominal"] }, ctx)) as { facts: Array<{ text: string }>; blocks: string[] };
+      expect(result.blocks).toHaveLength(1);
+      expect(result.blocks[0]).toMatch(/HEMOGRAMA COMPLETO — Bs 45/);
+      expect(result.facts.some((f) => /PARCIAL/.test(f.text))).toBe(true);
+      expect(result.facts.some((f) => /No se encontró en el catálogo nada parecido a: ecografia abdominal/.test(f.text))).toBe(true);
+      noPrices(result);
+    });
+
+    it("una errata clara se COTIZA (la búsqueda por parecido acepta lo que lidera con claridad): «hemogrma» → hemograma completo", async () => {
+      const result = (await quote.run({ studies: ["hemogrma"] }, ctx)) as { blocks: string[] };
+      expect(result.blocks[0]).toMatch(/HEMOGRAMA COMPLETO — Bs 45/);
+      expect(result.blocks[0]).toMatch(/Total de los estudios cotizados: Bs 45/);
+    });
+
+    it("estudios que no están en el catálogo dan el hecho «no se encontró», no «sin datos»: el agente puede decirlo y preguntar", async () => {
+      for (const studies of [["ecografia abdominal"], ["ecografia abdominal", "resonancia"]]) {
         const result = (await quote.run({ studies }, ctx)) as { facts: Array<{ text: string }>; blocks?: string[] };
         // Nunca una cotización con total: a lo sumo, opciones parecidas para que el paciente elija.
         expect((result.blocks ?? []).join(" "), studies.join(",")).not.toMatch(/Cotización|Total/);
-        expect(result.facts.some((f) => /No se pudo identificar con certeza \d+ estudio/.test(f.text))).toBe(true);
+        expect(result.facts.some((f) => /No se encontró en el catálogo nada parecido|POSIBLES/.test(f.text))).toBe(true);
       }
     });
 

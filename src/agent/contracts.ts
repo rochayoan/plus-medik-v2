@@ -107,7 +107,7 @@ export interface AgentModel {
 
 // ───────────────────────────── resultado de un turno (rastro de decisión) ─────────────────────────────
 
-export type ViolationCode = "UNGROUNDED_FIGURE" | "PRICE_OUTSIDE_QUOTE" | "UNREGISTERED_HANDOFF_PROMISE" | "EMPTY_REPLY" | "REPLY_TOO_LONG";
+export type ViolationCode = "UNGROUNDED_FIGURE" | "PRICE_OUTSIDE_QUOTE" | "UNREGISTERED_HANDOFF_PROMISE" | "EMPTY_REPLY" | "REPLY_TOO_LONG" | "VOSEO";
 
 export interface Violation { code: ViolationCode; detail?: string }
 

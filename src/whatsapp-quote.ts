@@ -7,6 +7,7 @@ import type { MessageHistory } from "./message-history.js";
 import { runGuardedTurn, type Produced, type TurnContext, type TurnProducer, type TurnsConfig } from "./guarded-turn.js";
 import type { PublicQuote } from "./partial-auto.js";
 import { summarizeAiFailures } from "./provider-error.js";
+import { DOUBTFUL_LIMIT, formatDoubtfulOptions, possibleStudiesFromAnalysis } from "./quote-options.js";
 import type { CatalogStudy } from "./types.js";
 
 // Integración mínima WhatsApp (Kapso): recibir una imagen -> motor de PlusMedik -> responder con la cotización. Esta capa NO decide nada del AUTO MATCH:
@@ -287,19 +288,30 @@ export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProduc
               deps.log("quote_preparation_skipped", { reason: "APPEND_FAILED" });
             }
           }
+          // Lo que la receta pide y no se pudo confirmar, pero el catálogo tiene: debajo, con su precio y fuera del total, para que el paciente confirme (no se rechaza en silencio).
+          const possible = possibleStudiesFromAnalysis(analysis, catalog);
+          const options = formatDoubtfulOptions(possible, true);
+          if (options) {
+            reply = `${reply}\n\n${options}`;
+            deps.log("quote_possible_studies", { messageId: image.messageId, count: Math.min(possible.length, DOUBTFUL_LIMIT) });
+          }
           result = "quoted";
           deps.turns?.convState?.artifact({ from: image.from, key: image.messageId, kind: "QUOTE", studyIds: readIds });
         } else {
-          reply = analysis.reasons.includes("not_a_request")
-            ? NOT_RECIPE_MESSAGE
-            : analysis.reasons.some((reason) => reason.startsWith("catalog_") || reason.startsWith("semantic_") || reason === "package_alternative_unresolved")
-              ? STUDIES_UNRESOLVED_MESSAGE
-              : instant ? NO_QUOTE_MESSAGE_INSTANT : NO_QUOTE_MESSAGE;
-          result = "no_quote";
           // Solo una imagen que SÍ parece una solicitud de estudios (receta, formulario o manuscrito) merece pedir una mejor foto. Si no es una solicitud, o no se sabe qué es (documento sin clasificar), se calla: casi siempre es una
           // imagen de una conversación interna (comprobantes, muestras, fotos de otros laboratorios) y el mensaje solo confunde. Un humano la ve en el chat.
           const docType = analysis.internal?.document.type;
           const looksLikeRequest = docType === "TEXT_EXPLICIT_REQUEST" || docType === "MARK_DEPENDENT_FORM" || docType === "HANDWRITTEN_REQUEST";
+          // Una receta sin ningún estudio seguro pero con estudios POSIBLES del catálogo: se le ofrecen con su precio para que elija, en vez de «no pude identificar».
+          const possible = looksLikeRequest && !analysis.reasons.includes("not_a_request") ? possibleStudiesFromAnalysis(analysis, catalog) : [];
+          const options = formatDoubtfulOptions(possible, false);
+          reply = options ?? (analysis.reasons.includes("not_a_request")
+            ? NOT_RECIPE_MESSAGE
+            : analysis.reasons.some((reason) => reason.startsWith("catalog_") || reason.startsWith("semantic_") || reason === "package_alternative_unresolved")
+              ? STUDIES_UNRESOLVED_MESSAGE
+              : instant ? NO_QUOTE_MESSAGE_INSTANT : NO_QUOTE_MESSAGE);
+          if (options) deps.log("quote_possible_studies", { messageId: image.messageId, count: Math.min(possible.length, DOUBTFUL_LIMIT), withoutQuote: true });
+          result = "no_quote";
           quiet = analysis.reasons.includes("not_a_request") || !looksLikeRequest;
         }
       }

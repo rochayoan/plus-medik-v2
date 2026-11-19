@@ -29,7 +29,9 @@ export const STUDY_SYNONYM_GROUPS: ReadonlyArray<readonly string[]> = [
   ["gonadotropina corionica humana", "beta hcg", "bhcg", "hcg"],
   ["colesterol total", "colesterol"],
   ["creatinina serica", "creatinina en sangre", "creatinina sanguinea"],
-  ["hierro serico", "sideremia"]
+  ["hierro serico", "sideremia"],
+  // El catálogo nombra el VIH por su sigla en inglés (HIV): sin esto «vih» solo encontraba un panel grande que lo menciona.
+  ["vih", "hiv"]
 ];
 
 const groups: ReadonlyArray<readonly string[]> = STUDY_SYNONYM_GROUPS.map((group) => [...new Set(group.map(normalizeStudyKey))]);

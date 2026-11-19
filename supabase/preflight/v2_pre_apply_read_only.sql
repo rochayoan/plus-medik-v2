@@ -1,4 +1,4 @@
--- PlusMedik V2 — verificación ANTES de aplicar las 25 migraciones (solo lectura)
+-- PlusMedik V2 — verificación ANTES de aplicar las 26 migraciones (solo lectura)
 -- GENERADO por scripts/migration-manifest.ts a partir de supabase/migrations/*.sql. NO editar a mano (una prueba falla si no coincide).
 -- SOLO LECTURA: una sola sentencia SELECT. No contiene DDL, DML, RPC ni datos clínicos; devuelve metadatos y conteos.
 -- Ejecutar exclusivamente en el proyecto Supabase cvokrtrdzxfchntwwslz (verificar el identificador en la URL del panel ANTES de ejecutar),
@@ -33,6 +33,7 @@
 --   23  20261111000000_plusmedik_message_history_phone.sql  67a862e32125d72007b0cfc4a2c7d3a6f9320f5067835f0eac9d6f730057105d
 --   24  20261112000000_plusmedik_conversation_events.sql  78b1b697b54b04e7bd41dd91c63755d64c8c96727b874b8b219f0b5e56b74bf9
 --   25  20261113000000_plusmedik_agent_pilot.sql  192775dc58fd553b9351ea494f60e7bd1c91d3330e2d865a7fce4e2f9ea51201
+--   26  20261119000000_plusmedik_agent_menu_events.sql  99e60628bfc84fcb2a1738649c35d00892a9c9bc083d43e5f530c9982bdde87f
 --
 -- Resultado: una tabla (orden, seccion, comprobacion, estado, detalle). Estados: OK · INFO · WARN (revisar) · BLOCK (detenerse).
 -- La primera fila es el VEREDICTO. Guardar el resultado completo: las filas INSTANTANEA deben ser IDÉNTICAS antes y después.
@@ -339,7 +340,11 @@ manifest(mig, kind, name, parent) as (
     (25, 'function', 'plusmedik_agent_pilot_state', ''),
     (25, 'function', 'plusmedik_history_recent', ''),
     (25, 'table', 'plusmedik_agent_pilot_log', ''),
-    (25, 'table', 'plusmedik_agent_pilot_switch', '')
+    (25, 'table', 'plusmedik_agent_pilot_switch', ''),
+    (26, 'function', 'plusmedik_agent_menu_event', ''),
+    (26, 'function', 'plusmedik_agent_menu_report', ''),
+    (26, 'index', 'plusmedik_agent_menu_events_at_idx', 'plusmedik_agent_menu_events'),
+    (26, 'table', 'plusmedik_agent_menu_events', '')
 ),
 migration_files(mig, file) as (
   values
@@ -367,10 +372,12 @@ migration_files(mig, file) as (
     (22, '20261110000000_plusmedik_message_history_plaintext.sql'),
     (23, '20261111000000_plusmedik_message_history_phone.sql'),
     (24, '20261112000000_plusmedik_conversation_events.sql'),
-    (25, '20261113000000_plusmedik_agent_pilot.sql')
+    (25, '20261113000000_plusmedik_agent_pilot.sql'),
+    (26, '20261119000000_plusmedik_agent_menu_events.sql')
 ),
 service_functions(name) as (
   values
+    ('plusmedik_agent_menu_event'),
     ('plusmedik_agent_pilot_state'),
     ('plusmedik_attention_crm_action'),
     ('plusmedik_attention_record_event'),

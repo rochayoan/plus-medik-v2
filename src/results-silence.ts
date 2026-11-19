@@ -34,8 +34,8 @@ export function routeResultsMessage(text: string): ResultsRouting {
   if (INTERPRET.test(message)) return "SILENT";
   // Cuánto tarda un resultado, sin hablar de uno propio: información para hacerse el estudio (flujo normal).
   if (TURNAROUND_INFO.test(message) && !MINE.test(message)) return "NORMAL";
-  if (READY_INTENT.test(message)) return "READY_CHECK";
-  return "SILENT";
+  // Cualquier otra consulta sobre un resultado propio («quiero consultar mis resultados», «resultado de Juan Pérez»): recepción verifica con los datos del paciente (decisión del dueño, 19-nov: ya no se calla).
+  return "READY_CHECK";
 }
 
 export function isResultsOnlyRequest(text: string): boolean {
@@ -49,9 +49,9 @@ export function boliviaGreeting(date: Date): string {
   return hour < 12 ? "Buenos días" : hour < 19 ? "Buenas tardes" : "Buenas noches";
 }
 
-// Respuesta de recepción ante «¿ya está mi resultado?»: cálida, sin estado ni contraseñas; pide UN solo dato para que la persona verifique. Texto fijo definido por el dueño (11-nov).
+// Respuesta de recepción ante «¿ya está mi resultado?»: cálida, sin estado ni contraseñas; pide los datos con los que la Dra verifica. Texto fijo definido por el dueño (11-nov; carnet añadido el 19-nov).
 export function resultsCheckMessage(date: Date): string {
-  return `${boliviaGreeting(date)}, gracias por preferirnos 😊 Verifico. Ve pasándome el nombre completo del paciente o el comprobante de pago, por favor (con uno de los dos me basta).`;
+  return `${boliviaGreeting(date)}, gracias por preferirnos 😊 Verifico. Ve pasándome el nombre completo del paciente y su carnet de identidad, o el comprobante de pago, por favor.`;
 }
 
 // Un mensaje corto que parece el dato pedido (nombre del paciente, número de orden, comprobante): sin preguntas ni pedidos propios (cotizar, precio, hablar con una persona, ubicación, horario).

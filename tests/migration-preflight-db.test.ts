@@ -27,12 +27,12 @@ const migrationRows = (rows: Row[]) => rows.filter((row) => row.section === "MIG
 const snapshot = (rows: Row[]) => rows.filter((row) => row.section === "INSTANTANEA").map((row) => `${row.item}=${row.detail}`).sort();
 
 describe("verificaciones de las migraciones: contenido estático", () => {
-  it("el manifiesto cubre las 25 migraciones en orden y cada una crea algo propio", () => {
-    expect(manifest.migrations).toHaveLength(25);
+  it("el manifiesto cubre las 26 migraciones en orden y cada una crea algo propio", () => {
+    expect(manifest.migrations).toHaveLength(26);
     expect(manifest.migrations.map((m) => m.version)).toEqual(files.map((f) => f.file.split("_")[0]));
     expect([...manifest.migrations.map((m) => m.version)]).toEqual([...manifest.migrations.map((m) => m.version)].sort());
     for (const m of manifest.migrations) expect(manifest.entries.some((e) => e.mig === m.index), m.file).toBe(true);
-    expect(manifest.entries.filter((e) => e.kind === "table").length).toBe(32);
+    expect(manifest.entries.filter((e) => e.kind === "table").length).toBe(33);
     expect(manifest.serviceFunctions.length).toBeGreaterThan(50);
     // las funciones que el orden redefine son exactamente las que el diseño conoce
     expect(manifest.redefined.filter((r) => r.kind === "function").map((r) => `${r.name}:${r.migrations.join(">")}`)).toEqual([
@@ -114,7 +114,7 @@ describe.skipIf(!bin)("verificaciones contra PostgreSQL real", () => {
     expect(blocks(rows)).toEqual([]);
     expect(verdict(rows)).toMatchObject({ section: "VEREDICTO", status: "OK" });
     const states = migrationRows(rows);
-    expect(states).toHaveLength(25);
+    expect(states).toHaveLength(26);
     for (const row of states) expect(row, row.item).toMatchObject({ status: "OK", detail: expect.stringContaining("pendiente") });
     expect(rows.find((row) => row.item === "lab_tests.id (uuid)")).toMatchObject({ status: "OK" });
     expect(rows.find((row) => row.item === "version_20261025000000_duplicada")).toMatchObject({ status: "INFO" });
@@ -127,10 +127,10 @@ describe.skipIf(!bin)("verificaciones contra PostgreSQL real", () => {
     for (const row of migrationRows(rows)) expect(row.status).toBe("INFO");
   });
 
-  it("aplicar las 25 migraciones en orden: la previa lo reconoce como YA APLICADO, la posterior da OK, y el catálogo y el esquema crm no cambian", async () => {
+  it("aplicar las 26 migraciones en orden: la previa lo reconoce como YA APLICADO, la posterior da OK, y el catálogo y el esquema crm no cambian", async () => {
     const db = await newDb();
     const before = await runReadOnly(db, post);
-    await apply(db, 25);
+    await apply(db, 26);
     const afterPre = await runReadOnly(db, pre);
     for (const row of migrationRows(afterPre)) expect(row, row.item).toMatchObject({ status: "INFO", detail: expect.stringContaining("YA APLICADA") });
     expect(blocks(afterPre)).toEqual([]);
@@ -149,7 +149,7 @@ describe.skipIf(!bin)("verificaciones contra PostgreSQL real", () => {
 
   it("aplicar de a una: tras cada migración, lo aplicado está completo y lo siguiente figura como pendiente en orden", async () => {
     const db = await newDb();
-    for (let n = 1; n <= 25; n++) {
+    for (let n = 1; n <= 26; n++) {
       await db.applyFile(join(MIGRATIONS_DIR, files[n - 1]!.file));
       const rows = await run(db, post);
       expect(blocks(rows), `tras la ${n}`).toEqual([]);

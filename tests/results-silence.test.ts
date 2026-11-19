@@ -152,7 +152,7 @@ describe("resultados: silencio determinista sin IA ni mensajes", () => {
       await processTurns([image, turn("Quería saber si ya están listos mis resultados", "t-1")], deps);
       expect(sendText).toHaveBeenCalledTimes(1);
       const [, body] = sendText.mock.calls[0] as unknown as [string, string];
-      expect(body).toMatch(/^(Buenos días|Buenas tardes|Buenas noches), gracias por preferirnos 😊 Verifico. Ve pasándome el nombre completo del paciente o el comprobante de pago/);
+      expect(body).toMatch(/^(Buenos días|Buenas tardes|Buenas noches), gracias por preferirnos 😊 Verifico. Ve pasándome el nombre completo del paciente y su carnet de identidad, o el comprobante de pago/);
       expect(submit).toHaveBeenCalledTimes(1);
       expect((submit.mock.calls[0] as unknown as [unknown, Array<{ label: string }>])[1][0]!.label).toBe("RESULTS_READY");
       expect(analyze).not.toHaveBeenCalled();
