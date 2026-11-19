@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AgentModel } from "../src/agent/contracts.js";
-import { greetingMenu, isMenuMessage, MENU_OPTIONS, menuChoiceOf, menuNumberOf, resolveGreetingWaitMs, shouldShowGreetingMenu } from "../src/greeting-menu.js";
+import { greetingMenu, isMenuMessage, MENU_OPTIONS, GREETING_WAIT_MS, menuChoiceOf, menuNumberOf, shouldShowGreetingMenu } from "../src/greeting-menu.js";
 import { createAgentPilot } from "../src/agent/pilot.js";
 import { isGreetingOnly } from "../src/agent/shadow.js";
 import { verifyReply } from "../src/agent/verify.js";
@@ -62,12 +62,9 @@ describe("elección por número", () => {
   });
 });
 
-describe("espera del saludo (variable)", () => {
-  it("20 s por defecto; 0/off la quita; valores fuera de rango vuelven al defecto", () => {
-    expect(resolveGreetingWaitMs({})).toBe(20_000);
-    expect(resolveGreetingWaitMs({ PLUSMEDIK_GREETING_WAIT_SECONDS: "off" })).toBe(0);
-    expect(resolveGreetingWaitMs({ PLUSMEDIK_GREETING_WAIT_SECONDS: "30" })).toBe(30_000);
-    expect(resolveGreetingWaitMs({ PLUSMEDIK_GREETING_WAIT_SECONDS: "999" })).toBe(20_000);
+describe("espera del saludo (fija en el código, sin variable de despliegue)", () => {
+  it("20 s", () => {
+    expect(GREETING_WAIT_MS).toBe(20_000);
   });
 });
 

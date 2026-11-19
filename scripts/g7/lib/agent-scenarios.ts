@@ -24,7 +24,10 @@ export const FIXTURE_CATALOG: CatalogStudy[] = [
   study(3, "CREATININA SERICA", ["creatinina", "creatinina sanguinea"], 40),
   study(4, "CREATININA EN ORINA", ["creatinina", "creatinina urinaria"], 42),
   study(5, "TSH", ["tsh"], 80),
-  study(6, "VITAMINA B12", ["vitamina b12", "b12"], 120)
+  study(6, "VITAMINA B12", ["vitamina b12", "b12"], 120),
+  // Dos versiones EN SANGRE de un mismo nombre: siguen siendo ambiguas (la regla «a secas = en sangre» no elige entre ellas).
+  study(7, "PSA TOTAL", ["psa"], 70),
+  study(8, "PSA LIBRE", ["psa"], 75)
 ];
 
 // Conocimiento ficticio: solo hay horarios. Todo lo demás (plazos, direcciones) es «sin datos», como pasa hoy con lo no confirmado.
@@ -111,12 +114,12 @@ export const AGENT_SCENARIOS: AgentScenario[] = [
   {
     id: "estudio-ambiguo",
     title: "Un nombre que coincide con dos estudios: pregunta cuál y el sistema agrega las opciones con su precio (sin total ni cotización)",
-    turns: ["necesito cotizar creatinina"],
+    turns: ["necesito cotizar psa"],
     // El texto del modelo no trae precios; el bloque de opciones con precio lo agrega el sistema debajo.
-    expect: { quoteBlock: true, tools: ["quote_studies"], replyMatch: [/s[ée]rica/i, /orina/i, /Opciones que encontré/] },
+    expect: { quoteBlock: true, tools: ["quote_studies"], replyMatch: [/total/i, /libre/i, /Opciones que encontré/] },
     good: [
-      { calls: [q("creatinina")], text: "Tenemos dos opciones de creatinina: CREATININA SERICA (en sangre) y CREATININA EN ORINA. ¿Cuál necesitas?" },
-      { calls: [q("creatinina")], text: "Para la creatinina hay dos opciones, en sangre (sérica) o en orina. ¿Cuál te cotizo?" }
+      { calls: [q("psa")], text: "Tenemos dos opciones de PSA: PSA TOTAL y PSA LIBRE. ¿Cuál necesitas?" },
+      { calls: [q("psa")], text: "Para el PSA hay dos opciones, total o libre. ¿Cuál te cotizo?" }
     ]
   },
   {

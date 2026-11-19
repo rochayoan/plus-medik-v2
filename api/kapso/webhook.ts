@@ -16,7 +16,7 @@ import { ANSWER_TEXTS, answerFromKnowledge, detectTopics, lazyKnowledge, ttlCach
 import { resolveAgentSettings } from "../../src/agent/openai.js";
 import { createAgentPilot, createPilotSwitch, createRecentProvider } from "../../src/agent/pilot.js";
 import { resolveAgentMode } from "../../src/agent/pipeline.js";
-import { isMenuMessage, lastAssistantMessage, menuChoiceOf, resolveGreetingWaitMs } from "../../src/greeting-menu.js";
+import { GREETING_WAIT_MS, isMenuMessage, lastAssistantMessage, menuChoiceOf } from "../../src/greeting-menu.js";
 import { createMenuEventRecorder } from "../../src/menu-events.js";
 import { createConversationReader, createSupabaseConversationStore, resolveConversationState } from "../../src/conversation-state-store.js";
 import { resolveDailyReplyCap } from "../../src/daily-reply-cap.js";
@@ -131,9 +131,8 @@ const pauseExpiry = pauseExpiryHours === undefined ? undefined : (contactKey: st
 const awaitingPerson = createAwaitingPersonCheck();
 const photoWaitMs = resolvePhotoContextWaitMs(process.env);
 const photoContextWait = photoWaitMs > 0 ? { waitMs: photoWaitMs, newerTurn: createNewerTurnCheck() } : undefined;
-// Menú del saludo: espera antes de enviarlo por si el paciente sigue escribiendo (20 s por defecto; PLUSMEDIK_GREETING_WAIT_SECONDS=0 la quita). Se suma a la espera de lotes de Kapso.
-const greetingWaitMs = resolveGreetingWaitMs(process.env);
-const greetingWait = greetingWaitMs > 0 ? { waitMs: greetingWaitMs, newerTurn: createNewerTurnCheck() } : undefined;
+// Menú del saludo: espera FIJA (src/greeting-menu.ts, sin variable) antes de enviarlo por si el paciente sigue escribiendo. Se suma a la agrupación de mensajes de Kapso.
+const greetingWait = { waitMs: GREETING_WAIT_MS, newerTurn: createNewerTurnCheck() };
 const contactKeyFor = (phone: string) => contactKeyOf({ hmacKey: process.env.PLUSMEDIK_CONTACT_HMAC_KEY, labPhoneNumberId: process.env.KAPSO_PHONE_NUMBER_ID, contactPhone: phone });
 // Historial de TODOS los mensajes (ENCENDIDO por defecto, sin variables nuevas; ver docs/g6/05-historial-de-mensajes.md y src/message-history.ts): guarda en Supabase lo que escriben los pacientes, las respuestas del agente
 // y los mensajes de la recepción humana, para conservarlos y usarlos desde otros proyectos. Exige las migraciones 21 y 22 aplicadas (sin ellas la escritura falla sin afectar al agente), PLUSMEDIK_CONTACT_HMAC_KEY y

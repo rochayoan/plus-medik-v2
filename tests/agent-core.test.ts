@@ -20,7 +20,7 @@ const HOURS = fact("lab_info:1", "Horario de la sucursal Central: lunes a vierne
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const study = (n: number, name: string, aliases: string[], priceBs: number, active = true): CatalogStudy =>
   ({ id: uuid(n), code: null, name, normalizedName: normalizeStudyKey(name), normalizedAliases: aliases.map(normalizeStudyKey), priceBs, active, category: null, sampleType: null }) as unknown as CatalogStudy;
-const CATALOG = [study(1, "HEMOGRAMA COMPLETO", ["hemograma"], 45), study(2, "GLUCOSA EN AYUNAS", ["glucosa"], 30.5), study(3, "CREATININA SERICA", ["creatinina", "creatinina sanguinea"], 40), study(4, "CREATININA EN ORINA", ["creatinina", "creatinina urinaria"], 42), study(5, "TSH", ["tsh"], 80)];
+const CATALOG = [study(1, "HEMOGRAMA COMPLETO", ["hemograma"], 45), study(2, "GLUCOSA EN AYUNAS", ["glucosa"], 30.5), study(3, "CREATININA SERICA", ["creatinina", "creatinina sanguinea"], 40), study(4, "CREATININA EN ORINA", ["creatinina", "creatinina urinaria"], 42), study(5, "TSH", ["tsh"], 80), study(6, "PSA TOTAL", ["psa"], 70), study(7, "PSA LIBRE", ["psa"], 75)];
 const ctx = { now: NOW };
 
 // ───────────────────────────── verificador: el texto ─────────────────────────────
@@ -156,26 +156,31 @@ describe("herramientas: solo lectura, acotadas, que nunca lanzan, y «sin datos�
       expect(result.facts.some((f) => /PARCIAL/.test(f.text))).toBe(false);
     });
 
-    it("ambiguo (creatinina sérica o en orina): no es una cotización, pero el sistema sugiere las opciones con su precio; los hechos nombran las opciones, sin precios", async () => {
-      const result = (await quote.run({ studies: ["creatinina"] }, ctx)) as { facts: Array<{ text: string }>; blocks?: string[] };
+    it("ambiguo (PSA total o libre, ambos en sangre): no es una cotización, pero el sistema sugiere las opciones con su precio; los hechos nombran las opciones, sin precios", async () => {
+      const result = (await quote.run({ studies: ["psa"] }, ctx)) as { facts: Array<{ text: string }>; blocks?: string[] };
       expect(result.blocks).toHaveLength(1);
       expect(result.blocks![0]).toContain("Opciones que encontré");
-      expect(result.blocks![0]).toMatch(/CREATININA SERICA.*Bs/);
-      expect(result.blocks![0]).not.toContain("Total");
-      expect(result.facts.map((f) => f.text).join(" ")).toMatch(/CREATININA SERICA.*CREATININA EN ORINA|CREATININA EN ORINA.*CREATININA SERICA/);
+      expect(result.blocks![0]).toMatch(/PSA TOTAL.*Bs 70/);
+      expect(result.blocks![0]).not.toContain("Total de");
+      expect(result.facts.map((f) => f.text).join(" ")).toMatch(/PSA TOTAL.*PSA LIBRE|PSA LIBRE.*PSA TOTAL/);
       noPrices(result);
     });
 
+    it("muestra por defecto EN SANGRE (decisión del dueño, 19-nov): «creatinina» a secas se cotiza sérica; «creatinina en orina», la de orina", async () => {
+      expect(((await quote.run({ studies: ["creatinina"] }, ctx)) as { blocks: string[] }).blocks[0]).toMatch(/CREATININA SERICA — Bs 40[\s\S]*Total de los estudios cotizados: Bs 40/);
+      expect(((await quote.run({ studies: ["creatinina en orina"] }, ctx)) as { blocks: string[] }).blocks[0]).toMatch(/CREATININA EN ORINA — Bs 42[\s\S]*Total de los estudios cotizados: Bs 42/);
+    });
+
     it("un estudio seguro junto a uno dudoso: se cotiza el seguro (PARCIAL) y el dudoso va DEBAJO como posible, con precio y fuera del total", async () => {
-      const result = (await quote.run({ studies: ["hemograma", "creatinina"] }, ctx)) as { facts: Array<{ text: string }>; blocks: string[] };
+      const result = (await quote.run({ studies: ["hemograma", "psa"] }, ctx)) as { facts: Array<{ text: string }>; blocks: string[] };
       expect(result.blocks).toHaveLength(2);
       expect(result.blocks[0]).toContain("HEMOGRAMA COMPLETO");
-      expect(result.blocks[0]).not.toMatch(/CREATININA/);
+      expect(result.blocks[0]).not.toMatch(/PSA/);
       expect(result.blocks[0]).toMatch(/Total de los estudios cotizados: Bs 45/);
       expect(result.blocks[1]).toMatch(/Posiblemente también/);
       expect(result.blocks[1]).toMatch(/no están sumados en el total/);
-      expect(result.blocks[1]).toMatch(/CREATININA SERICA — Bs 40/);
-      expect(result.blocks[1]).toMatch(/CREATININA EN ORINA — Bs 42/);
+      expect(result.blocks[1]).toMatch(/PSA TOTAL — Bs 70/);
+      expect(result.blocks[1]).toMatch(/PSA LIBRE — Bs 75/);
       expect(result.facts.some((f) => /PARCIAL/.test(f.text))).toBe(true);
       noPrices(result);
     });

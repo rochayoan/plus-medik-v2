@@ -3,7 +3,7 @@ import { searchCatalog } from "../catalog-search.js";
 import type { ConversationReader } from "../conversation-state-store.js";
 import { detectTopics, type KnowledgeAnswer } from "../knowledge-answers.js";
 import { DOUBTFUL_LIMIT, formatDoubtfulOptions } from "../quote-options.js";
-import { evaluateSession, extractWithNotes, formatSessionQuote, QUOTE_TEXTS, type SessionItem } from "../quote-session.js";
+import { evaluateSession, extractWithNotes, formatSessionQuote, preferredBySample, QUOTE_TEXTS, type SessionItem } from "../quote-session.js";
 import type { CatalogStudy } from "../types.js";
 import { emojiFor, formatBs } from "../whatsapp-quote.js";
 import type { Fact, ToolCall, ToolContext, ToolDef, ToolErrorCode, ToolRun } from "./contracts.js";
@@ -176,7 +176,13 @@ export function quoteStudiesTool(options: { loadCatalog: () => Promise<readonly 
           break;
         }
         for (const study of matched) sure.set(study.id, study);
-        for (const group of groups) for (const id of group) { const study = byId.get(id); if (study) doubtful.set(id, study); }
+        for (const group of groups) {
+          const candidates = group.map((id) => byId.get(id)).filter((study): study is CatalogStudy => study !== undefined);
+          // Muestra por defecto EN SANGRE (decisión del dueño, 19-nov): «fósforo», «calcio», «creatinina» a secas → la versión en sangre con ese mismo nombre, si hay UNA. Nunca elige entre dos en sangre.
+          const blood = preferredBySample(candidates, text);
+          if (blood) sure.set(blood.id, blood);
+          else for (const study of candidates) doubtful.set(study.id, study);
+        }
         if (!unresolved) continue;
         // Lo que el motor no resolvió: los estudios más parecidos del catálogo como POSIBLES (nunca como cotización segura). Sin nada seguro en este nombre, la búsqueda es más amplia (como antes).
         const nothing = matched.length === 0 && groups.length === 0;

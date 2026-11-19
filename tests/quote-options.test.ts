@@ -52,3 +52,20 @@ describe("formato de los posibles", () => {
     expect(formatDoubtfulOptions([CATALOG[3]!, CATALOG[4]!], true)).toBeUndefined();
   });
 });
+
+describe("preferencias al elegir entre opciones", async () => {
+  const { preferredBySample, sameStudyAsAsked } = await import("../src/quote-session.js");
+  const s = (n: number, name: string) => study(20 + n, name, 10);
+  it("a secas = EN SANGRE con ese mismo nombre; con «orina» no se elige; nunca entre dos versiones en sangre", () => {
+    expect(preferredBySample([s(1, "FOSFORO (P)"), s(2, "FOSFATURIA DE 24 HORAS (FOSFORO EN ORINA)")], "fosforo")?.name).toBe("FOSFORO (P)");
+    expect(preferredBySample([s(3, "CALCIO SERICO"), s(4, "CALCIO IONICO"), s(5, "CALCIURIA DE 24 HORAS - CALCIO EN ORINA 24 HORAS")], "calcio")?.name).toBe("CALCIO SERICO");
+    expect(preferredBySample([s(1, "FOSFORO (P)"), s(2, "FOSFATURIA DE 24 HORAS (FOSFORO EN ORINA)")], "fosforo en orina")).toBeUndefined();
+    expect(preferredBySample([s(6, "PSA TOTAL"), s(7, "PSA LIBRE")], "psa")).toBeUndefined();
+    expect(preferredBySample([s(1, "FOSFORO (P)"), s(2, "FOSFATURIA DE 24 HORAS")], "colesterol y fosforo")?.name).toBe("FOSFORO (P)");
+  });
+  it("el método preferido (ECLIA) solo vale si es el estudio que el paciente nombró", () => {
+    expect(sameStudyAsAsked(s(8, "TSH (ECLIA)"), "tsh")).toBe(true);
+    expect(sameStudyAsAsked(s(9, "VITAMINA D 25 (OH) (ECLIA)"), "vitamina d")).toBe(true);
+    expect(sameStudyAsAsked(s(10, "AFP ( Alfa Feto Proteínas ) (ECLIA)"), "proteinas")).toBe(false);
+  });
+});

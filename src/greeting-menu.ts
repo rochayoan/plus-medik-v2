@@ -76,13 +76,6 @@ export function menuChoiceOf(text: string, recent: readonly RecentEntry[]): Menu
 // atiende el agente con el contexto).
 export const shouldShowGreetingMenu = (greetingOnly: boolean, recent: readonly RecentEntry[]): boolean => greetingOnly && recent.length === 0;
 
-// PLUSMEDIK_GREETING_WAIT_SECONDS: vacío = 20 s; número 1–60 = esos segundos; off / 0 = sin espera. Los datos reales (4–12 nov) muestran que tras un «hola» la mayoría escribe lo que necesita en menos de 45 s
-// (contando la espera de lotes de Kapso).
-export const DEFAULT_GREETING_WAIT_SECONDS = 20;
-export function resolveGreetingWaitMs(env: Record<string, string | undefined>): number {
-  const raw = env.PLUSMEDIK_GREETING_WAIT_SECONDS?.trim().toLowerCase();
-  if (raw === undefined || raw === "") return DEFAULT_GREETING_WAIT_SECONDS * 1000;
-  if (raw === "off" || raw === "false" || raw === "0") return 0;
-  const seconds = Number(raw);
-  return Number.isFinite(seconds) && seconds >= 1 && seconds <= 60 ? seconds * 1000 : DEFAULT_GREETING_WAIT_SECONDS * 1000;
-}
+// Espera antes de enviar el menú, FIJA en el código (sin variable de despliegue; se suma a la agrupación de mensajes de Kapso). Los datos reales (4–12 nov) muestran que tras un «hola» la mayoría escribe lo
+// que necesita en menos de 45 s contando la espera de Kapso. Para cambiarla, se edita este número.
+export const GREETING_WAIT_MS = 20_000;
