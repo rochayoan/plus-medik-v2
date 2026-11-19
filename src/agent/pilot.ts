@@ -5,7 +5,7 @@ import type { AgentModel, Capabilities, HandoffReason, RecentEntry } from "./con
 import { MAPS_LINK } from "../location-photo.js";
 import { greetingMenu, isMenuMessage, lastAssistantMessage, MENU_CLOSING, MENU_LINES, MENU_OPTIONS, menuNumberOf, shouldShowGreetingMenu } from "../greeting-menu.js";
 import { homeVisitMessage, runAgentTurn } from "./pipeline.js";
-import { asksPersonOnly, isGreetingOnly, prepareAgentTurn, summarizeDecision, type AgentContextOptions } from "./shadow.js";
+import { asksPersonOnly, isGreetingOnly, isGreetingText, prepareAgentTurn, summarizeDecision, type AgentContextOptions } from "./shadow.js";
 
 // PILOTO del nuevo agente (G7, Fase 4): el núcleo conversacional RESPONDE de verdad, pero SOLO a los números de una lista permitida y SOLO mientras el interruptor de la base diga «encendido». Para todos los demás
 // contactos nada cambia: no hay llamadas al modelo, no hay lecturas nuevas y responde el agente de siempre.
@@ -174,8 +174,8 @@ export function createAgentPilot(options: AgentPilotOptions): AgentPilot {
           // 2. Mensajes del lote, mensajes recientes y herramientas.
           const prepared = await prepareAgentTurn(options.context, from, turns);
           if (prepared.kind === "skip") return fallback(prepared.reason);
-          // Solo un saludo y sin conversación en las últimas 24 h: el menú de intención, texto fijo del sistema (sin modelo).
-          if (shouldShowGreetingMenu(isGreetingOnly(prepared.utterances), prepared.recent)) {
+          // Solo un saludo y nadie le respondió en las últimas 24 h (saludos previos sin respuesta no cuentan): el menú de intención, texto fijo del sistema (sin modelo).
+          if (shouldShowGreetingMenu(isGreetingOnly(prepared.utterances), prepared.recent, isGreetingText)) {
             options.log("agent_pilot", { status: "MENU", utterances: prepared.utterances.length, latencyMs: now() - started, model: options.modelName });
             options.log("agent_menu", { event: "SHOWN" });
             return { body: greetingMenu(new Date(now())), result: "conversation", processingStatus: "COMPLETED", stale: "NEWER_TURN", signature: "AGENT:MENU", quality: "ANSWER", quotedStudyIds: [], menu: true };

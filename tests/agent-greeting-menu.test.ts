@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentModel } from "../src/agent/contracts.js";
 import { greetingMenu, isMenuMessage, MENU_OPTIONS, GREETING_WAIT_MS, menuChoiceOf, menuNumberOf, shouldShowGreetingMenu } from "../src/greeting-menu.js";
 import { createAgentPilot } from "../src/agent/pilot.js";
-import { isGreetingOnly } from "../src/agent/shadow.js";
+import { isGreetingOnly, isGreetingText } from "../src/agent/shadow.js";
 import { verifyReply } from "../src/agent/verify.js";
 import type { AuditRepository } from "../src/audit.js";
 import { routeResultsMessage } from "../src/results-silence.js";
@@ -30,12 +30,22 @@ describe("¿solo saluda?", () => {
   it.each(["hola", "Buenas tardes", "buenos días doctora", "Hola, buenas noches"])("saludo puro: %s", (text) => {
     expect(isGreetingOnly([said(text)])).toBe(true);
   });
-  it.each(["gracias", "ok", "hola, ¿cuánto cuesta un hemograma?", "buenas, necesito laboratorio"])("no abre el menú: %s", (text) => {
+  it.each(["hola buenas nocehs", "ola", "holi", "hola q tal", "buenas noxhes", "hola buenas nches", "ola buenas", "Buenas tardes, señorita", "Holaaa buenas tardes doctora 🙏", "hola a todos"])("saludo con errores de WhatsApp (solo para el menú): %s", (text) => {
+    expect(isGreetingOnly([said(text)])).toBe(true);
+  });
+  it.each(["gracias", "ok", "hola, ¿cuánto cuesta un hemograma?", "buenas, necesito laboratorio", "hola a domicilio", "buenas tardes una consulta", "hola llegare tarde", "holter", "ola de calor"])("no abre el menú: %s", (text) => {
     expect(isGreetingOnly([{ topic: "OTHER", text }])).toBe(false);
   });
   it("con conversación en las últimas 24 h un «hola» es retomar: sin menú", () => {
-    expect(shouldShowGreetingMenu(isGreetingOnly([said("hola")]), [])).toBe(true);
-    expect(shouldShowGreetingMenu(isGreetingOnly([said("hola")]), [{ from: "ASSISTANT", text: "Con gusto te ayudo" }])).toBe(false);
+    expect(shouldShowGreetingMenu(isGreetingOnly([said("hola")]), [], isGreetingText)).toBe(true);
+    expect(shouldShowGreetingMenu(isGreetingOnly([said("hola")]), [{ from: "ASSISTANT", text: "Con gusto te ayudo" }], isGreetingText)).toBe(false);
+    expect(shouldShowGreetingMenu(isGreetingOnly([said("hola")]), [{ from: "STAFF", text: "Buenas, le atiende la Dra." }], isGreetingText)).toBe(false);
+  });
+  it("saludos anteriores que NADIE respondió (envío fallido, caída) no son conversación: sale el menú", () => {
+    expect(shouldShowGreetingMenu(isGreetingOnly([said("hola buenas noches")]), [{ from: "PATIENT", text: "hola buenas tardes" }, { from: "PATIENT", text: "hola buen dia" }], isGreetingText)).toBe(true);
+  });
+  it("un pedido concreto anterior sin respuesta no se tapa con el menú: lo atiende el agente", () => {
+    expect(shouldShowGreetingMenu(isGreetingOnly([said("hola")]), [{ from: "PATIENT", text: "cuánto cuesta el hemograma" }], isGreetingText)).toBe(false);
   });
 });
 
