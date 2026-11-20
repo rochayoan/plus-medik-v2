@@ -38,9 +38,10 @@ export const STUDY_SYNONYM_GROUPS: ReadonlyArray<readonly string[]> = [
   ["electroforesis de proteinas plasmatica", "electroforesis de proteinas", "proteinograma", "proteinograma electroforetico"],
   // Nombres del cotizador de la Dra: «ELECTROLITOS (SODIO, POTASIO, CLORO)» es el IONOGRAMA 1.
   ["ionograma 1", "electrolitos", "electrolitos sericos", "electrolitos en sangre"],
-  // La prueba rápida de VIH es «H.I.V 1,2» (Bs 50, 1 hora) en el catálogo; solo cuando el pedido dice «rápida».
-  ["hiv 1 2", "prueba rapida de vih", "prueba rapida vih", "vih prueba rapida", "hiv prueba rapida", "prueba rapida de hiv", "prueba rapida hiv", "vih rapida", "hiv rapida"],
-  ["sodio en orina ocacional o 24 horas", "sodio urinario", "sodio en orina"],
+  // La prueba rápida de VIH (Bs 50, 1 hora): «HIV 1,2 (PRUEBA RAPIDA)» desde el 20-nov (antes «H.I.V 1,2»; se dejan los dos nombres para que funcione con cualquiera).
+  ["hiv 1 2 prueba rapida", "hiv 1 2", "prueba rapida de vih", "prueba rapida vih", "vih prueba rapida", "hiv prueba rapida", "prueba rapida de hiv", "prueba rapida hiv", "vih rapida", "hiv rapida"],
+  // «ocasional» corregido en el catálogo el 20-nov (antes «ocacional»): los dos nombres.
+  ["sodio en orina ocasional o 24 horas", "sodio en orina ocacional o 24 horas", "sodio urinario", "sodio en orina"],
   ["parasitologico seriado", "copro seriado", "coproparasitologico seriado"],
   ["parasitologico simple", "copro simple", "coproparasitologico simple"]
 ];

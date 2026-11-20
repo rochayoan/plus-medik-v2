@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { splitStudyMentions } from "../src/study-mentions.js";
+import { joinDottedAcronyms, splitStudyMentions } from "../src/study-mentions.js";
 
 // Cómo escriben los pacientes una lista de estudios (mensajes reales del 4 al 12 de noviembre y sus variantes): cada estudio debe quedar como UNA mención.
 
@@ -109,5 +109,22 @@ describe("conjunciones que también son letras de un estudio (20-nov)", () => {
 describe("«más» une estudios (pedido real del 19-nov)", () => {
   it("«coproparasitológico simple más un helicobacter pylori en heces»", () => {
     expect(split("coproparasitológico simple más un helicobacter pylori en heces")).toEqual(["coproparasitologico simple", "helicobacter pylori en heces"]);
+  });
+});
+
+describe("siglas con puntos y abreviaturas de las recetas (20-nov)", () => {
+  it.each([
+    ["H.A.I. Chagas", "HAI Chagas"],
+    ["H.A.I.Toxo", "HAI.Toxo"],
+    ["V.D.R.L", "VDRL"],
+    ["H.I.V. 1.2.( P. Rápida)", "HIV 1.2.( P. Rápida)"],
+    ["CELULAS L.E.", "CELULAS LE"],
+    ["cortisol 8 a.m.", "cortisol 8 am"],
+    ["vit. d y ác. úrico", "vit. d y ác. úrico"]
+  ])("«%s» → «%s»", (text, expected) => {
+    expect(joinDottedAcronyms(text)).toBe(expected);
+  });
+  it("las menciones salen con la sigla junta, «vih» como «hiv» (así lo nombra el catálogo) y «P. Rápida» completa", () => {
+    expect(splitStudyMentions("H.A.I. Chagas\nH.A.I.Toxo\nH.I.V. 1.2.( P. Rápida)\nVIH")).toEqual(["hai chagas", "hai toxo", "hiv 1 2 prueba rapida", "hiv"]);
   });
 });

@@ -177,9 +177,11 @@ function namedChoice(candidates: readonly CatalogStudy[], mention: string): Cata
   const asked = normalizeStudyKey(coreOfMention(mention)).split(" ").filter(Boolean);
   if (asked.length < 2) return undefined;
   const askedSet = new Set(asked);
+  // Un panel solo se elige si el paciente pidió un panel: su lista larga tiene casi cualquier palabra («vih 1 y 2» no es el PANEL INTIMA PLUS de Bs 1250 porque su lista diga «VIH» y «Herpes simple 1»).
+  const options = askedSet.has("panel") || askedSet.has("perfil") ? candidates : candidates.filter((candidate) => !isPanel(candidate));
   // Solo entre versiones del MISMO estudio se descarta la que agrega una variante no pedida; entre estudios distintos rige la regla de siempre.
-  const sameStudy = candidates.length > 1 && candidates.every((candidate) => variantBase(candidate.name) === variantBase(candidates[0]!.name));
-  const withAll = candidates.filter((candidate) => {
+  const sameStudy = options.length > 1 && options.every((candidate) => variantBase(candidate.name) === variantBase(options[0]!.name));
+  const withAll = options.filter((candidate) => {
     const words = sameStudy ? allNameWords(candidate.name) : nameWords(candidate.name);
     return asked.every((word) => words.has(word)) && (!sameStudy || [...words].every((word) => !VARIANT_WORDS.has(word) || askedSet.has(word)));
   });

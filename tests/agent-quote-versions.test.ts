@@ -9,14 +9,17 @@ import type { CatalogStudy } from "../src/types.js";
 // sangre por defecto, IgG + IgM juntas, ECLIA si hay una y si no la de menor tiempo de entrega; si empatan o difieren en otra cosa, pregunta. Nombres y tiempos como en el catálogo real.
 
 let n = 0;
-const study = (name: string, priceBs: number, turnaroundText: string): CatalogStudy =>
-  ({ id: `00000000-0000-4000-8000-${String(++n).padStart(12, "0")}`, code: null, name, normalizedName: normalizeStudyKey(name), normalizedAliases: [], priceBs, active: true, category: null, sampleType: null, turnaroundText }) as unknown as CatalogStudy;
+const study = (name: string, priceBs: number, turnaroundText: string, aliases: string[] = []): CatalogStudy =>
+  ({ id: `00000000-0000-4000-8000-${String(++n).padStart(12, "0")}`, code: null, name, normalizedName: normalizeStudyKey(name), normalizedAliases: aliases.map(normalizeStudyKey), priceBs, active: true, category: null, sampleType: null, turnaroundText }) as unknown as CatalogStudy;
+// Panel real del catálogo: su lista menciona «VIH», «HIV 1,2» y «Herpes simple 1».
+const PANEL_ITS = "PANEL INTIMA PLUS 32 PATOGENOS – INFECCIONES DE TRANSMISION SEXUAL + HPV + VIH 4ta Generacion (Elisa) ITS Patogenos: Virus del Herpes simple 1, Virus del Herpes simple 2, Streptococcus agalactiae, Gardnerella vaginalis, Chlamydia trachomatis, Neisseria gonorrhoeae, Treponema pallidum, Candida albicans HIV 1,2 AG-AC 4ta Generacion (Elisa) HPV 14 Genotipos de Alto Riesgo 16, 18, 31, 33, 35, 39, 45, 51, 52, 56, 58, 59, 66 y 68";
 const CATALOG = [
   study("PROTEINA C REACTIVA (PCR CUALITATIVO)", 50, "2 horas"), study("PROTEINA C REACTIVA (PCR SEMI CUANTITATIVO", 60, "2 horas"), study("PROTEINA C REACTIVA (PCR CUANTITATIVO) (FIA Fluorescencia)", 110, "1 hora"),
   study("TSH NEONATAL", 100, "En el día"), study("TSH (FIA Fluorescencia)", 100, "1 hora"), study("TSH (ECLIA)", 90, "En el día"),
   study("ANA (ANTICUERPOS ANTINUCLEARES) Elisa", 170, "En el día"), study("ANA / FAN HEP2 IFI", 200, "2 días"),
   study("CITOMEGALOVIRUS IgG", 130, "En el día"), study("CITOMEGALOVIRUS IgM", 130, "En el día"), study("DETECCION CUANTITATIVA (CARGA VIRAL) CITOMEGALOVIRUS (CMV)", 600, "2 días"),
-  study("TOXO IgM (ELISA)", 90, "En el día"), study("INMUNO TOXO IgM", 70, "3 días"), study("TOXO IgG (ELISA)", 90, "En el día"), study("INMUNO TOXO IgG", 70, "3 días"), study("H.A.I. TOXO", 60, "4 horas"),
+  study("TOXO IgM (ELISA)", 90, "En el día"), study("INMUNO TOXO IgM", 70, "3 días"), study("TOXO IgG (ELISA)", 90, "En el día"), study("INMUNO TOXO IgG", 70, "3 días"), study("HAI TOXO", 60, "4 horas"), study("HAI CHAGAS", 60, "4 horas", ["HAI Chagas"]),
+  study("CHAGAS IgG ELISA", 70, "En el día"), study(PANEL_ITS, 1250, "5 días"), study("WESTERN BLOT HIV", 370, "7 días"),
   study("HERPES ZOSTER IgG", 155, "3 días"), study("HERPES ZOSTER IgM", 155, "3 días"), study("HERPES tipo 2 IgG (Elisa)", 130, "En el día"), study("HERPES tipo 2 IgM (Elisa)", 130, "En el día"),
   study("T4 NEONATAL", 110, "En el día"), study("T4 LIBRE (ECLIA)", 90, "En el día"), study("T4 TOTAL (ECLIA)", 90, "En el día"),
   study("DENGUE IgM ELISA", 185, "3 días"), study("DENGUE IgG ELISA", 185, "3 días"), study("DENGUE DUO ANTICUERPOS Y ANTIGENO", 130, "1 hora"), study("DENGUE TEST RAPIDO IgG E IgM", 70, "1 hora"),
@@ -25,7 +28,7 @@ const CATALOG = [
   study("TRIGLICERIDOS", 45, "2 horas"), study("TIEMPO DE PROTROMBINA + INR", 50, "2 horas"), study("TIEMPO PARCIAL DE TROMBOPLASTINA (APTT)", 60, "2 horas"), study("TIEMPO DE COAGULACION", 25, "2 horas"),
   study("TIEMPO DE SANGRIA", 25, "2 horas"), study("HEPATITIS E", 300, "4 días"), study("HEPATITIS A (PRUEBA RAPIDA)", 90, "1 hora"), study("HEPATITIS C (PRUEBA RAPIDA)", 70, "1 hora"),
   study("HEMOGLOBINA", 30, "2 horas"), study("HEMOGLOBINA GLICOSILADA (Hb A1c) (FIA Fluorescencia)", 120, "1 hora"), study("CALCIO SERICO", 30, "2 horas"), study("SODIO", 40, "1 hora"),
-  study("IONOGRAMA 2 (sodio, potasio, cloro, calcio ionico)", 220, "1 hora"), study("H.I.V 1,2", 50, "1 hora"), study("HIV 1,2 AG-AC 4ta GENERACION (Elisa)", 150, "En el día"),
+  study("IONOGRAMA 2 (sodio, potasio, cloro, calcio ionico)", 220, "1 hora"), study("HIV 1,2 (PRUEBA RAPIDA)", 50, "1 hora", ["VIH", "HIV"]), study("HIV 1,2 AG-AC 4ta GENERACION (Elisa)", 150, "En el día"),
   study("CORTISOL 08:00 (CLIA)", 120, "En el día"), study("CORTISOL 16:00 (CLIA)", 120, "En el día"), study("TEST ADRENAL am y pm", 450, "3 días")
 ];
 const ctx = {} as ToolContext;
@@ -91,14 +94,33 @@ describe("errores reales que ya no pasan", () => {
   it("«calcio sodio» → calcio + sodio, no el IONOGRAMA 2", async () => {
     expect(sureOf(await run("calcio sodio"))).toEqual(["CALCIO SERICO", "SODIO"]);
   });
-  it("«prueba rápida de vih» → la H.I.V 1,2 (Bs 50)", async () => {
-    expect(sureOf(await run("prueba rápida de vih"))).toEqual(["H.I.V 1,2"]);
+  it("«prueba rápida de vih» → la prueba rápida (Bs 50)", async () => {
+    expect(sureOf(await run("prueba rápida de vih"))).toEqual(["HIV 1,2 (PRUEBA RAPIDA)"]);
   });
-  it("«vih» a secas: la prueba rápida aparece entre las opciones (antes no se encontraba por los puntos)", async () => {
-    expect((await run("vih")).blocks?.join("\n")).toMatch(/H\.I\.V 1,2/);
+  it("con el nombre viejo del catálogo («H.I.V 1,2», sin alias) la prueba rápida igual aparece entre las opciones de «vih»", async () => {
+    const OLD = CATALOG.map((item) => (item.name === "HIV 1,2 (PRUEBA RAPIDA)" ? ({ ...item, name: "H.I.V 1,2", normalizedName: normalizeStudyKey("H.I.V 1,2"), normalizedAliases: [] } as CatalogStudy) : item));
+    const result = (await quoteStudiesTool({ loadCatalog: async () => OLD }).run({ studies: ["vih"] }, ctx)) as Result;
+    expect(result.blocks?.join("\n")).toMatch(/H\.I\.V 1,2/);
   });
   it("«cortisol am» → el de las 08:00, no el test adrenal", async () => {
     expect(sureOf(await run("cortisol am"))).toEqual(["CORTISOL 08:00 (CLIA)"]);
+  });
+});
+
+// Catálogo corregido el 20-nov: «HIV 1,2 (PRUEBA RAPIDA)» con alias «VIH» y «HIV» (la Dra cotiza esa cuando solo dicen VIH), «HAI CHAGAS», «HAI TOXO».
+describe("VIH y siglas con puntos", () => {
+  it.each(["vih", "hiv", "VIH", "vih 1 y 2", "hiv 1 y 2", "H.I.V.", "H.I.V. 1.2.( P. Rápida)", "prueba rapida hiv"])("«%s» → la prueba rápida de Bs 50", async (text) => {
+    expect(sureOf(await run(text))).toEqual(["HIV 1,2 (PRUEBA RAPIDA)"]);
+  });
+  it("un panel nunca se elige solo: «vih 1 y 2» no es el PANEL INTIMA PLUS (Bs 1250) aunque su lista diga «VIH» y «Herpes simple 1»", async () => {
+    for (const text of ["vih 1 y 2", "vih 1", "hiv 2", "vih elisa"]) expect(sureOf(await run(text)).some((name) => name.startsWith("PANEL"))).toBe(false);
+  });
+  it("las otras pruebas de VIH se cotizan cuando las nombran", async () => {
+    expect(sureOf(await run("hiv 4ta generacion"))).toEqual(["HIV 1,2 AG-AC 4ta GENERACION (Elisa)"]);
+    expect(sureOf(await run("western blot vih"))).toEqual(["WESTERN BLOT HIV"]);
+  });
+  it.each([["H.A.I. Chagas", "HAI CHAGAS"], ["H.A.I.Toxo", "HAI TOXO"], ["hai toxo", "HAI TOXO"]])("receta «%s» → %s", async (text, expected) => {
+    expect(sureOf(await run(text))).toEqual([expected]);
   });
 });
 
