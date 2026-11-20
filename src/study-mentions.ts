@@ -41,11 +41,19 @@ const EXPANSIONS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bvirus del? papiloma(?: humano)?\b/g, "hpv"],
   [/\bvph\b/g, "hpv"],
   [/\btoxoplasm(?:a|osis)\b/g, "toxo"],
-  [/\bvirus de (?:la )?inmunodeficiencia humana\b/g, "hiv"]
+  [/\bvirus de (?:la )?inmunodeficiencia humana\b/g, "hiv"],
+  // El catálogo nombra el VIH por su sigla en inglés en todas sus pruebas («HIV 1,2 (PRUEBA RAPIDA)», «WESTERN BLOT HIV»); «VIH» solo aparece dentro de las listas de los paneles.
+  [/\bvih\b/g, "hiv"],
+  // «(P. Rápida)» de las recetas y listas de los médicos
+  [/\bp rapid(a|o)s?\b/g, "prueba rapid$1"]
 ];
 
+// Siglas con puntos como las escriben las recetas y los pacientes («H.A.I. Chagas», «H.A.I.Toxo», «V.D.R.L», «H.I.V.», «células L.E.», «8 a.m.»): se juntan («HAI Chagas», «VDRL»), como las nombra
+// el catálogo. Sin esto quedaban «h a i chagas», que no coincide con nada. Una sola letra con punto no es sigla («vit. d», «ác. úrico», «P. Rápida»).
+export const joinDottedAcronyms = (text: string): string => text.replace(/(?<![A-Za-z])[A-Za-z](?:\.[A-Za-z])+\.?(?![A-Za-z])/g, (acronym) => acronym.replace(/\./g, ""));
+
 // Palabras delante del nombre que no son parte del estudio («labo de nivel de zinc», «examen de», «dosaje de»).
-const LEADING_FILLER = /^(?:(?:la|el|una?|unos?|las|los|mi|un)\s+)?(?:labo|laboratorios?|pruebas?|examen(?:es)?|examenes|analisis|estudios?|dosajes?|dosificacion|test|nivel(?:es)?|valor(?:es)?|control|medicion|precios?|costos?|cotizacion(?:es)?)\s+(?:de\s+(?:la\s+|el\s+|los\s+|las\s+)?|del\s+|para\s+(?:el\s+|la\s+)?)?/;
+const LEADING_FILLER = /^(?:(?:la|el|una?|unos?|las|los|mi|un)\s+)?(?:labo|laboratorios?|pruebas?|examen(?:es)?|examenes|analisis|estudios?|dosajes?|dosificacion|test|nivel(?:es)?|valor(?:es)?|control|medicion|precios?|costos?|cotizacion(?:es)?)(?!\s+rapid)\s+(?:de\s+(?:la\s+|el\s+|los\s+|las\s+)?|del\s+|para\s+(?:el\s+|la\s+)?)?/;
 const TRAILING_COURTESY = /\s+(?:por favor|porfavor|porfa|pf|gracias|muchas gracias)$/;
 // Un artículo suelto delante del nombre («un helicobacter pylori», «el perfil lipídico»).
 const LEADING_ARTICLE = /^(?:un|una|unos|unas|el|la|los|las)\s+(?=\S)/;
@@ -110,7 +118,8 @@ export interface MentionOptions {
 }
 
 // Las menciones de estudios de un texto, en orden y sin repetir, ya normalizadas (minúsculas, sin tildes, sin relleno). Nunca devuelve menciones vacías.
-export function splitStudyMentions(text: string, options: MentionOptions = {}): string[] {
+export function splitStudyMentions(raw: string, options: MentionOptions = {}): string[] {
+  const text = joinDottedAcronyms(raw);
   const known = options.isKnownName ?? (() => false);
   const out: string[] = [];
   const push = (mention: string): void => {

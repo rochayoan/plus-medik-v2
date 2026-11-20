@@ -20,6 +20,24 @@ export function formatDoubtfulOptions(studies: readonly CatalogStudy[], afterQuo
     : ["🩺 *PlusMedik* · Opciones que encontré", "", ...lines, "", "Dime cuál (o cuáles) te interesa y te armo la cotización. 😊"].join("\n");
 }
 
+// Las opciones AGRUPADAS por lo que pidió el paciente (cotización por texto del agente, 20-nov): «Para «pcr»: 1… 2… 3…», con la numeración seguida para que responda con el número. Sin el tope
+// de 8 de antes (dejaba estudios «pendientes» sin opciones); solo un máximo por pedido y uno total para que el mensaje no sea interminable.
+export const OPTIONS_PER_MENTION = 6;
+export const OPTIONS_TOTAL_LIMIT = 30;
+export function formatGroupedOptions(groups: ReadonlyArray<{ label: string; studies: readonly CatalogStudy[] }>, afterQuote: boolean): string | undefined {
+  let n = 0;
+  const sections: string[] = [];
+  for (const group of groups) {
+    const valid = group.studies.filter(priced).slice(0, Math.min(OPTIONS_PER_MENTION, OPTIONS_TOTAL_LIMIT - n));
+    if (valid.length === 0) continue;
+    sections.push(`*Para «${group.label}»:*`, ...valid.map((study) => `${++n}. ${emojiFor(study.name)} ${shortName(study.name)} — ${formatBs(study.priceBs)}${study.turnaroundText ? ` (entrega: ${study.turnaroundText})` : ""}`), "");
+  }
+  if (n === 0) return undefined;
+  return afterQuote
+    ? ["🔎 *Posiblemente también pediste alguno de estos* (no están sumados en el total):", "", ...sections, "¿Quieres que agregue alguno a tu cotización? Responde con el número o el nombre. 😊"].join("\n")
+    : ["🩺 *PlusMedik* · Opciones que encontré", "", ...sections, "Dime cuál (o cuáles) te interesa y te armo la cotización. 😊"].join("\n");
+}
+
 // Máximo de candidatos de UNA línea dudosa de la receta: más que esto ya no es «posiblemente», es no saber qué dice (se pide otra foto o lo ve una persona).
 const MAX_CANDIDATES_PER_LINE = 4;
 
