@@ -31,7 +31,18 @@ export const STUDY_SYNONYM_GROUPS: ReadonlyArray<readonly string[]> = [
   ["creatinina serica", "creatinina en sangre", "creatinina sanguinea"],
   ["hierro serico", "sideremia"],
   // El catálogo nombra el VIH por su sigla en inglés (HIV): sin esto «vih» solo encontraba un panel grande que lo menciona.
-  ["vih", "hiv"]
+  ["vih", "hiv"],
+  // Cotizaciones reales de la Dra (4–20 nov): «cortisol am» es el de las 08:00 (el agente cotizaba el «test adrenal am y pm»); «proteinograma» es la electroforesis de proteínas.
+  ["cortisol 08 00", "cortisol am", "cortisol a m", "cortisol matutino", "cortisol de la manana", "cortisol 8 am", "cortisol 08 00 am"],
+  ["cortisol 16 00", "cortisol pm", "cortisol p m", "cortisol vespertino", "cortisol de la tarde", "cortisol 4 pm", "cortisol 16 00 pm"],
+  ["electroforesis de proteinas plasmatica", "electroforesis de proteinas", "proteinograma", "proteinograma electroforetico"],
+  // Nombres del cotizador de la Dra: «ELECTROLITOS (SODIO, POTASIO, CLORO)» es el IONOGRAMA 1.
+  ["ionograma 1", "electrolitos", "electrolitos sericos", "electrolitos en sangre"],
+  // La prueba rápida de VIH es «H.I.V 1,2» (Bs 50, 1 hora) en el catálogo; solo cuando el pedido dice «rápida».
+  ["hiv 1 2", "prueba rapida de vih", "prueba rapida vih", "vih prueba rapida", "hiv prueba rapida", "prueba rapida de hiv", "prueba rapida hiv", "vih rapida", "hiv rapida"],
+  ["sodio en orina ocacional o 24 horas", "sodio urinario", "sodio en orina"],
+  ["parasitologico seriado", "copro seriado", "coproparasitologico seriado"],
+  ["parasitologico simple", "copro simple", "coproparasitologico simple"]
 ];
 
 const groups: ReadonlyArray<readonly string[]> = STUDY_SYNONYM_GROUPS.map((group) => [...new Set(group.map(normalizeStudyKey))]);

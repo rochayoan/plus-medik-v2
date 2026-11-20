@@ -45,7 +45,7 @@ const EXPANSIONS: ReadonlyArray<readonly [RegExp, string]> = [
 ];
 
 // Palabras delante del nombre que no son parte del estudio («labo de nivel de zinc», «examen de», «dosaje de»).
-const LEADING_FILLER = /^(?:(?:la|el|una?|unos?|las|los|mi|un)\s+)?(?:labo|laboratorios?|pruebas?|examen(?:es)?|examenes|analisis|estudios?|dosajes?|dosificacion|test|nivel(?:es)?|valor(?:es)?|control|medicion|precios?|costos?|cotizacion(?:es)?)\s+(?:de\s+(?:la\s+|el\s+|los\s+|las\s+)?|del\s+|para\s+(?:el\s+|la\s+)?)?/;
+const LEADING_FILLER = /^(?:(?:la|el|una?|unos?|las|los|mi|un)\s+)?(?:labo|laboratorios?|pruebas?|examen(?:es)?|examenes|analisis|estudios?|dosajes?|dosificacion|test|nivel(?:es)?|valor(?:es)?|control|medicion|precios?|costos?|cotizacion(?:es)?)(?!\s+rapid)\s+(?:de\s+(?:la\s+|el\s+|los\s+|las\s+)?|del\s+|para\s+(?:el\s+|la\s+)?)?/;
 const TRAILING_COURTESY = /\s+(?:por favor|porfavor|porfa|pf|gracias|muchas gracias)$/;
 // Un artículo suelto delante del nombre («un helicobacter pylori», «el perfil lipídico»).
 const LEADING_ARTICLE = /^(?:un|una|unos|unas|el|la|los|las)\s+(?=\S)/;
