@@ -110,3 +110,25 @@ describe("una lista separada solo por espacios se corta SOLO si cada palabra nom
     expect(sureOf(result)).not.toContain("COPROCULTIVO");
   });
 });
+
+describe("nunca se elige una variante con una palabra que el paciente no escribió (capturas de la Dra, 4–20 nov)", () => {
+  // Nombres tal cual el catálogo real, incluido el «)» que falta en la SEMI CUANTITATIVA.
+  const catalog = [...CATALOG, study(50, "PROTEINA C REACTIVA (PCR CUALITATIVO)", 50), study(51, "PROTEINA C REACTIVA (PCR SEMI CUANTITATIVO", 60),
+    study(52, "PROTEINA C REACTIVA (PCR CUANTITATIVO) (FIA Fluorescencia)", 110), study(53, "SODIO", 40), study(54, "SEDIMENTO URINARIO", 30), study(55, "SODIO EN ORINA OCACIONAL O 24 HORAS", 60)];
+  const quoteWith = quoteStudiesTool({ loadCatalog: async () => catalog });
+  const runWith = async (...studies: string[]): Promise<Result> => (await quoteWith.run({ studies }, ctx)) as Result;
+  it("«pcr cuantitativo» → la CUANTITATIVA, no la semicuantitativa (la Dra cotizó la cuantitativa)", async () => {
+    expect(sureOf(await runWith("pcr cuantitativo"))).toEqual(["PROTEINA C REACTIVA (PCR CUANTITATIVO) (FIA Fluorescencia)"]);
+  });
+  it("la regla solo vale entre versiones del MISMO estudio: «hepatitis b» no elige sola entre antígeno y anticore", async () => {
+    const hep = [...catalog, study(60, "HEPATITIS B ANTIGENO E (ELISA)", 200), study(61, "HEPATITIS B ANTICORE IgM", 180), study(62, "HEPATITIS B ANTIGENO DE SUP. (ECLIA)", 140)];
+    const result = (await quoteStudiesTool({ loadCatalog: async () => hep }).run({ studies: ["hepatitis b"] }, ctx)) as Result;
+    expect(sureOf(result)).toEqual([]);
+  });
+  it("«sodio urinario» NO es «sodio» + «sedimento urinario»", async () => {
+    expect(sureOf(await runWith("sodio urinario"))).not.toContain("SEDIMENTO URINARIO");
+  });
+  it("«colesterol total hdl»: los dos colesteroles", async () => {
+    expect(sureOf(await runWith("colesterol total hdl")).sort()).toEqual(["COLESTEROL HDL", "COLESTEROL TOTAL"]);
+  });
+});

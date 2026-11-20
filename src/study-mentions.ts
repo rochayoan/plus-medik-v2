@@ -99,7 +99,8 @@ function splitOuter(raw: string): string[] {
 // «más» une estudios en los pedidos reales («coproparasitológico simple más un helicobacter pylori»).
 function splitInner(text: string): string[] {
   // «igg-igm», «igg/igm» y también seguidas sin nada («rubeola igg igm», «psa total libre»)
-  const spaced = text.replace(/\b(igg|igm|iga|ige|total|libre)(?:\s*[-/]\s*|\s+)(igg|igm|iga|ige|total|libre)\b/g, "$1 y $2");
+  // (también «colesterol total hdl ldl»: real del 4–20 nov)
+  const spaced = text.replace(/\b(igg|igm|iga|ige|total|libre|hdl|ldl|vldl)(?:\s*[-/]\s*|\s+)(?=(?:igg|igm|iga|ige|total|libre|hdl|ldl|vldl)\b)/g, "$1 y ");
   return spaced.split(/\s+(?:y|o|mas)\s+|\s+e\s+(?=h?i)|\s+u\s+(?=h?o)|\//).map((part) => part.trim()).filter((part) => part !== "");
 }
 

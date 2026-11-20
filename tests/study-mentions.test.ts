@@ -97,7 +97,10 @@ describe("conjunciones que también son letras de un estudio (20-nov)", () => {
     ["toxo igg e igm", ["toxo igg", "toxo igm"]],
     ["acido urico u orina", ["acido urico", "orina"]],
     // una letra suelta nunca se pega a un nombre que no termina en letra
-    ["vitamina b12 y d", ["vitamina b12"]]
+    ["vitamina b12 y d", ["vitamina b12"]],
+    // variantes seguidas sin «y» (recetas reales del 4–20 nov)
+    ["colesterol total hdl", ["colesterol total", "colesterol hdl"]],
+    ["colesterol total hdl ldl", ["colesterol total", "colesterol hdl", "colesterol ldl"]]
   ])("«%s»", (text, expected) => {
     expect(split(text)).toEqual(expected);
   });
