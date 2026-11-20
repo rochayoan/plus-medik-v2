@@ -255,6 +255,9 @@ export function decideFuzzy(allHits: readonly SearchHit[], mention: string, mode
 
 // Método de análisis más rápido: ECLIA primero y CLIA después (definido por el laboratorio, 12-nov). Si el paciente no dice el método, se elige ese; solo si hay UN candidato con el mejor método.
 const FAST_METHODS: ReadonlyArray<RegExp> = [/\beclia\b/i, /\bclia\b/i];
+// ¿Es una frase de la lista de nombres habituales (G5.9)? Solo para no cortar por su «y» un nombre conocido entero («grupo sanguíneo y factor Rh»); no decide ningún estudio.
+export const isKnownStudyPhrase = (phrase: string): boolean => synonymsOf(phrase).length > 0;
+
 export function preferredByMethod(candidates: readonly CatalogStudy[]): CatalogStudy | undefined {
   for (const method of FAST_METHODS) {
     const withMethod = candidates.filter((candidate) => method.test(candidate.name));
