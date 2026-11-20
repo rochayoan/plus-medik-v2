@@ -217,7 +217,7 @@ describe.skipIf(!bin)("sesiones de cotización de extremo a extremo contra Postg
     // Lo que el catálogo no tiene ya no bloquea: se cotiza lo identificado y se dice cuál falta (nunca se inventa).
     await say(w, q.phone, "quiero cotizar hemograma y examen de la vista");
     expect(last(w)).toContain("HEMOGRAMA COMPLETO — Bs 45");
-    expect(last(w)).toContain("No encontré en nuestro catálogo: «examen de la vista»");
+    expect(last(w)).toContain("Estos estudios te los confirma la doctora por este chat: «examen de la vista»");
     expect((await sessionsOf(q.key))[0]).toMatchObject({ status: "QUOTED" });
   });
 
@@ -400,7 +400,7 @@ describe.skipIf(!bin)("sesiones de cotización de extremo a extremo contra Postg
       const q = patient();
       await say(w, q.phone, "cotiza hemograma y VSG");
       expect(last(w)).toContain("HEMOGRAMA COMPLETO — Bs 45");
-      expect(last(w)).toContain("No encontré en nuestro catálogo: «VSG»");
+      expect(last(w)).toContain("Estos estudios te los confirma la doctora por este chat: «VSG»");
       expect(last(w)).not.toContain("ERITROSEDIMENTACION");
       expect((await sessionsOf(q.key))[0]).toMatchObject({ status: "QUOTED" });
     });
@@ -499,7 +499,7 @@ describe.skipIf(!bin)("sesiones de cotización de extremo a extremo contra Postg
       const w = setup();
       await say(w, p.phone, "cotiza hemograma y examen de la vista");
       expect(last(w)).toContain("HEMOGRAMA COMPLETO — Bs 45");
-      expect(last(w)).toContain("No encontré en nuestro catálogo: «examen de la vista»");
+      expect(last(w)).toContain("Estos estudios te los confirma la doctora por este chat: «examen de la vista»");
       expect(last(w)).not.toMatch(/persona|equipo|asesor/i);
       expect((await sessionsOf(p.key))[0]).toMatchObject({ status: "QUOTED" });
     });

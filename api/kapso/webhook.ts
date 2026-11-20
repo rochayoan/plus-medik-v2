@@ -29,7 +29,6 @@ import { resolveCrmOutbox } from "../../src/crm-outbox/config.js";
 import { createCrmHandoffSink } from "../../src/crm-outbox/handoff-sink.js";
 import { QUOTE_TEXTS } from "../../src/quote-session.js";
 import { appendApprovedQuotePreparations } from "../../src/quote-preparation.js";
-import { appendQuoteTurnaround } from "../../src/quote-turnaround.js";
 import { answerFromBusinessData } from "../../src/business-answers.js";
 import { createLocationPhotoSender, type LocationPhotoSender } from "../../src/location-photo.js";
 import { readFile } from "node:fs/promises";
@@ -309,9 +308,9 @@ const realDeps: QuoteDeps = {
             }
           })
         });
-        // El tiempo de entrega sale del catálogo (lab_tests.notes), no del marco de datos aprobados por estudio: se añade siempre que haya dato.
-        if (!quoteStudyDetailsEnabled) return appendQuoteTurnaround(prepared, studyIds, catalog);
-        return appendQuoteTurnaround(await appendApprovedQuoteStudyDetails({
+        // El tiempo de entrega ya va en cada línea, junto al precio (formatQuoteMessage, 20-nov): aquí ya no se agrega como sección aparte.
+        if (!quoteStudyDetailsEnabled) return prepared;
+        return appendApprovedQuoteStudyDetails({
           quote: prepared,
           studyIds,
           catalog,
@@ -321,7 +320,7 @@ const realDeps: QuoteDeps = {
               throw new Error("QUOTE_STUDY_DETAILS_TRACE_UNAVAILABLE");
             }
           })
-        }), studyIds, catalog);
+        });
       }
     : undefined,
   async sendText(to, body) {

@@ -143,18 +143,19 @@ describe("cotización por texto con el intérprete", () => {
     const quote = quotedLines(w.closes)!;
     expect(quote.lines.map((line) => line.studyId)).toEqual([HEMOGRAMA.id]);
     expect(quote.totalBs).toBe(HEMOGRAMA.priceBs);
-    expect(reply).toContain("No encontré en nuestro catálogo: «tomografia».");
+    expect(reply).toContain("Estos estudios te los confirma la doctora por este chat: «tomografia».");
     expect(reply).toContain("HEMOGRAMA COMPLETO AUTOMATIZADO");
     expect(reply).not.toMatch(/tomograf[^.]*\s—\s/i);
     // La solicitud en sesión quedó limpia: lo que no existe no bloquea ni deja dudas.
     expect(w.repo.quoteBegin).toHaveBeenCalledWith(expect.anything(), LEASE, expect.objectContaining({ result: expect.objectContaining({ status: "RESOLVED", unresolved: 0, studyIds: [HEMOGRAMA.id] }) }));
   });
 
-  it("si TODO lo pedido falta, lo dice y no abre ni toca la solicitud", async () => {
+  it("si TODO lo pedido falta, dice que lo confirma la doctora (indicación del laboratorio, 20-nov) y no abre ni toca la solicitud", async () => {
     const w = world({ interpret: searchingModel(["tomografia"], true) });
     const reply = await w.say("quiero cotizar una tomografia");
-    expect(reply).toContain("No encontré en nuestro catálogo: «tomografia».");
-    expect(reply).toContain("envíame una foto de tu receta");
+    expect(reply).toContain("Estos estudios te los confirma la doctora por este chat: «tomografia».");
+    expect(reply).toContain("Te escribirá con el precio y el tiempo de entrega.");
+    expect(reply).not.toMatch(/no (lo )?tenemos|no (lo )?realizamos|no encontr/i);
     expect(w.repo.quoteBegin).not.toHaveBeenCalled();
     expect(w.closes).toEqual([]);
   });
@@ -184,7 +185,7 @@ describe("cotización por texto con el intérprete", () => {
     const w = world({ interpret: () => output([missing("glucosa")], true) });
     const reply = await w.say("cotiza zzqxv");
     expect(w.closes).toEqual([]);
-    expect(reply).not.toContain("No encontré en nuestro catálogo");
+    expect(reply).not.toContain("Estos estudios te los confirma la doctora por este chat");
     expect(reply).toContain(QUOTE_TEXTS.ask_option_intro);
     expect(reply).toContain("1. GLUCOSA");
   });
@@ -231,7 +232,7 @@ describe("cotización por texto con el intérprete", () => {
     const w = world({ interpret: () => { throw new Error("modelo caído"); } });
     const reply = await w.say("cotiza zzqxv");
     expect(w.client.run).toHaveBeenCalled();
-    expect(reply).toContain("No encontré en nuestro catálogo: «zzqxv»");
+    expect(reply).toContain("Estos estudios te los confirma la doctora por este chat: «zzqxv»");
     expect(w.closes).toEqual([]);
   });
 
@@ -248,7 +249,7 @@ describe("cotización por texto con el intérprete", () => {
   it("sin intérprete configurado el comportamiento es el de siempre y el modelo no existe", async () => {
     const w = world({ noInterpreter: true });
     const reply = await w.say("cotiza zzqxv");
-    expect(reply).toContain("No encontré en nuestro catálogo: «zzqxv»");
+    expect(reply).toContain("Estos estudios te los confirma la doctora por este chat: «zzqxv»");
     expect(w.client.run).not.toHaveBeenCalled();
   });
 
@@ -316,7 +317,7 @@ describe("requisitos y preparaciones: solo con datos aprobados", () => {
     const reply = await w.say("cotiza glucoza y tomografia");
     expect(reply).toContain("PREPARACIÓN Y AYUNO");
     expect(reply).toContain("Ayuno: 8 horas");
-    const positions = [reply.indexOf("GLUCOSA —"), reply.indexOf("No encontré en nuestro catálogo"), reply.indexOf("PREPARACIÓN Y AYUNO"), reply.indexOf(FOOTER)];
+    const positions = [reply.indexOf("GLUCOSA —"), reply.indexOf("Estos estudios te los confirma la doctora por este chat"), reply.indexOf("PREPARACIÓN Y AYUNO"), reply.indexOf(FOOTER)];
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
     expect(w.traces).toHaveLength(1);
@@ -367,7 +368,7 @@ describe("feedback del piloto (31/10/2026)", () => {
     expect(w.client.run).toHaveBeenCalledTimes(1);
     expect(reply).toContain("Estudios anotados: HEMOGRAMA COMPLETO AUTOMATIZADO.");
     expect(reply).not.toContain("Interpreté");
-    expect(reply).toContain("No encontré en nuestro catálogo: «tomografía».");
+    expect(reply).toContain("Estos estudios te los confirma la doctora por este chat: «tomografía».");
   });
 
   it("no inventa: con un nombre que no se parece a nada, el modelo no recibe candidatos y no se cotiza", async () => {
@@ -399,12 +400,12 @@ describe("feedback del piloto (31/10/2026)", () => {
     const reply = await w.say("cotiza glucoza y tomografia");
     const lines = reply.split("\n");
     expect(lines[0]).toBe("🩺 *PlusMedik* · Cotización");
-    expect(lines[1]).toMatch(/GLUCOSA — Bs 30$/);
+    expect(lines[1]).toBe("🍬 GLUCOSA — Bs 30 (entrega: te la confirma la doctora)"); // sin dato en el catálogo
     expect(lines[2]).toMatch(/^💰 \*Total de los estudios cotizados: Bs 30\*$/);
     expect(reply).not.toMatch(/\n\n\n/);
     expect(reply).toContain("• Ayuno: 8 horas.");
     expect(reply).not.toContain("Interpreté");
-    expect(reply).toContain("No encontré en nuestro catálogo: «tomografia».");
+    expect(reply).toContain("Estos estudios te los confirma la doctora por este chat: «tomografia».");
     expect(lines.at(-1)).toBe("Respóndenos por este chat para continuar. 😊");
     // Más corta que la versión con espacios de antes.
     expect(lines.filter((line) => line === "").length).toBeLessThanOrEqual(4);
@@ -413,6 +414,6 @@ describe("feedback del piloto (31/10/2026)", () => {
   it("sin datos aprobados la cotización compacta trae solo estudios, total y pie", async () => {
     const w = world({ interpret: correcting({ glucoza: "glucosa" }, true), approved: {} });
     const reply = await w.say("cotiza glucoza");
-    expect(reply.split("\n").filter((line) => line !== "")).toEqual(["🩺 *PlusMedik* · Cotización", "🍬 GLUCOSA — Bs 30", "💰 *Total de los estudios cotizados: Bs 30*", "Respóndenos por este chat para continuar. 😊"]);
+    expect(reply.split("\n").filter((line) => line !== "")).toEqual(["🩺 *PlusMedik* · Cotización", "🍬 GLUCOSA — Bs 30 (entrega: te la confirma la doctora)", "💰 *Total de los estudios cotizados: Bs 30*", "Respóndenos por este chat para continuar. 😊"]);
   });
 });

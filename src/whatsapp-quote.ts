@@ -104,10 +104,17 @@ export const formatBs = (amount: number): string => `Bs ${Number.isInteger(amoun
 // Pie común de las cotizaciones; los apéndices (preparación, notas) se insertan ANTES de él.
 export const QUOTE_FOOTER = "Respóndenos por este chat para continuar. 😊";
 
-export function formatQuoteMessage(quote: PublicQuote, options: { partial?: boolean; instant?: boolean } = {}): string {
-  const lines = quote.studies.map((study) => `${emojiFor(study.name)} ${study.name} — ${formatBs(study.priceBs)}`);
+// Tiempo de entrega JUNTO AL PRECIO en cada estudio cotizado (dueño, 20-nov: «sí o sí en la cotización, aparte del precio, tiene que estar el tiempo de entrega»). Es el texto del laboratorio tal cual
+// (lab_tests.notes, ver quote-turnaround.ts). undefined = quien arma la cotización no trae el dato (no se muestra nada); null o vacío = el catálogo no lo tiene: lo confirma la doctora.
+export const TURNAROUND_UNKNOWN = "te la confirma la doctora";
+// Dentro del paréntesis va en minúscula: «(entrega: en el día)», «(entrega: 3 días)».
+const inParentheses = (text: string): string => text.charAt(0).toLowerCase() + text.slice(1);
+export const turnaroundSuffix = (value: string | null | undefined): string => (value === undefined ? "" : ` (entrega: ${inParentheses(value?.trim() || TURNAROUND_UNKNOWN)})`);
+
+export function formatQuoteMessage(quote: PublicQuote, options: { partial?: boolean; instant?: boolean; title?: string } = {}): string {
+  const lines = quote.studies.map((study) => `${emojiFor(study.name)} ${study.name} — ${formatBs(study.priceBs)}${turnaroundSuffix(study.turnaroundText)}`);
   return [
-    "🩺 *PlusMedik* · Cotización de tu receta",
+    `🩺 *PlusMedik* · ${options.title ?? "Cotización de tu receta"}`,
     "",
     ...lines,
     "",
@@ -275,7 +282,14 @@ export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProduc
         const readIds = (analysis.internal?.quoted.lines ?? analysis.quote?.lines ?? []).map((line) => line.id);
         deps.turns?.convState?.artifact({ from: image.from, key: image.messageId, kind: "RECIPE", studyIds: readIds, unrecognized: analysis.internal?.pending.length ?? 0 });
         if (analysis.publicQuote && analysis.outcome !== "HUMAN_REVIEW") {
-          reply = formatQuoteMessage(analysis.publicQuote, { partial: analysis.outcome === "AUTO_PARTIAL", instant });
+          // Tiempo de entrega de cada estudio mostrado, junto a su precio (del catálogo, por el id de la línea cotizada).
+          const turnaroundById = new Map(catalog.map((study) => [study.id, study.turnaroundText ?? null]));
+          const idByLine = new Map((analysis.internal?.quoted.lines ?? analysis.quote?.lines ?? []).map((line) => [`${line.name}|${line.priceBs}`, line.id]));
+          const shown = { ...analysis.publicQuote, studies: analysis.publicQuote.studies.map((study) => {
+            const id = idByLine.get(`${study.name}|${study.priceBs}`);
+            return id && turnaroundById.has(id) ? { ...study, turnaroundText: turnaroundById.get(id) } : study;
+          }) };
+          reply = formatQuoteMessage(shown, { partial: analysis.outcome === "AUTO_PARTIAL", instant });
           if (deps.quotePreparations) {
             // Solo los estudios realmente MOSTRADOS al paciente (AUTO parcial puede excluir otros).
             const visible = new Set(analysis.publicQuote.studies.map((item) => `${item.name}|${item.priceBs}`));

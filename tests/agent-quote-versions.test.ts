@@ -141,3 +141,36 @@ describe("las opciones van agrupadas por lo que pidió el paciente, sin el tope 
     expect(text).toMatch(/\*Para «b»:\*\n7\. /);
   });
 });
+
+// Dueño e indicación del laboratorio (20-nov): el tiempo de entrega va junto al precio en cada estudio cotizado, y lo que el catálogo no tiene lo confirma la doctora (nunca «no lo tenemos»).
+describe("tiempo de entrega junto al precio y estudios que confirma la doctora", () => {
+  const blocksOf = async (...studies: string[]) => ((await run(...studies)).blocks ?? []).join("\n\n");
+  it("cada estudio cotizado lleva su tiempo de entrega; el encabezado es «Tu cotización» (escribió los estudios, no mandó receta)", async () => {
+    const text = await blocksOf("ldh", "sodio");
+    expect(text).toMatch(/^🩺 \*PlusMedik\* · Tu cotización$/m);
+    expect(text).toMatch(/DESHIDROGENASA LACTICA LDH — Bs 80 \(entrega: 2 horas\)$/m);
+    expect(text).toMatch(/SODIO — Bs 40 \(entrega: 1 hora\)$/m);
+  });
+  it("sin tiempo de entrega en el catálogo: «te la confirma la doctora» (nunca se inventa)", async () => {
+    const withGap = [...CATALOG, study("HOMOCISTEINA", 250, "")];
+    const result = (await quoteStudiesTool({ loadCatalog: async () => withGap }).run({ studies: ["homocisteina"] }, ctx)) as Result;
+    expect(result.blocks?.join("\n")).toMatch(/HOMOCISTEINA — Bs 250 \(entrega: te la confirma la doctora\)$/m);
+  });
+  it("5 estudios, 3 en el catálogo y 2 no: se cotizan los 3 y de los otros 2 se dice que los confirma la doctora", async () => {
+    const result = await run("ldh", "sodio", "calcio", "ecografia de abdomen", "resonancia magnetica");
+    expect(sureOf(result)).toEqual(["CALCIO SERICO", "DESHIDROGENASA LACTICA LDH", "SODIO"]);
+    const text = result.blocks?.join("\n\n") ?? "";
+    expect(text).toMatch(/Total de los estudios cotizados: Bs 150/);
+    expect(text).toMatch(/👩‍⚕️ \*Estos estudios te los confirma la doctora:\*\n\n▫️ Ecografia de abdomen\n▫️ Resonancia magnetica\n\nTe escribirá por este chat con el precio y el tiempo de entrega\. 😊/);
+    expect(text).not.toMatch(/no (lo |los )?tenemos|no (lo |los )?realizamos|otro laboratorio|no encontr/i);
+    expect(result.facts?.some((f) => /confirma la doctora/.test(f.text) && /NO sabes si se realizan/.test(f.text))).toBe(true);
+  });
+  it("si nada coincide, solo el aviso de la doctora (sin precios ni total)", async () => {
+    const text = await blocksOf("ecografia de abdomen");
+    expect(text).toMatch(/Este estudio te lo confirma la doctora/);
+    expect(text).not.toMatch(/Bs \d|Total/);
+  });
+  it("debajo de las opciones dudosas: «si no es ninguno de estos, te lo confirma la doctora»", async () => {
+    expect(await blocksOf("herpes")).toMatch(/Si no es ninguno de estos, te lo confirma la doctora por este chat\./);
+  });
+});

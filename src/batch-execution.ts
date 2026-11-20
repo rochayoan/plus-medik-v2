@@ -397,7 +397,7 @@ async function closeAndRender(args: { ctx: TurnContext; deps: QuoteDeps; config:
 
   if (evaluation.kind === "QUOTE") {
     deps.turns?.convState?.artifact({ from: args.from, key: read.sessionId, kind: "QUOTE", studyIds: evaluation.lines.map((line) => line.studyId) });
-    let body = formatSessionQuote(evaluation.lines, evaluation.duplicates, texts);
+    let body = formatSessionQuote(evaluation.lines, evaluation.duplicates, texts, { catalog });
     if (deps.quotePreparations) {
       try {
         body = await deps.quotePreparations(body, evaluation.lines.map((line) => line.studyId), catalog, ctx);

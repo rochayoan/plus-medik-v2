@@ -150,7 +150,7 @@ describe("seguridad, avisos y orden: nada se suprime ni se repite", () => {
 
   it("los estudios que el catálogo no tiene se avisan, sin repetir lo que escribió el paciente más allá de la mención limpia", () => {
     const reply = compose(plan({ kind: "NONE", reason: "HANDLED_ELSEWHERE" }, { notices: [{ kind: "STUDIES_NOT_IN_CATALOG", mentions: ["pet scan"] }] }))!;
-    expect(reply.body).toContain("No encontré en nuestro catálogo:");
+    expect(reply.body).toContain("Estos estudios te los confirma la doctora por este chat:");
     expect(reply.body).toContain("pet scan");
   });
 

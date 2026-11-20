@@ -59,7 +59,8 @@ export interface HumanEvent {
 
 // Lo ÚNICO que ve el paciente: estudios, precios y el importe de esos estudios. Sin estados, advertencias, motivos, UUID ni pendientes.
 export interface PublicQuote {
-  studies: Array<{ name: string; priceBs: number }>;
+  // turnaroundText: tiempo de entrega del catálogo, solo para mostrarlo junto al precio (ver formatQuoteMessage). No interviene en el cálculo.
+  studies: Array<{ name: string; priceBs: number; turnaroundText?: string | null }>;
   totalBs: number;
   totalLabel: string;
   tariff: "PACIENTE";

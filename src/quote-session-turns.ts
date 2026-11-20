@@ -337,7 +337,7 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
     if (closed.status === "not_open") return plain(texts.empty);
     if (evaluation.kind === "QUOTE") {
       deps.turns?.convState?.artifact({ from: turn.from, key: read.sessionId, kind: "QUOTE", studyIds: evaluation.lines.map((line) => line.studyId) });
-      let body = withNote(formatSessionQuote(evaluation.lines, evaluation.duplicates, texts), note);
+      let body = withNote(formatSessionQuote(evaluation.lines, evaluation.duplicates, texts, { catalog }), note);
       if (deps.quotePreparations) {
         try {
           body = await deps.quotePreparations(body, evaluation.lines.map((line) => line.studyId), catalog, ctx);
