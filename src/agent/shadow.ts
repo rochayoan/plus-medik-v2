@@ -83,7 +83,40 @@ export function buildAgentTools(options: AgentContextOptions, contactKey: string
 }
 
 // ¿El lote es SOLO un saludo («hola», «buenas tardes doctora»)? Un «gracias» o un «ok» no abren el menú.
-export const isGreetingOnly = (utterances: readonly Utterance[]): boolean => utterances.length > 0 && utterances.every((utterance) => socialOf(utterance.text)?.kind === "GREETING");
+// ¿Es solo un saludo? El vocabulario cerrado de siempre MÁS una tolerancia SOLO para el menú: mensajes cortos hechos únicamente de palabras de saludo, con a lo sumo una letra de error en las palabras
+// largas, como se escribe en WhatsApp («ola», «holi», «hola q tal», «buenas nocehs», «buenas tardes señorita»). Cualquier palabra fuera del saludo («necesito», «precio», «hemograma») lo descarta.
+export const isGreetingText = (text: string): boolean => socialOf(text)?.kind === "GREETING" || looseGreeting(text);
+
+const GREETING_OPENERS = ["hola", "ola", "holi", "holaa", "buenas", "buenos", "buen", "saludos"] as const;
+const GREETING_WORDS = new Set<string>([...GREETING_OPENERS, "dia", "dias", "tarde", "tardes", "noche", "noches", "que", "q", "tal", "como", "esta", "estan", "estas", "señorita", "senorita", "señor", "senor", "doctora", "doctor", "dra", "dr", "licenciada", "lic", "muy", "a", "todos"]);
+const LOOSE_MAX_WORDS = 6;
+
+function looseGreeting(text: string): boolean {
+  const words = fold(text).replace(/[^a-zñ\s]/g, " ").split(/\s+/).filter(Boolean);
+  if (words.length === 0 || words.length > LOOSE_MAX_WORDS) return false;
+  if (!GREETING_OPENERS.some((opener) => nearWord(words[0]!, opener))) return false;
+  return words.every((word) => GREETING_WORDS.has(word) || [...GREETING_WORDS].some((known) => nearWord(word, known)));
+}
+
+// Igual, o a una letra de distancia (cambiada, sobrante, faltante o dos letras vecinas intercambiadas) cuando ambas palabras tienen 5 letras o más: «nocehs», «nches», «noxhes» ≈ «noches».
+function nearWord(word: string, known: string): boolean {
+  if (word === known || /^(?:hola+|ola+)$/.test(word) && /^(?:hola|ola)$/.test(known)) return true;
+  if (word.length < 5 || known.length < 5 || Math.abs(word.length - known.length) > 1) return false;
+  return oneEditApart(word, known);
+}
+
+function oneEditApart(a: string, b: string): boolean {
+  if (a.length === b.length) {
+    const diffs: number[] = [];
+    for (let index = 0; index < a.length; index++) if (a[index] !== b[index]) diffs.push(index);
+    if (diffs.length === 1) return true;
+    return diffs.length === 2 && diffs[1] === diffs[0]! + 1 && a[diffs[0]!] === b[diffs[1]!] && a[diffs[1]!] === b[diffs[0]!];
+  }
+  const [short, long] = a.length < b.length ? [a, b] : [b, a];
+  for (let index = 0; index < long.length; index++) if (long.slice(0, index) + long.slice(index + 1) === short) return true;
+  return false;
+}
+export const isGreetingOnly = (utterances: readonly Utterance[]): boolean => utterances.length > 0 && utterances.every((utterance) => isGreetingText(utterance.text));
 
 // ¿Pide hablar con una persona sin pedir precios? (el pilot la deriva al modo esencial cuando no se puede registrar la derivación)
 export const asksPersonOnly = (utterances: readonly Utterance[]): boolean => utterances.some((utterance) => utterance.topic === "HUMAN_REQUEST") && !utterances.some((utterance) => asksForPrice(utterance.text));

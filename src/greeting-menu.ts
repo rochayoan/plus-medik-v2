@@ -72,9 +72,11 @@ export function menuChoiceOf(text: string, recent: readonly RecentEntry[]): Menu
   return MENU_OPTIONS.find((option) => option.number === number);
 }
 
-// El menú sale ante un saludo puro (lo decide quien llama, con el vocabulario cerrado de saludos) y SIN conversación en las últimas 24 h (si ya venían hablando, un «hola» es retomar y lo
-// atiende el agente con el contexto).
-export const shouldShowGreetingMenu = (greetingOnly: boolean, recent: readonly RecentEntry[]): boolean => greetingOnly && recent.length === 0;
+// El menú sale ante un saludo puro (lo decide quien llama, con el vocabulario cerrado de saludos) cuando NO hay conversación en las últimas 24 h. «Conversación» = alguien le respondió al paciente
+// (el asistente o una persona). Saludos anteriores que nadie contestó (envío fallido, caída) no cuentan: siguen siendo el primer contacto. Si el paciente ya había pedido algo concreto, aunque
+// nadie le respondiera, no se tapa ese pedido con el menú: lo atiende el agente con el contexto. `isGreeting` lo da quien llama (el mismo vocabulario cerrado de saludos).
+export const shouldShowGreetingMenu = (greetingOnly: boolean, recent: readonly RecentEntry[], isGreeting: (text: string) => boolean): boolean =>
+  greetingOnly && recent.every((entry) => entry.from === "PATIENT" && isGreeting(entry.text));
 
 // Espera antes de enviar el menú, FIJA en el código (sin variable de despliegue; se suma a la agrupación de mensajes de Kapso). Los datos reales (4–12 nov) muestran que tras un «hola» la mayoría escribe lo
 // que necesita en menos de 45 s contando la espera de Kapso. Para cambiarla, se edita este número.
