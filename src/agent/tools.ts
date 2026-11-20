@@ -1,9 +1,11 @@
 import { z } from "zod";
 import { searchCatalog } from "../catalog-search.js";
+import { normalizeStudyKey } from "../consensus.js";
 import type { ConversationReader } from "../conversation-state-store.js";
 import { detectTopics, type KnowledgeAnswer } from "../knowledge-answers.js";
 import { DOUBTFUL_LIMIT, formatDoubtfulOptions } from "../quote-options.js";
-import { evaluateSession, extractWithNotes, formatSessionQuote, preferredBySample, QUOTE_TEXTS, type SessionItem } from "../quote-session.js";
+import { evaluateSession, extractWithNotes, formatSessionQuote, isKnownStudyPhrase, preferredByMethod, preferredBySample, QUOTE_TEXTS, type SessionItem } from "../quote-session.js";
+import { splitStudyMentions } from "../study-mentions.js";
 import type { CatalogStudy } from "../types.js";
 import { emojiFor, formatBs } from "../whatsapp-quote.js";
 import type { Fact, ToolCall, ToolContext, ToolDef, ToolErrorCode, ToolRun } from "./contracts.js";
@@ -140,8 +142,65 @@ export function findStudiesTool(options: { loadCatalog: () => Promise<readonly C
 
 const quoteNote = "La cotización con los precios del catálogo la agrega el sistema al mensaje; no escribas precios ni totales.";
 
+// Palabras que solas no nombran un estudio: una lista separada solo por espacios nunca se corta en ellas.
+const NOT_ALONE = new Set(["panel", "perfil", "prueba", "pruebas", "test", "examen", "examenes", "analisis", "estudio", "estudios", "virus", "antigeno", "anticuerpos", "cultivo", "completo", "completa",
+  "seriado", "seriada", "simple", "convencional", "automatizado", "automatizada", "urinario", "urinaria", "sanguineo", "sanguinea", "plasmatico", "plasmatica", "heces", "liquido", "liquidos", "ocasional",
+  "total", "libre", "directa", "indirecta", "igg", "igm", "iga", "ige", "de", "del", "en", "la", "el", "y", "o", "sangre", "orina", "serico", "serica", "rapida", "rapido", "cuantitativo", "cualitativo", "tipo", "patogenos"]);
+
+// Nombres (y alias aprobados y sinónimos) que el catálogo conoce ENTEROS: no se cortan por su «y» («bilirrubina total y fracciones», «grupo sanguíneo y factor Rh»).
+const knownCache = new WeakMap<readonly CatalogStudy[], Set<string>>();
+function knownNamesOf(catalog: readonly CatalogStudy[]): Set<string> {
+  const cached = knownCache.get(catalog);
+  if (cached) return cached;
+  const names = new Set<string>();
+  for (const study of catalog) {
+    const bare = normalizeStudyKey(study.name.replace(/\([^)]*\)/g, " "));
+    names.add(normalizeStudyKey(study.name));
+    names.add(bare);
+    names.add(normalizeStudyKey(bare.replace(/\btipo\b/g, " "))); // «HERPES tipo 1 y 2 IgG (Elisa)» = «herpes 1 y 2 igg»
+    for (const alias of study.normalizedAliases ?? []) names.add(normalizeStudyKey(alias));
+  }
+  knownCache.set(catalog, names);
+  return names;
+}
+
+// Entre varias opciones, la que tiene TODAS las palabras que el paciente escribió («psa total» → las dos PSA TOTAL, no la LIBRE); si quedan varias que solo cambian de método, el método preferido.
+// Se mira el nombre ENTERO (también lo que va entre paréntesis: «PROTEINA C REACTIVA (PCR CUANTITATIVO)»), y una opción con una palabra de VARIANTE que el paciente no escribió no es lo que pidió:
+// «pcr cuantitativo» no es la SEMI cuantitativa (pasaba porque a ese nombre del catálogo le falta el «)»).
+const VARIANT_WORDS = new Set(["semi", "semicuantitativo", "semicuantitativa", "cualitativo", "cualitativa", "cuantitativo", "cuantitativa", "total", "libre", "igg", "igm", "iga", "ige", "ss", "ds", "neonatal", "inversa"]);
+const nameWords = (value: string): Set<string> => new Set(normalizeStudyKey(value.replace(/\([^)]*\)/g, " ")).split(" ").filter(Boolean));
+const allNameWords = (value: string): Set<string> => new Set(normalizeStudyKey(value).split(" ").filter(Boolean));
+// El estudio sin su variante ni su método: «PROTEINA C REACTIVA (PCR SEMI CUANTITATIVO» y «(PCR CUANTITATIVO) (FIA Fluorescencia)» son el mismo; «HEPATITIS B ANTIGENO…» y «HEPATITIS B ANTICORE…» no.
+const METHOD_WORDS = new Set(["eclia", "clia", "cmia", "elisa", "ifi", "fia", "fluorescencia", "inmunofluorescencia", "prueba", "rapida", "rapido", "test", "latex", "hep2"]);
+const variantBase = (value: string): string => [...allNameWords(value)].filter((word) => !VARIANT_WORDS.has(word) && !METHOD_WORDS.has(word)).sort().join(" ");
+function namedChoice(candidates: readonly CatalogStudy[], mention: string): CatalogStudy | undefined {
+  const asked = normalizeStudyKey(coreOfMention(mention)).split(" ").filter(Boolean);
+  if (asked.length < 2) return undefined;
+  const askedSet = new Set(asked);
+  // Solo entre versiones del MISMO estudio se descarta la que agrega una variante no pedida; entre estudios distintos rige la regla de siempre.
+  const sameStudy = candidates.length > 1 && candidates.every((candidate) => variantBase(candidate.name) === variantBase(candidates[0]!.name));
+  const withAll = candidates.filter((candidate) => {
+    const words = sameStudy ? allNameWords(candidate.name) : nameWords(candidate.name);
+    return asked.every((word) => words.has(word)) && (!sameStudy || [...words].every((word) => !VARIANT_WORDS.has(word) || askedSet.has(word)));
+  });
+  if (withAll.length === 1) return withAll[0];
+  if (withAll.length > 1) {
+    const byMethod = preferredByMethod(withAll);
+    return byMethod && withAll.every((candidate) => candidate === byMethod || sameWithoutMethod(candidate, byMethod)) ? byMethod : undefined;
+  }
+  return undefined;
+}
+// ¿La palabra NOMBRA a estos estudios? Está en el nombre de cada uno (palabra entera), es un alias aprobado de cada uno o es una frase de la lista de sinónimos.
+function namesWord(word: string, studies: readonly CatalogStudy[]): boolean {
+  if (studies.length === 0) return false;
+  if (isKnownStudyPhrase(word)) return true;
+  return studies.every((study) => nameWords(study.name).has(word) || normalizeStudyKey(study.name).split(" ").includes(word) || (study.normalizedAliases ?? []).includes(word));
+}
+// Dos opciones que solo se diferencian por el método entre paréntesis («PSA TOTAL (ECLIA)» y «PSA TOTAL (FIA Fluorescencia)»).
+const sameWithoutMethod = (a: CatalogStudy, b: CatalogStudy): boolean => normalizeStudyKey(a.name.replace(/\([^)]*\)/g, " ")) === normalizeStudyKey(b.name.replace(/\([^)]*\)/g, " "));
+
 // Palabras de relleno delante del nombre de un estudio («prueba de», «dosaje de», «examen de»).
-const FILLER = /^(?:(?:la|el|una?|unos?|las|los)\s+)?(?:pruebas?|examen(?:es)?|analisis|estudios?|dosajes?|dosificacion|test|niveles?)\s+(?:de\s+(?:la\s+|el\s+|los\s+|las\s+)?|del\s+|para\s+(?:el\s+|la\s+)?)?/;
+const FILLER = /^(?:(?:la|el|una?|unos?|las|los)\s+)?(?:pruebas?|examen(?:es)?|analisis|estudios?|dosajes?|dosificacion|test|nivel(?:es)?)\s+(?:de\s+(?:la\s+|el\s+|los\s+|las\s+)?|del\s+|para\s+(?:el\s+|la\s+)?)?/;
 export const coreOfMention = (text: string): string => text.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim().replace(FILLER, "").trim();
 // La cotización: usa el MISMO motor de texto de las sesiones de cotización, CON la búsqueda por parecido (erratas, nombres comunes, método preferido; el mismo umbral que la ruta de siempre). Cotiza los estudios
 // identificados con certeza; lo DUDOSO (varias opciones plausibles, o un nombre que solo se parece) no se rechaza: se ofrece debajo, con su precio y fuera del total, para que el paciente confirme. Solo lo que
@@ -151,36 +210,58 @@ export function quoteStudiesTool(options: { loadCatalog: () => Promise<readonly 
     name: "quote_studies",
     description: "Cotiza estudios por su nombre tal como los escribió el paciente. El sistema agrega el detalle con precios del catálogo; tú nunca escribes precios.",
     readOnly: true,
-    input: z.object({ studies: z.array(z.string().min(2).max(120)).min(1).max(20) }).strict(),
+    // Acepta lo que el modelo separe como sea: una lista entera en un solo texto (hasta 600 caracteres) o variantes sueltas («hepatitis b», «c»). Antes una «c» suelta hacía fallar TODA la cotización.
+    input: z.object({ studies: z.array(z.string().max(600)).min(1).max(30) }).strict(),
     async run(input) {
-      const { studies } = input as { studies: string[] };
       const catalog = await options.loadCatalog();
+      // Cada estudio por separado aunque vengan en una lista («testosterona total y libre», «hepatitis b y c», «clamidia igg-igm», viñetas, comas): ver src/study-mentions.ts.
+      const known = knownNamesOf(catalog);
+      // Lo que mandó el modelo se une en orden (un nombre por línea): una variante suelta («c» tras «hepatitis b») hereda la palabra común de la anterior.
+      const written = (input as { studies: string[] }).studies.map((text) => text.trim()).filter((text) => text !== "");
+      if (written.length === 0) return { noData: "NOT_QUOTABLE" };
+      const mentions = splitStudyMentions(written.join("\n"), { isKnownName: (name) => known.has(name) || isKnownStudyPhrase(name) });
+      const studies = mentions.length > 0 ? mentions : written.filter((text) => text.length >= 2);
       const byId = new Map(catalog.map((study) => [study.id, study]));
       const sure = new Map<string, CatalogStudy>();
       const doubtful = new Map<string, CatalogStudy>();
       const notFound: string[] = [];
       // Cada nombre por separado: así lo dudoso de uno no tapa lo seguro de otro. El motor distingue «un pedido de estudios» de «charla» por el texto: un nombre que no está en el catálogo (o con una errata)
       // solo cuenta como pedido si el texto habla de cotizar (prueba real del 6-nov); por eso se antepone «cotizar».
-      for (const text of studies) {
+      const resolve = (text: string): { matched: CatalogStudy[]; groups: string[][]; unresolved: boolean; forms: string[] } => {
         // «prueba de vih», «dosaje de ácido valproico», «examen de orina»: también se prueba el nombre sin la palabra de relleno (la que no es parte del estudio).
-        const forms = [...new Set([text, coreOfMention(text)].filter((form) => form.length >= 2))];
-        let matched: CatalogStudy[] = [];
-        let groups: string[][] = [];
-        let unresolved = true;
+        // «zinc sérico o plasmático»: la muestra en sangre no cambia el estudio; también se prueba sin esas palabras.
+        const core = coreOfMention(text);
+        const withoutBlood = core.replace(/\b(?:serico|serica|plasmatico|plasmatica|sanguineo|sanguinea|en sangre)\b/g, " ").replace(/\s+/g, " ").trim();
+        const forms = [...new Set([text, core, withoutBlood].filter((form) => form.length >= 2))];
         for (const form of forms) {
           const { extraction } = extractWithNotes(`cotizar ${form}`, catalog, { fuzzy: true });
           if (!extraction?.isRequest || (extraction.matched.length === 0 && extraction.result.ambiguous.length === 0)) continue;
-          matched = extraction.matched;
-          groups = extraction.result.ambiguous;
-          unresolved = extraction.result.unresolved > 0;
-          break;
+          return { matched: extraction.matched, groups: extraction.result.ambiguous, unresolved: extraction.result.unresolved > 0, forms };
+        }
+        return { matched: [], groups: [], unresolved: true, forms };
+      };
+      const queue = [...studies];
+      for (let index = 0; index < queue.length && index < 40; index++) {
+        const text = queue[index]!;
+        const { matched, groups, unresolved, forms } = resolve(text);
+        // «t3 t4 tsh» (solo espacios): si el conjunto no es un estudio pero CADA palabra sí lo es, se cotiza cada una por separado.
+        // Nunca con palabras que solas no son un estudio («panel pcr 13 patogenos» no es «panel» + «pcr» + «13» + «patogenos»), y cada palabra tiene que NOMBRAR el estudio
+        // (estar en su nombre, ser un alias aprobado o un sinónimo de la lista), no solo parecerse: «copro seriado» no es «coprocultivo» + «… seriado».
+        const words = text.split(" ").filter((word) => word.length >= 2);
+        if (matched.length === 0 && groups.length === 0 && words.length >= 2 && words.length <= 6 && words.every((word) => !NOT_ALONE.has(word) && !/^\d+$/.test(word))
+          && words.every((word) => { const one = resolve(word); return (one.matched.length > 0 || one.groups.length > 0) && namesWord(word, [...one.matched, ...one.groups.flat().map((id) => byId.get(id)).filter((study): study is CatalogStudy => study !== undefined)]); })) {
+          queue.push(...words);
+          continue;
         }
         for (const study of matched) sure.set(study.id, study);
         for (const group of groups) {
           const candidates = group.map((id) => byId.get(id)).filter((study): study is CatalogStudy => study !== undefined);
           // Muestra por defecto EN SANGRE (decisión del dueño, 19-nov): «fósforo», «calcio», «creatinina» a secas → la versión en sangre con ese mismo nombre, si hay UNA. Nunca elige entre dos en sangre.
           const blood = preferredBySample(candidates, text);
-          if (blood) sure.set(blood.id, blood);
+          // «psa total»: entre PSA TOTAL (ECLIA), PSA TOTAL (FIA) y PSA LIBRE (ECLIA) quedan los que tienen TODAS las palabras pedidas, y entre esos el método preferido (el mismo de la ruta de siempre).
+          const named = blood ? undefined : namedChoice(candidates, text);
+          const chosen = blood ?? named;
+          if (chosen) sure.set(chosen.id, chosen);
           else for (const study of candidates) doubtful.set(study.id, study);
         }
         if (!unresolved) continue;

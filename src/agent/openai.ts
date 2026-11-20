@@ -208,7 +208,7 @@ export const respondMessage = (input: RespondInput): string => {
 // ───────────────────────────── interpretación del plan ─────────────────────────────
 
 const planOutput = z.object({
-  toolCalls: z.array(z.object({ tool: z.string().max(40), text: z.string().max(400).nullable(), studies: z.array(z.string().max(120)).max(20).nullable() }).strict()).max(4),
+  toolCalls: z.array(z.object({ tool: z.string().max(40), text: z.string().max(400).nullable(), studies: z.array(z.string().max(600)).max(30).nullable() }).strict()).max(4),
   silent: z.boolean().optional(),
   handoff: z.enum(HANDOFF_REASONS).nullable().optional()
 }).strict();

@@ -224,10 +224,13 @@ describe("herramientas: solo lectura, acotadas, que nunca lanzan, y «sin datos�
       expect(((await broken.run({ studies: ["hemograma"] }, ctx)) as { blocks?: string[] }).blocks ?? []).toEqual([]);
     });
 
-    it("la entrada se valida (1 a 20 nombres, sin campos de más)", () => {
+    it("la entrada se valida (1 a 30 textos de hasta 600 caracteres, sin campos de más)", () => {
       expect(quote.input.safeParse({ studies: [] }).success).toBe(false);
-      expect(quote.input.safeParse({ studies: Array(21).fill("hemograma") }).success).toBe(false);
+      expect(quote.input.safeParse({ studies: Array(31).fill("hemograma") }).success).toBe(false);
+      expect(quote.input.safeParse({ studies: ["x".repeat(601)] }).success).toBe(false);
       expect(quote.input.safeParse({ studies: ["hemograma"], precio: 1 }).success).toBe(false);
+      // una variante suelta que el modelo separó («hepatitis b», «c») ya no invalida la cotización entera
+      expect(quote.input.safeParse({ studies: ["hepatitis b", "c"] }).success).toBe(true);
     });
   });
 
