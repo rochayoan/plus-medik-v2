@@ -121,7 +121,8 @@ describe("nunca se elige una variante con una palabra que el paciente no escribi
     expect(sureOf(await runWith("pcr cuantitativo"))).toEqual(["PROTEINA C REACTIVA (PCR CUANTITATIVO) (FIA Fluorescencia)"]);
   });
   it("la regla solo vale entre versiones del MISMO estudio: «hepatitis b» no elige sola entre antígeno y anticore", async () => {
-    const hep = [...catalog, study(60, "HEPATITIS B ANTIGENO E (ELISA)", 200), study(61, "HEPATITIS B ANTICORE IgM", 180), study(62, "HEPATITIS B ANTIGENO DE SUP. (ECLIA)", 140)];
+    // Sin ECLIA entre las opciones (si no, decide la regla del método rápido, 12-nov). Antes de este arreglo quedaba sola la «ANTIGENO E» porque las otras tienen «IgM»/«TOTAL».
+    const hep = [...catalog, study(60, "HEPATITIS B ANTIGENO E (ELISA)", 200), study(61, "HEPATITIS B ANTICORE IgM", 180), study(62, "HEPATITIS B ANTICORE TOTAL", 180)];
     const result = (await quoteStudiesTool({ loadCatalog: async () => hep }).run({ studies: ["hepatitis b"] }, ctx)) as Result;
     expect(sureOf(result)).toEqual([]);
   });
