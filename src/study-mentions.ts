@@ -12,7 +12,7 @@ import { normalizeStudyKey } from "./consensus.js";
 // Variantes que, solas, no nombran un estudio: completan la palabra común de la mención anterior.
 const QUALIFIER_WORDS = new Set([
   "total", "totales", "libre", "libres", "directa", "directo", "indirecta", "indirecto", "fraccionada", "fraccionadas", "fracciones",
-  "igg", "igm", "iga", "ige", "hdl", "ldl", "vldl", "a", "b", "c", "1", "2",
+  "igg", "igm", "iga", "ige", "hdl", "ldl", "vldl", "a", "b", "c", "d", "e", "1", "2",
   "ayunas", "en", "postprandial", "pospandrial", "post", "prandial", "basal", "serico", "serica", "plasmatico", "plasmatica",
   "cuantitativo", "cuantitativa", "cualitativo", "cualitativa", "ionico", "anticuerpos", "antigeno", "ac", "ag"
 ]);
@@ -20,7 +20,7 @@ const QUALIFIER_WORDS = new Set([
 const SAMPLE_PHRASE = /^(?:en|de)\s+(?:sangre|orina(?:\s+de\s+24\s*(?:h|hrs|horas))?|24\s*(?:h|hrs|horas))$/;
 // La mención anterior termina con variantes: se quitan para obtener la palabra común («testosterona total» → «testosterona»; «glucosa en ayunas» → «glucosa»).
 const TRAILING_QUALIFIER = new Set([
-  "total", "totales", "libre", "libres", "directa", "directo", "indirecta", "indirecto", "igg", "igm", "iga", "ige", "hdl", "ldl", "vldl", "a", "b", "c", "1", "2",
+  "total", "totales", "libre", "libres", "directa", "directo", "indirecta", "indirecto", "igg", "igm", "iga", "ige", "hdl", "ldl", "vldl", "a", "b", "c", "d", "e", "1", "2",
   "cuantitativo", "cuantitativa", "cualitativo", "cualitativa", "serico", "serica", "plasmatico", "plasmatica", "ionico", "ayunas", "postprandial", "basal", "sangre", "orina", "en", "24", "h", "hrs", "horas", "de"
 ]);
 // Menciones que no nombran ningún estudio («precio de los examen», «los laboratorios», «por favor»): se descartan.
@@ -47,6 +47,8 @@ const EXPANSIONS: ReadonlyArray<readonly [RegExp, string]> = [
 // Palabras delante del nombre que no son parte del estudio («labo de nivel de zinc», «examen de», «dosaje de»).
 const LEADING_FILLER = /^(?:(?:la|el|una?|unos?|las|los|mi|un)\s+)?(?:labo|laboratorios?|pruebas?|examen(?:es)?|examenes|analisis|estudios?|dosajes?|dosificacion|test|nivel(?:es)?|valor(?:es)?|control|medicion|precios?|costos?|cotizacion(?:es)?)\s+(?:de\s+(?:la\s+|el\s+|los\s+|las\s+)?|del\s+|para\s+(?:el\s+|la\s+)?)?/;
 const TRAILING_COURTESY = /\s+(?:por favor|porfavor|porfa|pf|gracias|muchas gracias)$/;
+// Un artículo suelto delante del nombre («un helicobacter pylori», «el perfil lipídico»).
+const LEADING_ARTICLE = /^(?:un|una|unos|unas|el|la|los|las)\s+(?=\S)/;
 
 const MAX_MENTIONS = 30;
 
@@ -56,7 +58,7 @@ const tokens = (text: string): string[] => text.split(" ").filter(Boolean);
 function stripFiller(text: string): string {
   let current = text.replace(TRAILING_COURTESY, "").trim();
   for (let round = 0; round < 3; round++) {
-    const next = current.replace(LEADING_FILLER, "").trim();
+    const next = current.replace(LEADING_FILLER, "").replace(LEADING_ARTICLE, "").trim();
     if (next === current || next === "") break;
     current = next;
   }
@@ -92,11 +94,13 @@ function splitOuter(raw: string): string[] {
     .filter((part) => part !== "");
 }
 
-// Segundo nivel: «y», «e», «o», «u», «/» y el guion pegado entre variantes («igg-igm»).
+// Segundo nivel: «y», «o», «más», «/», «e» y «u» y el guion pegado entre variantes («igg-igm»).
+// «e» y «u» solo son conjunción delante de i-/hi- y o-/ho- («ferritina e hierro», «toxo igg e igm»): así «vitamina e» o «hepatitis e» no se cortan.
+// «más» une estudios en los pedidos reales («coproparasitológico simple más un helicobacter pylori»).
 function splitInner(text: string): string[] {
   // «igg-igm», «igg/igm» y también seguidas sin nada («rubeola igg igm», «psa total libre»)
   const spaced = text.replace(/\b(igg|igm|iga|ige|total|libre)(?:\s*[-/]\s*|\s+)(igg|igm|iga|ige|total|libre)\b/g, "$1 y $2");
-  return spaced.split(/\s+(?:y|e|o|u)\s+|\//).map((part) => part.trim()).filter((part) => part !== "");
+  return spaced.split(/\s+(?:y|o|mas)\s+|\s+e\s+(?=h?i)|\s+u\s+(?=h?o)|\//).map((part) => part.trim()).filter((part) => part !== "");
 }
 
 export interface MentionOptions {
@@ -128,6 +132,8 @@ export function splitStudyMentions(text: string, options: MentionOptions = {}): 
       const mention = expand(stripFiller(clean(inner)));
       if (mention === "" || isGeneric(mention)) continue;
       if (previous !== "" && onlyQualifiers(mention)) {
+        // Una letra suelta solo reemplaza a otra letra («vitamina d y e» → «vitamina e»); nunca se pega a cualquier nombre («vitamina b12 y d» no es «vitamina b12 d»).
+        if (/^[a-e]$/.test(mention) && headOf(previous) === "") continue;
         const completed = `${headOf(previous) || previous} ${mention}`;
         push(completed);
         previous = completed;

@@ -87,3 +87,24 @@ describe("la lista real de 6 estudios (10-nov)", () => {
       .toEqual(["hemograma completo", "psa total", "psa libre", "testosterona", "clamidia igg", "clamidia igm", "hpv"]);
   });
 });
+
+describe("conjunciones que también son letras de un estudio (20-nov)", () => {
+  it.each([
+    // «e» solo es conjunción delante de i-/hi-; «u» delante de o-/ho-
+    ["vitamina e serica", ["vitamina e serica"]],
+    ["hepatitis e", ["hepatitis e"]],
+    ["vitamina d y e", ["vitamina d", "vitamina e"]],
+    ["toxo igg e igm", ["toxo igg", "toxo igm"]],
+    ["acido urico u orina", ["acido urico", "orina"]],
+    // una letra suelta nunca se pega a un nombre que no termina en letra
+    ["vitamina b12 y d", ["vitamina b12"]]
+  ])("«%s»", (text, expected) => {
+    expect(split(text)).toEqual(expected);
+  });
+});
+
+describe("«más» une estudios (pedido real del 19-nov)", () => {
+  it("«coproparasitológico simple más un helicobacter pylori en heces»", () => {
+    expect(split("coproparasitológico simple más un helicobacter pylori en heces")).toEqual(["coproparasitologico simple", "helicobacter pylori en heces"]);
+  });
+});

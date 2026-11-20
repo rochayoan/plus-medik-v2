@@ -144,6 +144,7 @@ const quoteNote = "La cotización con los precios del catálogo la agrega el sis
 
 // Palabras que solas no nombran un estudio: una lista separada solo por espacios nunca se corta en ellas.
 const NOT_ALONE = new Set(["panel", "perfil", "prueba", "pruebas", "test", "examen", "examenes", "analisis", "estudio", "estudios", "virus", "antigeno", "anticuerpos", "cultivo", "completo", "completa",
+  "seriado", "seriada", "simple", "convencional", "automatizado", "automatizada",
   "total", "libre", "directa", "indirecta", "igg", "igm", "iga", "ige", "de", "del", "en", "la", "el", "y", "o", "sangre", "orina", "serico", "serica", "rapida", "rapido", "cuantitativo", "cualitativo", "tipo", "patogenos"]);
 
 // Nombres (y alias aprobados y sinónimos) que el catálogo conoce ENTEROS: no se cortan por su «y» («bilirrubina total y fracciones», «grupo sanguíneo y factor Rh»).
@@ -178,6 +179,12 @@ function namedChoice(candidates: readonly CatalogStudy[], mention: string): Cata
     return byMethod && withAll.every((candidate) => candidate === byMethod || sameWithoutMethod(candidate, byMethod)) ? byMethod : undefined;
   }
   return undefined;
+}
+// ¿La palabra NOMBRA a estos estudios? Está en el nombre de cada uno (palabra entera), es un alias aprobado de cada uno o es una frase de la lista de sinónimos.
+function namesWord(word: string, studies: readonly CatalogStudy[]): boolean {
+  if (studies.length === 0) return false;
+  if (isKnownStudyPhrase(word)) return true;
+  return studies.every((study) => nameWords(study.name).has(word) || normalizeStudyKey(study.name).split(" ").includes(word) || (study.normalizedAliases ?? []).includes(word));
 }
 // Dos opciones que solo se diferencian por el método entre paréntesis («PSA TOTAL (ECLIA)» y «PSA TOTAL (FIA Fluorescencia)»).
 const sameWithoutMethod = (a: CatalogStudy, b: CatalogStudy): boolean => normalizeStudyKey(a.name.replace(/\([^)]*\)/g, " ")) === normalizeStudyKey(b.name.replace(/\([^)]*\)/g, " "));
@@ -228,10 +235,11 @@ export function quoteStudiesTool(options: { loadCatalog: () => Promise<readonly 
         const text = queue[index]!;
         const { matched, groups, unresolved, forms } = resolve(text);
         // «t3 t4 tsh» (solo espacios): si el conjunto no es un estudio pero CADA palabra sí lo es, se cotiza cada una por separado.
-        // Nunca con palabras que solas no son un estudio («panel pcr 13 patogenos» no es «panel» + «pcr» + «13» + «patogenos»).
+        // Nunca con palabras que solas no son un estudio («panel pcr 13 patogenos» no es «panel» + «pcr» + «13» + «patogenos»), y cada palabra tiene que NOMBRAR el estudio
+        // (estar en su nombre, ser un alias aprobado o un sinónimo de la lista), no solo parecerse: «copro seriado» no es «coprocultivo» + «… seriado».
         const words = text.split(" ").filter((word) => word.length >= 2);
         if (matched.length === 0 && groups.length === 0 && words.length >= 2 && words.length <= 6 && words.every((word) => !NOT_ALONE.has(word) && !/^\d+$/.test(word))
-          && words.every((word) => { const one = resolve(word); return one.matched.length > 0 || one.groups.length > 0; })) {
+          && words.every((word) => { const one = resolve(word); return (one.matched.length > 0 || one.groups.length > 0) && namesWord(word, [...one.matched, ...one.groups.flat().map((id) => byId.get(id)).filter((study): study is CatalogStudy => study !== undefined)]); })) {
           queue.push(...words);
           continue;
         }

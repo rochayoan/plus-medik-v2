@@ -100,3 +100,13 @@ describe("variantes que nunca deben cotizar otra cosa", () => {
     expect(everything(result)).not.toMatch(/No se encontró/);
   });
 });
+
+describe("una lista separada solo por espacios se corta SOLO si cada palabra nombra un estudio (20-nov)", () => {
+  const catalog = [...CATALOG, study(40, "COPROCULTIVO", 90), study(41, "PARASITOLOGICO SERIADO", 60), study(42, "PARASITOLOGICO SIMPLE", 30)];
+  const quoteWith = quoteStudiesTool({ loadCatalog: async () => catalog });
+  const runWith = async (...studies: string[]): Promise<Result> => (await quoteWith.run({ studies }, ctx)) as Result;
+  it("«copro seriado» NUNCA se cotiza como coprocultivo", async () => {
+    const result = await runWith("copro seriado");
+    expect(sureOf(result)).not.toContain("COPROCULTIVO");
+  });
+});
