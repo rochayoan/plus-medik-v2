@@ -12,6 +12,7 @@ import { createConversationReader, createSupabaseConversationStore, resolveConve
 import { pending } from "../src/conversation-state.js";
 import type { CrmHandoff } from "../src/crm-outbox/types.js";
 import { contactKeyOf, createAttentionRepository } from "../src/human-control.js";
+import { HUMAN_REQUEST_MESSAGE } from "../src/human-request.js";
 import { handleKapsoWebhook, type KapsoWebhookDeps } from "../src/kapso-webhook.js";
 import { createMessageHistory, createSupabaseHistoryStore } from "../src/message-history.js";
 import { resolveQuoteSessionsConfig } from "../src/quote-session-turns.js";
@@ -517,16 +518,18 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
       return { submit, crm: { submit, submitSessionReview: async () => [] } as unknown as CrmHandoff };
     };
 
-    it("hoy no hay cola al CRM: el agente nuevo no puede derivar, no promete a una persona y responde el de siempre", async () => {
+    // Camino 5 del menú (dueño, 21-nov): el pedido de una persona recibe SIEMPRE el texto fijo, sin pasar por el modelo; el caso va al CRM si la cola existe (mejor esfuerzo).
+    it("hoy no hay cola al CRM: igual sale el texto fijo que promete a una persona, sin pasar por el modelo", async () => {
       const p = patient();
-      const w = setup({ pilot: { phones: [p.phone], model: fakeAgentModel(humanScript), handoffEnabled: true } });
+      const model = fakeAgentModel(humanScript);
+      const w = setup({ pilot: { phones: [p.phone], model, handoffEnabled: true } });
       await switchTo(true);
       await say(w, p.phone, "quiero hablar con una persona");
-      expect(w.sends.map((s) => s.body)).not.toContain("Claro, te paso con una persona del laboratorio.");
-      expect(pilotLogs(w).at(-1)).toMatchObject({ status: "FALLBACK", reason: "HUMAN_NO_HANDOFF" });
+      expect(w.sends.map((s) => s.body)).toEqual([HUMAN_REQUEST_MESSAGE]);
+      expect(model.plans).toHaveLength(0);
     });
 
-    it("con la cola al CRM y la derivación habilitada: el caso se registra con el mensaje del lote ANTES de responder, y solo entonces el agente dice que una persona atenderá", async () => {
+    it("con la cola al CRM: el caso se registra con el mensaje del pedido y sale el texto fijo", async () => {
       const p = patient();
       const { submit, crm } = crmOf("REGISTERED");
       const w = setup({ pilot: { phones: [p.phone], model: fakeAgentModel(humanScript), handoffEnabled: true }, crm });
@@ -534,20 +537,17 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
       const message = await say(w, p.phone, "quiero hablar con una persona");
       expect(submit).toHaveBeenCalledTimes(1);
       expect(submit.mock.calls[0]![1]).toEqual([{ kapsoMessageId: message, contactPhone: p.phone, kind: "CONVERSATION", reasons: ["HUMAN_REQUEST"] }]);
-      expect(w.sends.map((s) => s.body)).toEqual(["Claro, te paso con una persona del laboratorio."]);
-      expect(pilotLogs(w).at(-1)).toMatchObject({ status: "VERIFIED", handoff: "REGISTERED" });
+      expect(w.sends.map((s) => s.body)).toEqual([HUMAN_REQUEST_MESSAGE]);
     });
 
-    it("si el CRM no registra el caso, NO se promete nada: responde el de siempre", async () => {
+    it("si el CRM no registra el caso, el texto fijo sale igual (decisión del dueño)", async () => {
       const p = patient();
       const { submit, crm } = crmOf("FAILED");
       const w = setup({ pilot: { phones: [p.phone], model: fakeAgentModel(humanScript), handoffEnabled: true }, crm });
       await switchTo(true);
       await say(w, p.phone, "quiero hablar con una persona");
       expect(submit).toHaveBeenCalled();
-      expect(w.sends).toHaveLength(1);
-      expect(w.sends[0]!.body).not.toBe("Claro, te paso con una persona del laboratorio.");
-      expect(pilotLogs(w).at(-1)).toMatchObject({ status: "HANDOFF_FAILED" });
+      expect(w.sends.map((s) => s.body)).toEqual([HUMAN_REQUEST_MESSAGE]);
     });
 
     it("tras la derivación, cuando la recepción escribe el agente se pausa, y al REANUDAR (manual) lo pendiente vuelve a estar a su alcance", async () => {

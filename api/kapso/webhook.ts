@@ -19,6 +19,7 @@ import { resolveAgentMode } from "../../src/agent/pipeline.js";
 import { GREETING_WAIT_MS, isMenuMessage, lastAssistantMessage, menuChoiceOf } from "../../src/greeting-menu.js";
 import { resultsStageOf } from "../../src/results-silence.js";
 import { homeVisitStageOf } from "../../src/home-visit.js";
+import { waitingForPerson } from "../../src/human-request.js";
 import { createMenuEventRecorder } from "../../src/menu-events.js";
 import { createConversationReader, createSupabaseConversationStore, resolveConversationState } from "../../src/conversation-state-store.js";
 import { resolveDailyReplyCap } from "../../src/daily-reply-cap.js";
@@ -265,6 +266,12 @@ const homeVisitStage = async ({ from, messageId, excludeIds }: { from: string; m
   if (!contactKey) return undefined;
   return homeVisitStageOf(await recentForMenu({ from, messageId, contactKey, excludeIds }));
 };
+// Camino 5 «Hablar con una persona»: ¿ya se le prometió una persona en las últimas 24 h? (src/human-request.ts).
+const waitingForPersonCheck = async ({ from, messageId, excludeIds }: { from: string; messageId: string; excludeIds: readonly string[] }) => {
+  const contactKey = contactKeyFor(from);
+  if (!contactKey) return false;
+  return waitingForPerson(await recentForMenu({ from, messageId, contactKey, excludeIds }));
+};
 // Medición del menú (migración 26). Sin la migración solo se registra un código; el paciente no nota nada.
 const menuEvents = createMenuEventRecorder({ log: logLine });
 const agentPilot = agentSettings && turnsEnabled && textHandlerEnabled
@@ -368,7 +375,7 @@ const realDeps: QuoteDeps = {
   requireAuditGuard: humanControlEnabled || turnsEnabled || on("REQUIRE_AUDIT_GUARD"),
   humanControl: humanControlEnabled ? { contactKeyFor, ...(pauseExpiry ? { pauseExpiry } : {}) } : undefined,
   scopedControl: scopedContactControl ? { contactKeyFor, covers: scopedContactControl.covers } : undefined,
-  turns: turnsEnabled ? { contactKeyFor, ...(pauseExpiry ? { pauseExpiry } : {}), resultsStage, homeVisitStage, ...(photoContextWait ? { photoContextWait } : {}), replyGuard: replyGuardConfig, attention: attentionConfig, instantPhotoQuotes: instantPhotoQuotesEnabled, dailyCap: dailyReplyCap, ...(convState ? { convState } : {}), ...(agentPilot ? { agentPilot } : {}), ...(agentPilot ? { menuChoice, afterMenu, menuEvents } : {}), ...(agentPilot && greetingWait ? { greetingWait } : {}),
+  turns: turnsEnabled ? { contactKeyFor, ...(pauseExpiry ? { pauseExpiry } : {}), resultsStage, homeVisitStage, waitingForPerson: waitingForPersonCheck, ...(photoContextWait ? { photoContextWait } : {}), replyGuard: replyGuardConfig, attention: attentionConfig, instantPhotoQuotes: instantPhotoQuotesEnabled, dailyCap: dailyReplyCap, ...(convState ? { convState } : {}), ...(agentPilot ? { agentPilot } : {}), ...(agentPilot ? { menuChoice, afterMenu, menuEvents } : {}), ...(agentPilot && greetingWait ? { greetingWait } : {}),
     crmHandoff: crmOutbox,
     // Métodos de pago ignorados hasta que se implementen (decisión del dueño): ni agente de siempre ni agente nuevo dicen nada de pagos; el resto del mensaje se atiende.
     ignorePayment: true,
