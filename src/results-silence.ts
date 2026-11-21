@@ -17,7 +17,7 @@ const RESULTS_HOURS = /\b(horario\w* (de )?(entrega|retiro|recogida) (de )?resul
 const READY_INTENT = /\b(ya (esta|estan|salio|salieron|llego|llegaron|puedo|pueden)|estan? listos?|cuando (me |nos )?(entregan|entregaran|estan|esta|salen|sale|llegan)|como (va|vas|van)|recoger|recojo|retirar|retiro|buscar|pasar\w* (a|por|el|los)|enviar\w*|mandar\w*|por este medio|link|enlace|contrasena|clave|acceso|entrar|ingresar|sistema|descarg\w*|pdf|a que hora (entregan|puedo|pasar|salen|estan))\b/;
 const TURNAROUND_INFO = /\b(cuanto (tiempo )?(demora|demoran|tarda|tardan|tardara|tardaran)|en cuanto tiempo|en cuantos dias|cuantos dias (demora|tarda|tardan))\b/;
 const MINE = /\b(mis|mi|me|nos|ya esta|ya estan|ya salio|ya salieron|recoger|enlace|link|contrasena|sistema)\b/;
-const INTERPRET = /\b(significa\w*|interpret\w*|positivo|negativo|alto|baja|bajo|normal|enfermedad|diagnos\w*|urgente\w*|hospital\w*)\b/;
+const INTERPRET = /\b(significa\w*|interpret\w*|positivo|negativo|alto|baja|bajo|normal|enfermedad|diagnos\w*)\b/;
 
 export type ResultsRouting = "SILENT" | "READY_CHECK" | "OFFICE_HOURS" | "NORMAL";
 
@@ -44,7 +44,7 @@ export function routeResultsMessage(text: string): ResultsRouting {
   // «ya me tomaron la muestra», «dejé una muestra anoche»: la muestra YA se entregó (no es una pregunta sobre cómo tomarla).
   if (OTHER_INTENT.test(message.replace(SAMPLE_DONE, " "))) return "NORMAL";
   if (OFFICE_HOURS.test(message) && !RESULTS_HOURS.test(message)) return "OFFICE_HOURS";
-  // Interpretación o urgencia: sigue en silencio (no se orienta sobre resultados).
+  // Interpretación de un resultado («¿es normal?», «salió alto»): silencio, lo ve la Dra. Una URGENCIA no: se piden los datos como en cualquier consulta de resultados (decisión del dueño, 21-nov).
   if (INTERPRET.test(message)) return "SILENT";
   // Cuánto tarda un resultado, sin hablar de uno propio: información para hacerse el estudio (flujo normal).
   if (TURNAROUND_INFO.test(message) && !MINE.test(message)) return "NORMAL";

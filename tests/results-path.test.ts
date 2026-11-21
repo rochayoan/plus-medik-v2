@@ -128,6 +128,16 @@ describe("qué es una consulta de resultados (ajustes del 21-nov con casos reale
   it.each(["no puedo abrir el link de la ubicacion", "Quiero cotizar, no puedo entrar a la pagina"])("otros «no puedo entrar» siguen su flujo: «%s»", (text) => {
     expect(routeResultsMessage(text)).toBe("NORMAL");
   });
+  it.each([
+    "Necesito mis resultados urgente",
+    "Estoy hospitalizado, necesito resultados urgente",
+    "Acá todo es urgente por el estado delicado de mi hijo, estos resultados necesito"
+  ])("una URGENCIA se trata como cualquier consulta de resultados (se piden los datos; dueño, 21-nov): «%s»", (text) => {
+    expect(routeResultsMessage(text)).toBe("READY_CHECK");
+  });
+  it.each(["¿Qué significa mi resultado?", "mi resultado salió alto es normal?", "¿Mi resultado positivo significa una enfermedad?"])("la interpretación sigue en silencio: «%s»", (text) => {
+    expect(routeResultsMessage(text)).toBe("SILENT");
+  });
   it.each(["Tengo sangrado y necesito mis resultados", "Quiero hablar con una persona por mis resultados", "Quiero cotizar unos exámenes que me hice el año pasado"])("«%s» no cambia (sigue su flujo)", (text) => {
     expect(routeResultsMessage(text)).not.toBe("READY_CHECK");
   });
