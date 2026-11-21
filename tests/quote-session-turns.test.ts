@@ -205,11 +205,21 @@ describe("texto en modo sesión", () => {
 
   it("un repetido de cierre (replay) vuelve a dar EXACTAMENTE la misma cotización guardada, sin recalcular precios", async () => {
     const lines = [{ studyId: uuid(1), name: "HEMOGRAMA COMPLETO", priceBs: 45 }];
-    const w = setup({ audit: fakeAudit({ read: async () => ({ state: "replay", sessionId: "s1", outcome: "QUOTED", reasons: [], lines, totalBs: 45 }) }) });
+    // El catálogo cambió de precio después de cotizar: el replay NO lo usa para el precio (sale el guardado), solo para el tiempo de entrega, igual que el primer envío.
+    const catalog = [{ ...CATALOG[0]!, priceBs: 99, turnaroundText: "2 horas" }, CATALOG[1]!];
+    const w = setup({ catalog, audit: fakeAudit({ read: async () => ({ state: "replay", sessionId: "s1", outcome: "QUOTED", reasons: [], lines, totalBs: 45 }) }) });
+    await processTurns([text("listo")], w.deps);
+    expect(w.sends[0]).toContain("HEMOGRAMA COMPLETO — Bs 45 (entrega: 2 horas)");
+    expect(w.sends[0]).not.toContain("Bs 99");
+    expect(w.audit.reserveSend).toHaveBeenCalledWith("run-1", "quoted", LEASE, { stale: "NONE" });
+  });
+
+  it("un replay con el catálogo caído sale igual, con el precio guardado y sin el tiempo de entrega", async () => {
+    const lines = [{ studyId: uuid(1), name: "HEMOGRAMA COMPLETO", priceBs: 45 }];
+    const w = setup({ catalogFails: true, audit: fakeAudit({ read: async () => ({ state: "replay", sessionId: "s1", outcome: "QUOTED", reasons: [], lines, totalBs: 45 }) }) });
     await processTurns([text("listo")], w.deps);
     expect(w.sends[0]).toContain("HEMOGRAMA COMPLETO — Bs 45");
-    expect(w.deps.loadCatalog).not.toHaveBeenCalled();
-    expect(w.audit.reserveSend).toHaveBeenCalledWith("run-1", "quoted", LEASE, { stale: "NONE" });
+    expect(w.sends[0]).not.toContain("entrega:");
   });
 
   it("sin catálogo para identificar estudios escritos, el mensaje se trata como cualquier otro texto (no se pierde ni se inventa)", async () => {
