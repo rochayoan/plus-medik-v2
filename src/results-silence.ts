@@ -82,7 +82,8 @@ export function resultsAskMessage(date: Date): string {
   return [`${boliviaGreeting(date)}, gracias por preferirnos 😊 Para verificar tu resultado, pásame por favor:`, "👤 Nombre completo del paciente", "🧪 Qué estudio te hiciste y qué día", "o la foto de tu comprobante de pago 🧾"].join("\n");
 }
 export const RESULTS_NAME_ASK = "¿Me pasas el nombre completo del paciente (nombre y apellidos), por favor? 🙏";
-export const RESULTS_THANKS = "Gracias 🙏 ya tengo tus datos. La doctora verifica tu resultado y te lo envía por aquí.";
+// Tono cálido y que el paciente entienda que en un rato lo atienden (dueño, 21-nov).
+export const RESULTS_THANKS = "¡Gracias por compartirnos tus datos! 😊 Enseguida la doctora revisa tu resultado y te responde por aquí 🙏";
 // Lo que dijo la Dra (6-nov), confirmado por el dueño (21-nov).
 export const RESULTS_PICKUP_INFO = "Sí, otra persona puede recoger el resultado presentando el comprobante de pago 🧾";
 export const RESULTS_SIGNATURES: Record<Exclude<ResultsAction, "SILENT">, string> = { ASK: "RESULTS_READY_CHECK", NAME_ASK: "RESULTS_NAME_ASK", THANKS: "RESULTS_DATA_THANKS", PICKUP_INFO: "RESULTS_PICKUP_INFO" };
@@ -94,7 +95,8 @@ export function resultsReplyBody(action: Exclude<ResultsAction, "SILENT">, date:
 // En qué paso está el contacto, según los mensajes recientes (24 h) que le envió el asistente: el más reciente de los textos de este camino manda. Si la Dra escribió DESPUÉS de uno de ellos, ella ya lo atiende
 // (cuenta como agradecido: silencio). Se lee el texto (no una marca aparte) para que funcione igual si el paciente respondió con una foto.
 const STAGE_MARKERS: ReadonlyArray<readonly [ResultsStage, string]> = [
-  ["THANKED", plain("ya tengo tus datos. La doctora verifica tu resultado")],
+  ["THANKED", plain("Enseguida la doctora revisa tu resultado")],
+  ["THANKED", plain("ya tengo tus datos. La doctora verifica tu resultado")], // texto anterior (hasta el 21-nov)
   ["NAME_ASKED", plain("¿Me pasas el nombre completo del paciente (nombre y apellidos)")],
   ["ASKED", plain("Para verificar tu resultado, pásame por favor")],
   ["ASKED", plain("Ve pasándome el nombre completo del paciente")] // texto anterior (hasta el 21-nov)
@@ -178,10 +180,14 @@ export function decideResultsAction(input: { stage?: ResultsStage; query: boolea
   return stage === "NAME_ASKED" ? "THANKS" : "NAME_ASK";
 }
 
-// Un mensaje corto que parece el dato pedido (nombre del paciente, número de orden, comprobante): sin preguntas ni pedidos propios (cotizar, precio, hablar con una persona, ubicación, horario).
+// Un mensaje que parece el dato pedido (nombre del paciente, número de orden, comprobante): sin preguntas ni pedidos propios (cotizar, precio, hablar con una persona, ubicación, horario).
+// Corto (hasta 8 palabras), o más largo si se PRESENTA con un nombre completo explícito: «Mi nombre es Ronald Sosa Céspedes y este número dejé como referencia» (21-nov: con 11 palabras no se reconocía,
+// el modelo improvisaba el agradecimiento y nunca salía el texto fijo).
 const OWN_REQUEST = /\b(cotiz\w*|cotic\w*|precio\w*|cuesta\w*|costo\w*|cuanto\w*|persona|asesor\w*|humano|ubicacion|direccion|horario\w*|abren|atienden|resultado\w*|domicilio)\b/;
+const EXPLICIT_NAME = /\b(me llamo|mi nombre (completo )?es|el nombre (completo )?(del paciente )?es|nombre (completo )?del paciente|a nombre de|con el nombre de)\b/;
 export function looksLikeIdentification(text: string): boolean {
   const message = plain(text.slice(0, 500));
-  if (!message || text.includes("?") || text.includes("¿")) return false;
-  return message.split(/\s+/).length <= 8 && !OWN_REQUEST.test(message);
+  if (!message || text.includes("?") || text.includes("¿") || OWN_REQUEST.test(message)) return false;
+  if (message.split(/\s+/).length <= 8) return true;
+  return message.split(/\s+/).length <= 30 && EXPLICIT_NAME.test(message) && patientDataIn([text], false) === "COMPLETE";
 }

@@ -151,7 +151,7 @@ describe("resultados: silencio determinista sin IA ni mensajes", () => {
       const image: IncomingTurn = { kind: "IMAGE", from, messageId: "img-1", mediaId: "media-1" };
       await processTurns([image, turn("Quería saber si ya están listos mis resultados", "t-1")], deps);
       expect(sendText).toHaveBeenCalledTimes(1);
-      expect((sendText.mock.calls[0] as unknown as [string, string])[1]).toBe("Gracias 🙏 ya tengo tus datos. La doctora verifica tu resultado y te lo envía por aquí.");
+      expect((sendText.mock.calls[0] as unknown as [string, string])[1]).toBe("¡Gracias por compartirnos tus datos! 😊 Enseguida la doctora revisa tu resultado y te responde por aquí 🙏");
       expect(submit).toHaveBeenCalledTimes(1);
       expect((submit.mock.calls[0] as unknown as [unknown, Array<{ label: string; kapsoMessageId: string }>])[1][0]).toMatchObject({ label: "RESULTS_READY", kapsoMessageId: "t-1" });
       expect(analyze).not.toHaveBeenCalled();
@@ -169,7 +169,7 @@ describe("resultados: silencio determinista sin IA ni mensajes", () => {
     it("con el nombre completo en el mismo mensaje: agradece directo, aunque el CRM falle", async () => {
       const { deps, sendText } = build("FAILED");
       await processTurns([turn("Buenas tardes, ya están mis resultados? Mi nombre es Carla Mendoza Rivas", "t-3")], deps);
-      expect((sendText.mock.calls[0] as unknown as [string, string])[1]).toContain("ya tengo tus datos");
+      expect((sendText.mock.calls[0] as unknown as [string, string])[1]).toContain("Gracias por compartirnos tus datos");
     });
     it("con solo un nombre («señor Porfirio»): pide el nombre completo", async () => {
       const { deps, sendText } = build("none");

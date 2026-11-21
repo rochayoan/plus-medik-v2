@@ -64,7 +64,9 @@ describe("lectura del último turno del contacto", () => {
 
 describe("el dato que llega tras pedir nombre/comprobante de un resultado", () => {
   it("solo lo que parece el dato pedido se calla: un nombre sí; una pregunta o un pedido propio, no", () => {
-    for (const text of ["Porfidio López Rivero", "María Lenny Cuellar Rojas", "Orden 29150", "Jonh Emmanuel Ramirez Choque 4 años"]) expect(looksLikeIdentification(text)).toBe(true);
+    for (const text of ["Porfidio López Rivero", "María Lenny Cuellar Rojas", "Orden 29150", "Jonh Emmanuel Ramirez Choque 4 años", "Mi nombre es Ronald Sosa Céspedes y este número dejé como referencia", "Buenos días, me llamo Ana María Quispe y me hice el hemograma el lunes en la mañana", "El nombre del paciente es Luis Alberto Rojas Paz, se hizo los análisis ayer"]) expect(looksLikeIdentification(text), text).toBe(true);
+    // Largos con un nombre pero con un pedido propio o una pregunta, o sin presentarse con un nombre: siguen el flujo normal.
+    for (const text of ["Mi nombre es Ronald Sosa y quiero cotizar un hemograma y una glucosa para mañana", "Me llamo Ana Quispe, ¿a qué hora puedo pasar mañana por la mañana?", "Soy diabético y necesito hacerme unos análisis de control esta semana", "Mi nombre es importante para ustedes pero necesito que me ayuden con esto ahora", "Le pagué ayer por QR y la señorita me dijo que hoy estaba todo"]) expect(looksLikeIdentification(text), text).toBe(false);
     for (const text of ["¿Y cuánto tarda?", "Quiero cotizar un hemograma", "Necesito hablar con una persona", "Hacen estudios a domicilio", "Cuál es la dirección", "Este es el nombre del paciente que necesito para el resultado de la semana pasada urgente", ""]) expect(looksLikeIdentification(text)).toBe(false);
   });
 });
