@@ -1,4 +1,3 @@
-import { HUMAN_REQUEST_MESSAGE } from "../src/human-request.js";
 import { describe, expect, it, vi } from "vitest";
 import type { AuditClaim, AuditLease, AuditRepository } from "../src/audit.js";
 import { createReplyGate, createRepeatTracker, decideAttention, repeatCandidate, resolveAttentionFilter, socialOf, type AttentionConfig } from "../src/attention-filter.js";
@@ -301,7 +300,7 @@ describe("el filtro en el manejador de texto: lo irrelevante no se responde", ()
 
   it.each([
     ["me duele el pecho, gracias", DRAFT_TEXTS.medical_unavailable],
-    ["gracias, quiero hablar con una persona", HUMAN_REQUEST_MESSAGE],
+    ["gracias, quiero hablar con una persona", DRAFT_TEXTS.handoff_unavailable],
     ["hola, ¿a qué hora abren?", DRAFT_TEXTS.handoff_unavailable],
     ["hola, quiero cotizar", DRAFT_TEXTS.send_recipe]
   ])("excepciones y solicitudes NO se descartan: «%s»", async (body, expected) => {

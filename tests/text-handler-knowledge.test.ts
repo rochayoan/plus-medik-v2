@@ -1,4 +1,3 @@
-import { HUMAN_REQUEST_MESSAGE } from "../src/human-request.js";
 import { describe, expect, it, vi } from "vitest";
 import type { AnalysisResult } from "../src/analyze.js";
 import { AuditWriteError, type AuditClaim, type AuditLease, type AuditRepository } from "../src/audit.js";
@@ -217,8 +216,8 @@ describe("lo que NO se responde con conocimiento", () => {
     await untouched("qué dosis de ibuprofeno tomo", DRAFT_TEXTS.medical_unavailable);
   });
 
-  it("pedir a una persona nunca consulta conocimiento: sale el texto fijo del camino 5 (dueño, 21-nov)", async () => {
-    await untouched("quiero hablar con un asesor sobre el horario", HUMAN_REQUEST_MESSAGE);
+  it("pedir a una persona nunca consulta conocimiento: sigue el camino de derivación (bloqueada)", async () => {
+    await untouched("quiero hablar con un asesor sobre el horario", DRAFT_TEXTS.handoff_unavailable);
   });
 
   it("saludos y cotizar siguen siendo los textos fijos de siempre, sin consultar nada", async () => {

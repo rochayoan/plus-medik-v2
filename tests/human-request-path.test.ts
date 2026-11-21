@@ -23,7 +23,7 @@ describe("por los turnos", () => {
   const from = "59170000004";
   const lease = { owner: "owner", fence: 1 };
   const turn = (text: string, id: string): IncomingTurn => ({ kind: "TEXT", text, from, messageId: id });
-  const build = (waiting: boolean, withCrm = false) => {
+  const build = (waiting: boolean, withCrm = false, pilot = true) => {
     const audit = {
       claim: vi.fn(async () => ({ kind: "claimed" as const, runId: "run-p", lease })),
       renewLease: vi.fn(async () => true),
@@ -40,7 +40,7 @@ describe("por los turnos", () => {
       audit, sendText, loadCatalog: vi.fn(async () => []), analyze: vi.fn(async () => { throw new Error("sin análisis"); }),
       downloadImage: vi.fn(async () => ({ bytes: new Uint8Array() })),
       log: vi.fn(),
-      turns: { handlers: { text: handler }, contactKeyFor: () => "d".repeat(64), waitingForPerson: vi.fn(async () => waiting), ...(withCrm ? { crmHandoff: { submit, submitSessionReview: vi.fn() } } : {}) } as unknown as NonNullable<QuoteDeps["turns"]>
+      turns: { handlers: { text: handler }, contactKeyFor: () => "d".repeat(64), waitingForPerson: vi.fn(async () => waiting), agentPilot: { isPilot: () => pilot, produce: vi.fn(async () => undefined) }, ...(withCrm ? { crmHandoff: { submit, submitSessionReview: vi.fn() } } : {}) } as unknown as NonNullable<QuoteDeps["turns"]>
     } as unknown as QuoteDeps;
     return { deps, sendText, handler, submit };
   };
@@ -62,6 +62,12 @@ describe("por los turnos", () => {
       expect(sendText).not.toHaveBeenCalled();
       expect(handler).not.toHaveBeenCalled();
     }
+  });
+  it("un contacto fuera del agente conversacional sigue la ruta de respaldo de siempre", async () => {
+    const { deps, sendText, handler } = build(true, false, false);
+    await processTurns([turn("Quiero hablar con una persona", "p-7")], deps);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect((sendText.mock.calls[0] as unknown as [string, string])[1]).not.toBe(HUMAN_REQUEST_MESSAGE);
   });
   it("sin pedido ni espera, todo sigue como siempre", async () => {
     const { deps, handler } = build(false);

@@ -420,7 +420,8 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
   const personReply = new Map<string, number>();
   const personSilent = new Set<string>();
   for (const [from, indices] of perContact) {
-    if (atDoor.has(from)) continue;
+    // Solo para los contactos del agente conversacional (en producción, todos cuando el interruptor está encendido). La ruta de respaldo ya responde «Un asesor la revisará y te atenderá…».
+    if (atDoor.has(from) || !deps.turns?.agentPilot?.isPilot(from)) continue;
     const asks = indices.filter((index) => turns[index]!.kind === "TEXT" && typeof turns[index]!.text === "string" && isHumanRequest(turns[index]!.text!));
     const waiting = deps.turns?.waitingForPerson ? await deps.turns.waitingForPerson({ from, messageId: turns[indices[0]!]!.messageId, excludeIds: indices.map((index) => turns[index]!.messageId) }).catch(() => false) : false;
     if (waiting) {
