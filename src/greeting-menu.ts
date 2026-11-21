@@ -22,7 +22,8 @@ export const MENU_OPTIONS: readonly MenuOption[] = [
 ];
 
 // Formas mínimas (estructurales) de los mensajes: este módulo no depende del núcleo conversacional.
-type RecentEntry = { readonly from: "PATIENT" | "ASSISTANT" | "STAFF"; readonly text: string };
+// `at`: hora del mensaje (ISO), si el historial la trae. Sirve para saber qué estaba viendo el paciente cuando escribió.
+type RecentEntry = { readonly from: "PATIENT" | "ASSISTANT" | "STAFF"; readonly text: string; readonly at?: string };
 
 const KEYCAP = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"] as const;
 
@@ -63,13 +64,48 @@ export function lastAssistantMessage(recent: readonly RecentEntry[]): string | u
   return undefined;
 }
 
-// La opción elegida: SOLO si el último mensaje del asistente fue el menú y el número existe. Un número tras una lista de estudios (u otra cosa) no es del menú.
-export function menuChoiceOf(text: string, recent: readonly RecentEntry[]): MenuOption | undefined {
+// Lo que el paciente tenía en pantalla al escribir: los mensajes anteriores a la hora de su mensaje (`sentAtMs`). Sin hora, todo el historial (como antes).
+function seenBefore(recent: readonly RecentEntry[], sentAtMs: number | undefined): readonly RecentEntry[] {
+  if (sentAtMs === undefined) return recent;
+  return recent.filter((entry) => {
+    const at = entry.at ? Date.parse(entry.at) : Number.NaN;
+    return !Number.isFinite(at) || at <= sentAtMs;
+  });
+}
+
+// La opción elegida: SOLO si el último mensaje del asistente QUE EL PACIENTE VEÍA al escribir fue el menú y el número existe. Un número tras una lista de estudios (u otra cosa) no es del menú.
+// Con la hora del mensaje se resuelve el cruce: el paciente responde «1» al menú justo cuando sale otra respuesta del asistente (ver menuChoiceDecision).
+export function menuChoiceOf(text: string, recent: readonly RecentEntry[], sentAtMs?: number): MenuOption | undefined {
   const number = menuNumberOf(text);
   if (number === undefined) return undefined;
-  const last = lastAssistantMessage(recent);
+  const last = lastAssistantMessage(seenBefore(recent, sentAtMs));
   if (!last || !isMenuMessage(last)) return undefined;
   return MENU_OPTIONS.find((option) => option.number === number);
+}
+
+// Señales de que una respuesta del asistente YA atiende esa opción del menú (los textos fijos de cada camino y lo que redacta el agente para cotizar).
+const ALREADY_ANSWERS: Record<MenuOption["code"], RegExp> = {
+  QUOTE: /estudios|receta|orden|cotiza/i,
+  RESULTS: /resultado/i,
+  LOCATION: /horario|direcci[oó]n|ubicad|maps/i,
+  HOME_VISIT: /domicilio/i,
+  HUMAN: /persona|asesor/i
+};
+
+export interface MenuChoiceDecision {
+  readonly option: MenuOption;
+  // true: el número se CRUZÓ con una respuesta del asistente que ya atiende esa opción (el paciente la recibe justo después de escribir). No se responde otra vez lo mismo.
+  readonly alreadyAnswered: boolean;
+}
+
+// Caso real (21-nov): «Buen día» → menú; el paciente ya había escrito «necesito cotizar» (Kapso lo retuvo) y, mirando el menú, responde «1» 3 s antes de que salga «¡Claro! Escríbeme los estudios…».
+// Ese «1» es la opción 1 (lo escribió viendo el menú) y ya quedó atendida por la respuesta que se cruzó: responderla de nuevo repetía «¿qué estudios quieres cotizar?».
+export function menuChoiceDecision(text: string, recent: readonly RecentEntry[], sentAtMs?: number): MenuChoiceDecision | undefined {
+  const option = menuChoiceOf(text, recent, sentAtMs);
+  if (!option) return undefined;
+  if (sentAtMs === undefined) return { option, alreadyAnswered: false };
+  const crossed = recent.filter((entry) => entry.from === "ASSISTANT" && entry.at !== undefined && Date.parse(entry.at) > sentAtMs && !isMenuMessage(entry.text));
+  return { option, alreadyAnswered: crossed.some((entry) => ALREADY_ANSWERS[option.code].test(entry.text)) };
 }
 
 // El menú sale ante un saludo puro (lo decide quien llama, con el vocabulario cerrado de saludos) cuando NO hay conversación en las últimas 24 h. «Conversación» = alguien le respondió al paciente

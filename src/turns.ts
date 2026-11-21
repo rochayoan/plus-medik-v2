@@ -39,8 +39,10 @@ export interface IncomingTurn {
   text?: string;
   mediaUrl?: string;
   mediaId?: string;
-  // Instante del mensaje (segundos desde la época) si Kapso lo informa; solo se usa para ordenar un lote.
+  // Instante del mensaje (segundos desde la época) si Kapso lo informa. Ordena un lote y dice qué veía el paciente al elegir una opción del menú.
   timestamp?: number;
+  // Solo en memoria: número del menú que se cruzó con una respuesta que ya atiende esa opción (no se responde otra vez).
+  menuAlreadyAnswered?: true;
 }
 
 // La respuesta de un manejador. stale: NEWER_TURN (por defecto en una conversación) descarta la respuesta si un turno más nuevo del contacto ya respondió; NONE la
@@ -368,11 +370,14 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
       for (const index of indices) {
         const turn = turns[index]!;
         if (turn.kind !== "TEXT" || typeof turn.text !== "string" || !mightBeMenuChoice(turn.text)) continue;
-        const canonical = await menuChoice({ from, text: turn.text, messageId: turn.messageId, excludeIds: indices.map((other) => turns[other]!.messageId) }).catch(() => undefined);
+        const choice = await menuChoice({ from, text: turn.text, messageId: turn.messageId, excludeIds: indices.map((other) => turns[other]!.messageId), ...(turn.timestamp !== undefined ? { sentAt: turn.timestamp } : {}) }).catch(() => undefined);
+        const canonical = typeof choice === "string" ? choice : choice?.canonical;
+        // Se cruzó con una respuesta que ya atiende esa opción (ver menuChoiceDecision): solo si el número es lo único que escribió en este lote.
+        if (typeof choice === "object" && choice.alreadyAnswered && indices.length === 1) turn.menuAlreadyAnswered = true;
         if (canonical) {
           turn.text = canonical;
           const option = MENU_OPTIONS.find((candidate) => candidate.canonical === canonical)?.code ?? "OTHER";
-          deps.log("agent_menu", { event: "CHOSEN", via: "NUMBER", option });
+          deps.log("agent_menu", { event: "CHOSEN", via: "NUMBER", option, ...(turn.menuAlreadyAnswered ? { crossed: "ALREADY_ANSWERED" } : {}) });
           chosenByNumber.add(from);
           const key = deps.turns!.contactKeyFor(from);
           if (key) void deps.turns?.menuEvents?.(key, { event: "CHOSEN", option, via: "NUMBER" });
@@ -849,6 +854,14 @@ async function processContactBatch(
       // Convenio/aliado y domicilio se guardan con un motivo ya permitido de la cola, pero viajan al CRM con su propia etiqueta (encabeza failureReason).
       const LABELS: Partial<Record<keyof typeof REASONS, "ALLIED_LAB" | "HOME_VISIT" | "STUDY_TO_CONFIRM">> = { ALLIED_LAB: "ALLIED_LAB", HOME_VISIT: "HOME_VISIT", STUDY_TO_CONFIRM: "STUDY_TO_CONFIRM" };
       produce = async (ctx) => {
+        // El número del menú se cruzó con una respuesta que ya lo atiende (el paciente la recibió justo después de escribirlo): no se repite. Se cierra como un silencio atendido.
+        if (contactTurns.length === 1 && contactTurns[0]!.menuAlreadyAnswered) {
+          await Promise.all(drafts.map((draft) => draft.claimed.skip().catch(() => undefined)));
+          included = runnable.map(() => true);
+          deps.log("agent_menu", { event: "CROSSED_SILENT" });
+          deps.turns?.convState?.agentReply({ from, messageId: `silent:${leadId}`, replyTo: leadId, reply: { body: "", result: "silent", quality: "ANSWER" } });
+          return { kind: "none" };
+        }
         const piloted = await pilot.produce({
           from,
           turns: contactTurns.map((turn) => ({ messageId: turn.messageId, kind: "TEXT" as const, text: turn.text!, ...(turn.timestamp !== undefined ? { timestamp: turn.timestamp } : {}) })),
@@ -880,6 +893,14 @@ async function processContactBatch(
               deps.turns?.convState?.agentReply({ from, messageId: `silent:${leadId}`, replyTo: leadId, reply: { body: "", result: "silent", quality: "ANSWER" } });
               return { kind: "none" };
             }
+          }
+          // Lo que Kapso todavía retiene (agrupa ~20 s antes de entregar): si el paciente ya escribió algo después del saludo, el menú no sale; ese mensaje llega enseguida y se atiende con el saludo en el contexto.
+          const greetedAt = contactTurns.at(-1)?.timestamp;
+          if (greetingWait.pendingInbound && greetedAt !== undefined && (await greetingWait.pendingInbound(from, greetedAt).catch(() => false))) {
+            deps.log("agent_menu", { event: "SKIPPED", reason: "PATIENT_KEPT_WRITING_KAPSO", waitedMs: waited });
+            void deps.turns?.menuEvents?.(contactKey, { event: "SKIPPED" });
+            deps.turns?.convState?.agentReply({ from, messageId: `silent:${leadId}`, replyTo: leadId, reply: { body: "", result: "silent", quality: "ANSWER" } });
+            return { kind: "none" };
           }
         }
         // Medición del menú: salió el menú, eligió una opción con palabras, o escribió un número que no está en el menú.

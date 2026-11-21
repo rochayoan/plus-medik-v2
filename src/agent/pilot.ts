@@ -78,11 +78,11 @@ export function createRecentProvider(options: {
     const entries: RecentEntry[] = [];
     for (const row of rows) {
       if (typeof row !== "object" || row === null) continue;
-      const { direction, actor, body } = row as { direction?: unknown; actor?: unknown; body?: unknown };
+      const { direction, actor, body, at } = row as { direction?: unknown; actor?: unknown; body?: unknown; at?: unknown };
       if (typeof body !== "string" || body.trim() === "") continue;
       const from: RecentEntry["from"] | undefined = direction === "IN" ? "PATIENT" : actor === "AGENT" ? "ASSISTANT" : actor === "HUMAN" ? "STAFF" : undefined;
       if (!from) continue;
-      entries.push({ from, text: body });
+      entries.push({ from, text: body, ...(typeof at === "string" ? { at } : {}) });
     }
     return entries;
   };
