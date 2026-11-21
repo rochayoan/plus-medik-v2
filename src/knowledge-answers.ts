@@ -25,11 +25,13 @@ export type Topic =
   | { kind: "TURNAROUND" }
   | { kind: "SAMPLE" };
 
-const HOUR_WORDS = /\b(horario\w*|hora\w* de (atencion|apertura|cierre|toma|entrega)|a que hora|hasta que hora|desde que hora|abren|abre|cierran|cierra|atienden|atiende)\b/;
+// «¿Puedo ir mañana a las 7?», «¿están abiertos?»: también es preguntar por el horario (camino 3 del menú, 21-nov).
+const HOUR_WORDS = /\b(horario\w*|hora\w* de (atencion|apertura|cierre|toma|entrega)|a que hora|hasta que hora|desde que hora|abren|abre|cierran|cierra|atienden|atiende|abiert[oa]s?|(puedo|podemos|puede|pueden) (ir|pasar|venir|llegar|acercarme|acercarnos)\b[^.?!]{0,40}\b(hoy|manana|ahora|noche|madrugada|temprano|domingo\w*|sabado\w*|feriado\w*|a las \d{1,2}))\b/;
 const SAMPLE = /\b(toma\w* de muestra\w*|muestra\w*|sacan sangre|extraccion\w*)\b/;
 const RESULTS = /\bresultado\w*\b/;
 const HOME = /\bdomicilio\w*\b/;
-const LOCATION = /\b(ubicaci\w*|ubicad\w*|ubican\w*|direccion\w*|donde (esta|estan|queda|quedan|los encuentro|se encuentran|se ubican|se ubica)|sucursal\w*|como llego|como llegar|mapa)\b/;
+// Otra ciudad u otra sede («¿atienden en La Paz?», «¿tienen sucursal en Montero?») también es una pregunta de ubicación: la respuesta es la sede única (dueño, 21-nov).
+const LOCATION = /\b(ubicaci\w*|ubicad\w*|ubican\w*|direccion\w*|donde (esta|estan|queda|quedan|los encuentro|se encuentran|se ubican|se ubica)|sucursal\w*|sede\w*|como llego|como llegar|mapa|otras? ciudad\w*|(que|cual|en que) ciudad|en (la paz|el alto|cochabamba|oruro|potosi|sucre|tarija|trinidad|cobija|riberalta|montero|warnes|minero|yapacani|camiri|cotoca|la guardia|el torno|san julian|puerto suarez|puerto quijarro|guayaramerin|villazon|yacuiba|bermejo))\b/;
 const PAYMENT = /\b(pago\w*|pagar|pagamos|tarjeta\w*|qr|transferencia\w*|efectivo|metodo\w* de pago)\b/;
 const RESULTS_DELIVERY = /\b(entreg\w*|recog\w*|retir\w*|recib\w*|demor\w*|tard\w*|listos?|salen|llegan|cuando|envi\w*|enlace\w*|link\w*|descarg\w*|consult\w*|linea)\b/;
 const INVOICING = /\bfactura\w*\b/;
