@@ -537,7 +537,18 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
     }
     return { kind: "reply", body: HUMAN_REQUEST_MESSAGE, result: "conversation", processingStatus: "COMPLETED", stale: "NONE", signature: HUMAN_REQUEST_SIGNATURE };
   };
-  const homeThanksProducer: TurnProducer = async () => ({ kind: "reply", body: HOME_VISIT_THANKS, result: "conversation", processingStatus: "COMPLETED", stale: "NONE", signature: HOME_VISIT_SIGNATURE });
+  // Domicilio: el aviso al CRM va AQUÍ, con los datos ya reunidos (dueño, 21-nov: la alarma llega cuando ya mandó sus datos). Mejor esfuerzo.
+  const homeThanksProducer = (turn: IncomingTurn): TurnProducer => async (ctx) => {
+    const crm = deps.turns?.crmHandoff;
+    if (crm) {
+      try {
+        await crm.submit(ctx, [{ kapsoMessageId: turn.messageId, contactPhone: turn.from, kind: "CONVERSATION", reasons: ["NO_APPROVED_ANSWER"], label: "HOME_VISIT" }]);
+      } catch {
+        deps.log("home_visit_crm_submit_failed", {});
+      }
+    }
+    return { kind: "reply", body: HOME_VISIT_THANKS, result: "conversation", processingStatus: "COMPLETED", stale: "NONE", signature: HOME_VISIT_SIGNATURE };
+  };
   // Un contacto del PILOTO (solo mensajes de texto o audio) también se atiende como lote, aunque traiga un solo mensaje: así su respuesta sale por la misma ruta de un solo envío por lote.
   const pilot = deps.turns?.agentPilot;
   const isPilotBatch = (from: string, indices: readonly number[]) => Boolean(pilot?.isPilot(from)) && indices.every((index) => turns[index]!.kind === "TEXT" || turns[index]!.kind === "AUDIO");
@@ -601,7 +612,7 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
         const door = atDoor.get(turn.from);
         const home = homeThanks.get(turn.from);
         const person = personReply.get(turn.from);
-        const base = door !== undefined ? (door === index ? doorProducer(turn) : silenceProducer) : person !== undefined ? (person === index ? personProducer(turn) : silenceProducer) : home !== undefined ? (home === index ? homeThanksProducer : silenceProducer) : homeSilent.has(turn.from) ? silenceProducer : results ? (results.responder === index ? resultsProducer(turn, results.action) : silenceProducer) : resultsOnly.has(turn.from) ? silenceProducer : producerFor(turn, deps)!;
+        const base = door !== undefined ? (door === index ? doorProducer(turn) : silenceProducer) : person !== undefined ? (person === index ? personProducer(turn) : silenceProducer) : home !== undefined ? (home === index ? homeThanksProducer(turn) : silenceProducer) : homeSilent.has(turn.from) ? silenceProducer : results ? (results.responder === index ? resultsProducer(turn, results.action) : silenceProducer) : resultsOnly.has(turn.from) ? silenceProducer : producerFor(turn, deps)!;
         // Una foto que se atiende SOLA y que no se pudo cotizar espera un rato a que llegue el texto del paciente (ver src/photo-context-wait.ts); sin la configuración, responde de inmediato.
         const photoWait = deps.turns?.photoContextWait;
         const producer = turn.kind === "IMAGE" && !atDoor.has(turn.from) && !personReply.has(turn.from) && !homeSilent.has(turn.from) && !resultsReply.has(turn.from) && !resultsOnly.has(turn.from) && photoWait ? withPhotoContextWait(base, turn.from, { ...photoWait, contactKeyFor: deps.turns!.contactKeyFor, log: deps.log }) : base;
@@ -834,9 +845,9 @@ async function processContactBatch(
       const routine = contactTurns.length === 1 && drafts.length === 0 ? responder.produce : produce;
       const crm = deps.turns?.crmHandoff;
       const leadId = responder.unit.turn.messageId;
-      const REASONS = { HUMAN_REQUEST: "HUMAN_REQUEST", MEDICAL: "MEDICAL_QUERY", OUT_OF_SCOPE: "NO_APPROVED_ANSWER", ALLIED_LAB: "HUMAN_REQUEST", HOME_VISIT: "NO_APPROVED_ANSWER" } as const;
+      const REASONS = { HUMAN_REQUEST: "HUMAN_REQUEST", MEDICAL: "MEDICAL_QUERY", OUT_OF_SCOPE: "NO_APPROVED_ANSWER", ALLIED_LAB: "HUMAN_REQUEST", HOME_VISIT: "NO_APPROVED_ANSWER", STUDY_TO_CONFIRM: "UNRESOLVED_TEXT" } as const;
       // Convenio/aliado y domicilio se guardan con un motivo ya permitido de la cola, pero viajan al CRM con su propia etiqueta (encabeza failureReason).
-      const LABELS: Partial<Record<keyof typeof REASONS, "ALLIED_LAB" | "HOME_VISIT">> = { ALLIED_LAB: "ALLIED_LAB", HOME_VISIT: "HOME_VISIT" };
+      const LABELS: Partial<Record<keyof typeof REASONS, "ALLIED_LAB" | "HOME_VISIT" | "STUDY_TO_CONFIRM">> = { ALLIED_LAB: "ALLIED_LAB", HOME_VISIT: "HOME_VISIT", STUDY_TO_CONFIRM: "STUDY_TO_CONFIRM" };
       produce = async (ctx) => {
         const piloted = await pilot.produce({
           from,

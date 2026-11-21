@@ -108,10 +108,10 @@ export async function runAgentTurn(deps: AgentDeps, input: AgentTurnInput): Prom
 
   // Estudios a DOMICILIO: texto fijo definido por el dueño (19-nov, como responde la Dra), sin redactor. Si además pidió precios, la cotización del catálogo va debajo. La promesa de que una persona confirma
   // solo se agrega si el caso QUEDÓ registrado.
+  // El aviso al CRM ya NO sale aquí: sale cuando el paciente manda sus datos (src/turns.ts, dueño 21-nov), para que la alarma llegue con todo listo.
   if (plan.handoff === "HOME_VISIT") {
-    const registered = handoff !== undefined && deps.handoff && !deps.cancelled?.() ? await deps.handoff("HOME_VISIT").catch(() => false) : false;
-    const reply = [homeVisitMessage(registered), ...blocks].join("\n\n");
-    return done({ status: "VERIFIED", ...base, reply, ...(hasQuoteBlock ? { quoted: true, ...(quotePartial ? { quotePartial: true } : {}) } : {}), handoffRequested: true, ...(registered ? { handoffRegistered: true } : {}) });
+    const reply = [homeVisitMessage(false), ...blocks].join("\n\n");
+    return done({ status: "VERIFIED", ...base, reply, ...(hasQuoteBlock ? { quoted: true, ...(quotePartial ? { quotePartial: true } : {}) } : {}), handoffRequested: true });
   }
 
   // 3. y 4. Redacción en texto libre y verificación. Hasta DOS intentos: si la verificación rechaza el primero, el modelo recibe solo los códigos de lo que falló. Nunca más (costo y tiempo acotados).
@@ -135,6 +135,8 @@ export async function runAgentTurn(deps: AgentDeps, input: AgentTurnInput): Prom
         const registered = deps.handoff && !deps.cancelled?.() ? await deps.handoff(handoff).catch(() => false) : false;
         if (!registered) return done({ status: "HANDOFF_FAILED", ...base, handoffRequested: true, ...repairInfo });
       }
+      // «Lo confirma la doctora» (estudios fuera del catálogo): aviso al CRM, mejor esfuerzo; la respuesta no depende de eso (dueño, 21-nov).
+      if (blocks.some((block) => block.startsWith("👩‍⚕️")) && capabilities.handoff && deps.handoff && !deps.cancelled?.()) await deps.handoff("STUDY_TO_CONFIRM").catch(() => false);
       // La cotización (precios del catálogo) la agrega el SISTEMA tal cual la armó el motor.
       const reply = [text, ...blocks].join("\n\n");
       return done({ status: "VERIFIED", ...base, reply, ...(hasQuoteBlock ? { quoted: true, ...(quotePartial ? { quotePartial: true } : {}) } : {}), ...(handoff !== undefined ? { handoffRequested: true, handoffRegistered: true } : {}), ...repairInfo });

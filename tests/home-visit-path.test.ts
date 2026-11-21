@@ -60,20 +60,24 @@ describe("por los turnos", () => {
     const sendText = vi.fn(async () => undefined);
     const handler = vi.fn(async () => ({ body: "Respuesta del manejador" }));
     const homeVisitStage = vi.fn(async () => stage);
+    const submit = vi.fn(async () => [{ state: "REGISTERED" }]);
     const deps = {
       audit, sendText, loadCatalog: vi.fn(async () => []), analyze: vi.fn(async () => { throw new Error("sin análisis en esta prueba"); }),
       downloadImage: vi.fn(async () => ({ bytes: new Uint8Array() })),
       log: vi.fn(),
-      turns: { handlers: { text: handler }, contactKeyFor: () => "c".repeat(64), homeVisitStage } as unknown as NonNullable<QuoteDeps["turns"]>
+      turns: { handlers: { text: handler }, contactKeyFor: () => "c".repeat(64), homeVisitStage, crmHandoff: { submit, submitSessionReview: vi.fn() } } as unknown as NonNullable<QuoteDeps["turns"]>
     } as unknown as QuoteDeps;
     const sent = () => sendText.mock.calls.map((call) => (call as unknown as [string, string])[1]);
-    return { deps, sent, sendText, handler, homeVisitStage, audit };
+    return { deps, sent, sendText, handler, homeVisitStage, audit, submit };
   };
 
   it("tras el texto fijo, los datos del paciente se agradecen UNA vez (aunque lleguen en varios mensajes)", async () => {
-    const { deps, sent, handler, audit } = build("ASKED");
+    const { deps, sent, handler, audit, submit } = build("ASKED");
     await processTurns([turn("Daniel Suárez Mora", "h-1"), turn("8 años", "h-2"), turn("3er piso cama 326", "h-3")], deps);
     expect(sent()).toEqual([HOME_VISIT_THANKS]);
+    // la alarma del CRM sale AQUÍ, con los datos ya reunidos
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect((submit.mock.calls[0] as unknown as [unknown, Array<{ label: string; kapsoMessageId: string }>])[1][0]).toMatchObject({ label: "HOME_VISIT", kapsoMessageId: "h-3" });
     expect(handler).not.toHaveBeenCalled();
     expect(audit.recordIgnored).toHaveBeenCalledTimes(2);
   });

@@ -9,6 +9,7 @@ import { CrmOutbox } from "./service.js";
 //   PLUSMEDIK_CRM_REVIEW_TOKEN        el MISMO token que el CRM tiene en PLUSMEDIK_AGENT_REVIEW_INGEST_TOKEN (≥ 32 caracteres; exclusivo agente→CRM)
 //   PLUSMEDIK_OUTBOX_KEY              secreto (≥ 32 caracteres) para cifrar en reposo el cuerpo de los eventos (lleva el teléfono)
 //   KAPSO_PHONE_NUMBER_ID             phone_number_id de WhatsApp del laboratorio (el CRM valida que el mensaje pertenezca a ese número)
+//   PLUSMEDIK_TEST_PHONES             opcional: números de prueba (separados por coma o espacio); sus casos van como «Prueba», sin alarma
 // Una configuración incompleta o inválida NO enciende la derivación (sigue bloqueada) y deja un código en el log, nunca el valor.
 
 export type CrmOutboxConfigError = "NOT_ENABLED" | "MISSING_URL" | "INVALID_URL" | "MISSING_TOKEN" | "INVALID_TOKEN" | "MISSING_KEY" | "INVALID_KEY" | "MISSING_PHONE_NUMBER_ID";
@@ -33,7 +34,8 @@ export function resolveCrmOutbox(env: Record<string, string | undefined>, log: (
     return new CrmOutbox({
       repository: createSupabaseOutboxRepository({ requestTimeoutMs: 3000, retryDelayMs: 200 }),
       client: createCrmReviewClient({ baseUrl: url, token, ...(overrides.fetchFn ? { fetchFn: overrides.fetchFn } : {}) }),
-      encryptionKey: key, phoneNumberId, log
+      encryptionKey: key, phoneNumberId, log,
+      testPhones: new Set((env.PLUSMEDIK_TEST_PHONES ?? "").split(/[\s,;]+/).map((phone) => phone.replace(/\D/g, "")).filter((phone) => phone.length >= 8))
     });
   } catch (error) {
     return fail(error instanceof CrmConfigError && error.code === "TOKEN" ? "INVALID_TOKEN" : "INVALID_URL");

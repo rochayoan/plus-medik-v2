@@ -23,13 +23,14 @@ export const REASON_DESCRIPTIONS: Record<CrmReason, string> = {
 
 // Etiqueta del caso para quien lo recibe en el CRM (convenio/aliado, domicilio). NO es un motivo de la cola (la base guarda uno de CRM_REASONS): solo encabeza el texto `failureReason`, que el CRM lee por su
 // prefijo para avisar y etiquetar. Texto fijo, sin datos del paciente.
-export const CASE_LABELS = ["ALLIED_LAB", "HOME_VISIT", "RESULTS_READY", "AT_DOOR"] as const;
+export const CASE_LABELS = ["ALLIED_LAB", "HOME_VISIT", "RESULTS_READY", "AT_DOOR", "STUDY_TO_CONFIRM"] as const;
 export type CaseLabel = (typeof CASE_LABELS)[number];
 export const LABEL_DESCRIPTIONS: Record<CaseLabel, string> = {
   ALLIED_LAB: "convenio o laboratorio aliado: lo atiende una persona (el agente no responde)",
   HOME_VISIT: "solicitud de estudio a domicilio: un asesor confirma disponibilidad y costo",
   RESULTS_READY: "el paciente pregunta por un resultado ya realizado: recepción verifica con el nombre del paciente o el comprobante",
-  AT_DOOR: "URGENTE: el paciente está en la puerta del laboratorio y la encuentra cerrada; se le dijo que el personal ya fue avisado"
+  AT_DOOR: "URGENTE: el paciente está en la puerta del laboratorio y la encuentra cerrada; se le dijo que el personal ya fue avisado",
+  STUDY_TO_CONFIRM: "pidió estudios que no están en el catálogo: la doctora confirma si se realizan, el precio y el tiempo de entrega"
 };
 
 export interface DetectedTest {
@@ -83,7 +84,8 @@ export const eventIdOf = (originRunId: string): string => `plusmedik-review:${or
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const clip = (text: string, max: number) => text.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, max);
 
-export function buildPayload(input: CaseInput, originRunId: string, phoneNumberId: string): CrmReviewPayload {
+// `testPhones`: números de prueba del dueño (PLUSMEDIK_TEST_PHONES). Sus casos llevan agentResult.test = true: el CRM los muestra como «Prueba» y SIN alarma.
+export function buildPayload(input: CaseInput, originRunId: string, phoneNumberId: string, testPhones?: ReadonlySet<string>): CrmReviewPayload {
   if (!UUID.test(originRunId)) throw new PayloadError("INVALID_RUN");
   const phone = input.contactPhone.replace(/\D/g, "");
   if (phone.length < 8 || phone.length > 20) throw new PayloadError("INVALID_PHONE");
@@ -98,7 +100,8 @@ export function buildPayload(input: CaseInput, originRunId: string, phoneNumberI
   const failureReason = clip((input.label ? [`${input.label}: ${LABEL_DESCRIPTIONS[input.label]}`, ...described] : described).join("; "), LIMITS.failureReason);
   const agentResult: Record<string, unknown> = {
     source: "plusmedik-v2", schema: 1, kind: input.kind, reasonCodes: input.label ? [input.label, ...reasons] : reasons,
-    ...(input.sessionId ? { sessionId: input.sessionId } : {}), ...(input.itemStatus ? { itemStatus: input.itemStatus } : {}), ...(input.counts ? { counts: input.counts } : {})
+    ...(input.sessionId ? { sessionId: input.sessionId } : {}), ...(input.itemStatus ? { itemStatus: input.itemStatus } : {}), ...(input.counts ? { counts: input.counts } : {}),
+    ...(testPhones?.has(phone) ? { test: true } : {})
   };
   let detectedTests: DetectedTest[] = (input.detectedTests ?? []).slice(0, LIMITS.detectedTests).map((test) => ({
     ...(test.catalogTestId && UUID.test(test.catalogTestId) ? { catalogTestId: test.catalogTestId } : {}), name: clip(test.name, LIMITS.name), ...(test.ambiguousGroup !== undefined ? { ambiguousGroup: test.ambiguousGroup } : {})
