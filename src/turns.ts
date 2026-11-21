@@ -1,7 +1,7 @@
 import { MENU_OPTIONS, mightBeMenuChoice } from "./greeting-menu.js";
 import { repeatCandidate } from "./attention-filter.js";
 import { withPhotoContextWait } from "./photo-context-wait.js";
-import { looksLikeIdentification, resultsCheckMessage, routeResultsMessage } from "./results-silence.js";
+import { asksOtherPersonPickup, decideResultsAction, isCourtesy, looksLikeIdentification, patientDataIn, RESULTS_SIGNATURES, resultsReplyBody, routeResultsMessage, type ResultsAction } from "./results-silence.js";
 import { audioFailureProducer, resolveAudioTurns } from "./audio-turns.js";
 import type { AudioFailureCode } from "./audio/types.js";
 import { engineCanDecide, engineReply, instantPhotoReply, photoOutcomeOf, shadowAfter, shadowBefore } from "./batch-engine.js";
@@ -388,7 +388,7 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
     if (textIndices.length !== indices.length && routing !== "READY_CHECK") return [];
     return [[from, routing] as const];
   }));
-  // Consulta por un resultado ya realizado: responde UNA vez (el último mensaje del lote) con el texto cálido de recepción y deriva el caso al CRM; el resto del lote se cierra sin respuesta.
+  // Consultas por un resultado ya realizado (READY_CHECK): las atiende el camino 2 de más abajo; aquí solo se mide si vienen del menú.
   const readyCheck = new Set([...resultsRouting.entries()].filter(([, action]) => action === "READY_CHECK").map(([from]) => from));
   // Medición: «resultados» escrito con palabras justo después del menú también es elegir esa opción (solo se lee el historial para estos contactos y si la medición está activa).
   const menuEvents = deps.turns?.menuEvents;
@@ -401,21 +401,31 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
       if (key && (await afterMenu({ from, messageId: turns[indices[0]!]!.messageId, excludeIds: indices.map((index) => turns[index]!.messageId) }).catch(() => false))) void menuEvents(key, { event: "CHOSEN", option: "RESULTS", via: "WORDS" });
     }
   }
-  const readyResponder = new Map([...perContact.entries()].filter(([from]) => readyCheck.has(from)).map(([from, indices]) => [from, indices[indices.length - 1]!] as const));
   const resultsOnly = new Set([...resultsRouting.entries()].filter(([, action]) => action === "SILENT").map(([from]) => from));
-  // Ya se le pidió el dato de un resultado y espera a una persona: lo que llega ahora y parece ese dato (un nombre, un comprobante, una foto) no se contesta; la persona de recepción lo atiende.
-  const awaitingPerson = deps.turns?.awaitingPerson;
-  if (awaitingPerson) {
-    for (const [from, indices] of perContact) {
-      if (resultsRouting.has(from)) continue;
-      if (!indices.every((index) => turns[index]!.kind === "IMAGE" || (turns[index]!.kind === "TEXT" && typeof turns[index]!.text === "string" && looksLikeIdentification(turns[index]!.text!)))) continue;
-      const contactKey = deps.turns!.contactKeyFor(from);
-      if (!contactKey) continue;
-      if (await Promise.resolve(awaitingPerson(contactKey)).catch(() => false)) {
-        resultsOnly.add(from);
-        deps.log("results_follow_up_silenced", {});
-      }
+  // CAMINO 2 «Consultar resultados» (src/results-silence.ts, decisión del dueño 21-nov): pedir los datos, pedir el nombre completo UNA vez si falta, agradecer y desde ahí silencio (lo atiende la Dra). El paso
+  // del contacto se lee de los mensajes recientes solo si el lote es una consulta de resultados o parece el dato pedido (un nombre, una foto, «gracias»). Responde UNA vez por lote (en el último texto); el
+  // resto del lote se cierra sin respuesta. Las fotos no se analizan.
+  const resultsStage = deps.turns?.resultsStage;
+  const resultsReply = new Map<string, { action: Exclude<ResultsAction, "SILENT">; responder: number }>();
+  for (const [from, indices] of perContact) {
+    const routing = resultsRouting.get(from);
+    if (routing === "SILENT" || routing === "OFFICE_HOURS") continue;
+    const textOf = (index: number): string | undefined => (turns[index]!.kind === "TEXT" && typeof turns[index]!.text === "string" ? turns[index]!.text! : undefined);
+    const texts = indices.flatMap((index) => textOf(index) ?? []);
+    const hasImage = indices.some((index) => turns[index]!.kind === "IMAGE");
+    const query = routing === "READY_CHECK";
+    const dataLike = indices.every((index) => turns[index]!.kind === "IMAGE" || (textOf(index) !== undefined && (looksLikeIdentification(textOf(index)!) || isCourtesy(textOf(index)!))));
+    if (!query && !dataLike) continue;
+    const stage = resultsStage ? await resultsStage({ from, messageId: turns[indices[0]!]!.messageId, excludeIds: indices.map((index) => turns[index]!.messageId) }).catch(() => undefined) : undefined;
+    const action = decideResultsAction({ stage, query, data: patientDataIn(texts, hasImage), courtesy: !hasImage && texts.length > 0 && texts.every(isCourtesy), pickup: texts.some(asksOtherPersonPickup) });
+    if (!action) continue;
+    deps.log("results_path", { action, stage: stage ?? "NONE" });
+    if (action === "SILENT") {
+      resultsOnly.add(from);
+      continue;
     }
+    const textIndices = indices.filter((index) => textOf(index) !== undefined);
+    resultsReply.set(from, { action, responder: textIndices.length > 0 ? textIndices[textIndices.length - 1]! : indices[indices.length - 1]! });
   }
   // Si también pregunta por el HORARIO GENERAL, procesar exclusivamente
   // esa consulta. Nunca entregar al modelo ni al conocimiento el texto privado
@@ -430,25 +440,22 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
     const done = await ctx.persist("close", (audit, runId, lease) => audit.recordIgnored(runId, "NO_REPLY", lease));
     return done ? { kind: "none" } : { kind: "none" };
   };
-  // La respuesta cálida solo sale si el caso quedó REGISTRADO en el CRM (no se promete que alguien verifica si nadie lo va a ver); si no, se calla.
-  const readyProducer = (turn: IncomingTurn): TurnProducer => async (ctx) => {
+  // Los textos del camino 2 salen siempre (ya no dependen del CRM). Con los datos reunidos (THANKS), el caso va además a la cola del CRM si existe: mejor esfuerzo, la respuesta no depende de eso.
+  const resultsProducer = (turn: IncomingTurn, action: Exclude<ResultsAction, "SILENT">): TurnProducer => async (ctx) => {
     const crm = deps.turns?.crmHandoff;
-    let registered = false;
-    if (crm) {
+    if (action === "THANKS" && crm) {
       try {
-        const [outcome] = await crm.submit(ctx, [{ kapsoMessageId: turn.messageId, contactPhone: turn.from, kind: "CONVERSATION", reasons: ["HUMAN_REQUEST"], label: "RESULTS_READY" }]);
-        registered = outcome?.state === "REGISTERED";
+        await crm.submit(ctx, [{ kapsoMessageId: turn.messageId, contactPhone: turn.from, kind: "CONVERSATION", reasons: ["HUMAN_REQUEST"], label: "RESULTS_READY" }]);
       } catch {
-        registered = false;
+        deps.log("results_crm_submit_failed", {});
       }
     }
-    if (!registered) return silenceProducer(ctx);
-    return { kind: "reply", body: resultsCheckMessage(new Date()), result: "conversation", processingStatus: "COMPLETED", stale: "NONE", signature: "RESULTS_READY_CHECK" };
+    return { kind: "reply", body: resultsReplyBody(action, new Date()), result: "conversation", processingStatus: "COMPLETED", stale: "NONE", signature: RESULTS_SIGNATURES[action] };
   };
   // Un contacto del PILOTO (solo mensajes de texto o audio) también se atiende como lote, aunque traiga un solo mensaje: así su respuesta sale por la misma ruta de un solo envío por lote.
   const pilot = deps.turns?.agentPilot;
   const isPilotBatch = (from: string, indices: readonly number[]) => Boolean(pilot?.isPilot(from)) && indices.every((index) => turns[index]!.kind === "TEXT" || turns[index]!.kind === "AUDIO");
-  const batched = new Set([...perContact.entries()].filter(([from, indices]) => !resultsOnly.has(from) && !readyCheck.has(from) && (indices.length > 1 || isPilotBatch(from, indices))).map(([from]) => from));
+  const batched = new Set([...perContact.entries()].filter(([from, indices]) => !resultsOnly.has(from) && !resultsReply.has(from) && (indices.length > 1 || isPilotBatch(from, indices))).map(([from]) => from));
 
   const claims = new Map<number, ClaimedTurn>();
   // Mensajes que no se reclamaron porque una persona tiene la palabra (pausa humana): no se atienden solos, pero la memoria en sombra los registra como pendientes.
@@ -504,10 +511,11 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
       await resolveFor([index]);
       const turn = turns[index]!;
       try {
-        const base = readyCheck.has(turn.from) ? (readyResponder.get(turn.from) === index ? readyProducer(turn) : silenceProducer) : resultsOnly.has(turn.from) ? silenceProducer : producerFor(turn, deps)!;
+        const results = resultsReply.get(turn.from);
+        const base = results ? (results.responder === index ? resultsProducer(turn, results.action) : silenceProducer) : resultsOnly.has(turn.from) ? silenceProducer : producerFor(turn, deps)!;
         // Una foto que se atiende SOLA y que no se pudo cotizar espera un rato a que llegue el texto del paciente (ver src/photo-context-wait.ts); sin la configuración, responde de inmediato.
         const photoWait = deps.turns?.photoContextWait;
-        const producer = turn.kind === "IMAGE" && !readyCheck.has(turn.from) && !resultsOnly.has(turn.from) && photoWait ? withPhotoContextWait(base, turn.from, { ...photoWait, contactKeyFor: deps.turns!.contactKeyFor, log: deps.log }) : base;
+        const producer = turn.kind === "IMAGE" && !resultsReply.has(turn.from) && !resultsOnly.has(turn.from) && photoWait ? withPhotoContextWait(base, turn.from, { ...photoWait, contactKeyFor: deps.turns!.contactKeyFor, log: deps.log }) : base;
         const result = await claimed.run(producer);
         reports[index] = { messageId: turn.messageId, result };
         if (resultsOnly.has(turn.from)) deps.log("results_query_silenced", { kind: "RESULTS_ONLY", sent: false });

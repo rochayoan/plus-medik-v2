@@ -8,7 +8,7 @@ import { greetingMenu, menuChoiceOf } from "../src/greeting-menu.js";
 import { resolveAgentSettings } from "../src/agent/openai.js";
 import { createAgentPilot } from "../src/agent/pilot.js";
 import { answerFromBusinessData } from "../src/business-answers.js";
-import { resultsCheckMessage, routeResultsMessage } from "../src/results-silence.js";
+import { decideResultsAction, patientDataIn, resultsReplyBody, routeResultsMessage } from "../src/results-silence.js";
 import { loadActiveCatalog } from "../src/supabase-catalog.js";
 
 const settings = resolveAgentSettings(process.env, () => {});
@@ -81,7 +81,11 @@ for (const [i, caso] of selected.entries()) {
   if (texts.join() !== caso.texts.join()) console.log(`   número del menú → «${texts.join(" ")}»`);
   // 2. resultados → recepción (texto fijo + caso al CRM)
   const routing = routeResultsMessage(texts.join("\n"));
-  if (routing === "READY_CHECK") { console.log(`   → RECEPCIÓN (resultados${handoff ? "" : "; sin CRM se calla"}): ${resultsCheckMessage(new Date())}\n`); continue; }
+  if (routing === "READY_CHECK") {
+    const action = decideResultsAction({ query: true, data: patientDataIn(texts, false), courtesy: false }) ?? "ASK";
+    console.log(`   → RESULTADOS (${action}): ${action === "SILENT" ? "silencio" : resultsReplyBody(action, new Date())}\n`);
+    continue;
+  }
   if (routing === "SILENT") { console.log("   → se calla (interpretación de resultados: la atiende la Dra)\n"); continue; }
   // 3. el piloto real (menú fijo del saludo, número inválido, persona, agente, enlace del mapa)
   const logs: Array<Record<string, unknown>> = [];

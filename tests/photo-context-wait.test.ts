@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Produced, TurnContext } from "../src/guarded-turn.js";
 import { looksLikeIdentification } from "../src/results-silence.js";
-import { createAwaitingPersonCheck } from "../src/results-follow-up.js";
 import { createNewerTurnCheck, DEFAULT_PHOTO_CONTEXT_WAIT_SECONDS, resolvePhotoContextWaitMs, withPhotoContextWait } from "../src/photo-context-wait.js";
 
 const KEY = "b".repeat(64);
@@ -64,16 +63,6 @@ describe("lectura del último turno del contacto", () => {
 });
 
 describe("el dato que llega tras pedir nombre/comprobante de un resultado", () => {
-  const check = (rows: unknown, ok = true, throws = false) => createAwaitingPersonCheck({ baseUrl: "https://x.supabase.co", serviceKey: "k", now: () => Date.parse("2026-11-11T22:00:00Z"), fetchFn: (async (url: string) => { if (throws) throw new Error("red"); (check as unknown as { last?: string }).last = url; return new Response(JSON.stringify(rows), { status: ok ? 200 : 500 }); }) as unknown as typeof fetch });
-  it("espera a una persona solo si hay una marca RESULTS_READY_CHECK de las últimas 6 h; ante cualquier duda, no", async () => {
-    expect(await check([{ run_id: "r" }])(KEY)).toBe(true);
-    expect((check as unknown as { last: string }).last).toContain("signature=eq.RESULTS_READY_CHECK");
-    expect((check as unknown as { last: string }).last).toContain(encodeURIComponent("2026-11-11T16:00:00.000Z"));
-    expect(await check([])(KEY)).toBe(false);
-    expect(await check({}, false)(KEY)).toBe(false);
-    expect(await check([], true, true)(KEY)).toBe(false);
-    expect(await check([{ run_id: "r" }])("clave-invalida")).toBe(false);
-  });
   it("solo lo que parece el dato pedido se calla: un nombre sí; una pregunta o un pedido propio, no", () => {
     for (const text of ["Porfidio López Rivero", "María Lenny Cuellar Rojas", "Orden 29150", "Jonh Emmanuel Ramirez Choque 4 años"]) expect(looksLikeIdentification(text)).toBe(true);
     for (const text of ["¿Y cuánto tarda?", "Quiero cotizar un hemograma", "Necesito hablar con una persona", "Hacen estudios a domicilio", "Cuál es la dirección", "Este es el nombre del paciente que necesito para el resultado de la semana pasada urgente", ""]) expect(looksLikeIdentification(text)).toBe(false);
