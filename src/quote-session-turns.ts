@@ -184,8 +184,9 @@ export function sessionImageProducer(image: IncomingImage, deps: QuoteDeps, conf
 
 // ───────────────────────────── texto ─────────────────────────────
 
-function replayReply(read: Extract<QuoteReadResult, { state: "replay" }>, texts: QuoteTexts): Produced {
-  if (read.outcome === "QUOTED" && read.lines && read.lines.length > 0) return { kind: "reply", body: formatSessionQuote(read.lines, 0, texts), result: "quoted", processingStatus: "COMPLETED", stale: "NONE" };
+// Los precios salen de las líneas guardadas (nunca se recalculan); el catálogo solo aporta el tiempo de entrega, igual que en el primer envío.
+function replayReply(read: Extract<QuoteReadResult, { state: "replay" }>, texts: QuoteTexts, catalog?: readonly CatalogStudy[]): Produced {
+  if (read.outcome === "QUOTED" && read.lines && read.lines.length > 0) return { kind: "reply", body: formatSessionQuote(read.lines, 0, texts, catalog ? { catalog } : {}), result: "quoted", processingStatus: "COMPLETED", stale: "NONE" };
   if (read.outcome === "NEEDS_REVIEW") return plain(texts.review);
   if (read.outcome === "NEEDS_RESEND") return plain(texts.resend);
   if (read.outcome === "CANCELLED") return plain(texts.cancelled);
@@ -287,11 +288,18 @@ export function sessionTextProducer(turn: SessionTurn, deps: QuoteDeps, config: 
     if (!read) return plain(texts.waiting);
     if (read.state === "replay") {
       if (read.outcome !== "NEEDS_REVIEW") {
-        const reply = replayReply(read, texts);
-        if (reply.kind === "reply" && reply.result === "quoted" && !(read.lines && deps.quotePreparations)) return { ...reply, body: compactQuote(reply.body) };
-        if (reply.kind !== "reply" || reply.result !== "quoted" || !read.lines || !deps.quotePreparations) return reply;
+        let catalog: readonly CatalogStudy[] | undefined;
+        if (read.outcome === "QUOTED") {
+          try {
+            catalog = await deps.loadCatalog();
+          } catch {
+            catalog = undefined;
+          }
+        }
+        const reply = replayReply(read, texts, catalog);
+        if (reply.kind === "reply" && reply.result === "quoted" && !(read.lines && deps.quotePreparations && catalog)) return { ...reply, body: compactQuote(reply.body) };
+        if (reply.kind !== "reply" || reply.result !== "quoted" || !read.lines || !deps.quotePreparations || !catalog) return reply;
         try {
-          const catalog = await deps.loadCatalog();
           const body = await deps.quotePreparations(reply.body, read.lines.map((line) => line.studyId), catalog, ctx);
           return { ...reply, body: compactQuote(body) };
         } catch {

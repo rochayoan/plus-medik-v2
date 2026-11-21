@@ -301,10 +301,17 @@ async function hadRecentQuote(ctx: TurnContext, deps: QuoteDeps): Promise<boolea
 
 async function replayOverride(read: Extract<Settled, { state: "replay" }>, deps: QuoteDeps, ctx: TurnContext, texts: QuoteTexts): Promise<CoreOverride> {
   if (read.outcome === "QUOTED" && read.lines && read.lines.length > 0) {
-    let body = formatSessionQuote(read.lines, 0, texts);
-    if (deps.quotePreparations) {
+    // Los precios salen de las líneas guardadas (nunca se recalculan); el catálogo solo aporta el tiempo de entrega, igual que en el primer envío. Si no carga, la cotización sale igual, sin ese dato.
+    let catalog: readonly CatalogStudy[] | undefined;
+    try {
+      catalog = await deps.loadCatalog();
+    } catch {
+      deps.log("quote_replay_catalog_unavailable", {});
+    }
+    let body = formatSessionQuote(read.lines, 0, texts, catalog ? { catalog } : {});
+    if (deps.quotePreparations && catalog) {
       try {
-        body = await deps.quotePreparations(body, read.lines.map((line) => line.studyId), await deps.loadCatalog(), ctx);
+        body = await deps.quotePreparations(body, read.lines.map((line) => line.studyId), catalog, ctx);
       } catch {
         deps.log("quote_preparation_skipped", { reason: "APPEND_FAILED" });
       }
