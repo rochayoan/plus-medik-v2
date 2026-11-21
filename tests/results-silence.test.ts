@@ -91,7 +91,7 @@ describe("resultados: silencio determinista sin IA ni mensajes", () => {
     expect(sendText).toHaveBeenCalledWith(from, "Horario general confirmado");
   });
 
-  it("todo un lote de resultados se audita como NO_REPLY; ningún modelo, catálogo ni Kapso se llama", async () => {
+  it("un lote de resultados: UNA respuesta fija (pide los datos) en el último mensaje, el resto NO_REPLY; ningún modelo, catálogo ni análisis se llama", async () => {
     const handler = vi.fn(async () => ({ body: "NO DEBE SALIR" }));
     const recordIgnored = vi.fn(async () => undefined);
     const audit = {
@@ -113,16 +113,16 @@ describe("resultados: silencio determinista sin IA ni mensajes", () => {
       turns: { handlers: { text: handler }, contactKeyFor: () => "a".repeat(64) } as NonNullable<QuoteDeps["turns"]>
     };
     await processTurns([turn("¿Ya están mis resultados?", "r1"), turn("Me pasan el link por favor", "r2")], deps);
-    expect(recordIgnored).toHaveBeenCalledTimes(2);
+    expect(recordIgnored).toHaveBeenCalledTimes(1);
     expect(recordIgnored).toHaveBeenCalledWith("run-1", "NO_REPLY", lease);
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect((sendText.mock.calls[0] as unknown as [string, string])[1]).toContain("Para verificar tu resultado, pásame por favor:");
     expect(handler).not.toHaveBeenCalled();
-    expect(sendText).not.toHaveBeenCalled();
     expect(loadCatalog).not.toHaveBeenCalled();
     expect(analyze).not.toHaveBeenCalled();
-    expect(audit.reserveSend).not.toHaveBeenCalled();
   });
 
-  describe("consulta por un resultado ya realizado: respuesta cálida y caso al CRM", () => {
+  describe("camino 2: la respuesta ya NO depende del CRM (decisión del dueño, 21-nov)", () => {
     const build = (state: "REGISTERED" | "FAILED" | "none") => {
       const recordIgnored = vi.fn(async () => undefined);
       const audit = {
@@ -146,24 +146,35 @@ describe("resultados: silencio determinista sin IA ni mensajes", () => {
       } as unknown as QuoteDeps;
       return { deps, sendText, submit, analyze, handler };
     };
-    it("registrado en el CRM: UNA respuesta cálida, la foto no se analiza y el caso lleva la etiqueta RESULTS_READY", async () => {
+    it("con la foto del comprobante en el mismo lote ya están los datos: agradece directo, la foto no se analiza y el caso al CRM lleva la etiqueta RESULTS_READY", async () => {
       const { deps, sendText, submit, analyze, handler } = build("REGISTERED");
       const image: IncomingTurn = { kind: "IMAGE", from, messageId: "img-1", mediaId: "media-1" };
       await processTurns([image, turn("Quería saber si ya están listos mis resultados", "t-1")], deps);
       expect(sendText).toHaveBeenCalledTimes(1);
-      const [, body] = sendText.mock.calls[0] as unknown as [string, string];
-      expect(body).toMatch(/^(Buenos días|Buenas tardes|Buenas noches), gracias por preferirnos 😊 Verifico. Ve pasándome el nombre completo del paciente y su carnet de identidad, o el comprobante de pago/);
+      expect((sendText.mock.calls[0] as unknown as [string, string])[1]).toBe("Gracias 🙏 ya tengo tus datos. La doctora verifica tu resultado y te lo envía por aquí.");
       expect(submit).toHaveBeenCalledTimes(1);
-      expect((submit.mock.calls[0] as unknown as [unknown, Array<{ label: string }>])[1][0]!.label).toBe("RESULTS_READY");
+      expect((submit.mock.calls[0] as unknown as [unknown, Array<{ label: string; kapsoMessageId: string }>])[1][0]).toMatchObject({ label: "RESULTS_READY", kapsoMessageId: "t-1" });
       expect(analyze).not.toHaveBeenCalled();
       expect(handler).not.toHaveBeenCalled();
     });
-    it("el caso no quedó registrado o no hay cola al CRM: no se promete nada, silencio", async () => {
-      for (const state of ["FAILED", "none"] as const) {
-        const { deps, sendText } = build(state);
+    it("sin datos: pide los datos SIEMPRE, se registre o no el caso en el CRM (y sin CRM no se intenta nada)", async () => {
+      for (const state of ["REGISTERED", "FAILED", "none"] as const) {
+        const { deps, sendText, submit } = build(state);
         await processTurns([turn("¿Ya están mis resultados?", "t-2")], deps);
-        expect(sendText).not.toHaveBeenCalled();
+        expect(sendText).toHaveBeenCalledTimes(1);
+        expect((sendText.mock.calls[0] as unknown as [string, string])[1]).toMatch(/^(Buenos días|Buenas tardes|Buenas noches), gracias por preferirnos 😊 Para verificar tu resultado, pásame por favor:/);
+        expect(submit).not.toHaveBeenCalled();
       }
+    });
+    it("con el nombre completo en el mismo mensaje: agradece directo, aunque el CRM falle", async () => {
+      const { deps, sendText } = build("FAILED");
+      await processTurns([turn("Buenas tardes, ya están mis resultados? Mi nombre es Carla Mendoza Rivas", "t-3")], deps);
+      expect((sendText.mock.calls[0] as unknown as [string, string])[1]).toContain("ya tengo tus datos");
+    });
+    it("con solo un nombre («señor Porfirio»): pide el nombre completo", async () => {
+      const { deps, sendText } = build("none");
+      await processTurns([turn("Cómo va el resultado de señor Porfirio", "t-4")], deps);
+      expect((sendText.mock.calls[0] as unknown as [string, string])[1]).toBe("¿Me pasas el nombre completo del paciente (nombre y apellidos), por favor? 🙏");
     });
   });
 });

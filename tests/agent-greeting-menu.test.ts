@@ -102,7 +102,7 @@ describe("el piloto responde el menú SIN modelo", () => {
 describe("en los turnos: «2» después del menú pide los datos del resultado", () => {
   const lease = { owner: "o", fence: 1 };
   const from = "59170000000";
-  it("se traduce a la opción y recepción responde con el texto de resultados (caso al CRM)", async () => {
+  it("se traduce a la opción y el agente pide los datos con los que la Dra verifica (el caso al CRM va recién al agradecer los datos)", async () => {
     const audit = {
       claim: vi.fn(async () => ({ kind: "claimed" as const, runId: "run-m", lease })),
       renewLease: vi.fn(async () => true),
@@ -125,8 +125,8 @@ describe("en los turnos: «2» después del menú pide los datos del resultado",
     await processTurns([turn], deps);
     expect(menuChoice).toHaveBeenCalledTimes(1);
     expect(sendText).toHaveBeenCalledTimes(1);
-    expect((sendText.mock.calls[0] as unknown as [string, string])[1]).toMatch(/carnet de identidad, o el comprobante de pago/);
-    expect(submit).toHaveBeenCalledTimes(1);
+    expect((sendText.mock.calls[0] as unknown as [string, string])[1]).toMatch(/Para verificar tu resultado, pásame por favor:\n👤 Nombre completo del paciente\n🧪 Qué estudio te hiciste y qué día\no la foto de tu comprobante de pago 🧾$/u);
+    expect(submit).not.toHaveBeenCalled();
   });
   it("un texto que no es un número ni siquiera lee el historial", async () => {
     const menuChoice = vi.fn(async () => undefined);
