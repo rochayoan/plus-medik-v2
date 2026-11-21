@@ -3,11 +3,11 @@ import { searchCatalog } from "../catalog-search.js";
 import { normalizeStudyKey } from "../consensus.js";
 import type { ConversationReader } from "../conversation-state-store.js";
 import { detectTopics, type KnowledgeAnswer } from "../knowledge-answers.js";
-import { formatGroupedOptions, OPTIONS_PER_MENTION, OPTIONS_TOTAL_LIMIT } from "../quote-options.js";
+import { formatDoctorConfirms, formatGroupedOptions, OPTIONS_PER_MENTION, OPTIONS_TOTAL_LIMIT } from "../quote-options.js";
 import { evaluateSession, extractWithNotes, formatSessionQuote, isKnownStudyPhrase, preferredByMethod, preferredBySample, QUOTE_TEXTS, type SessionItem } from "../quote-session.js";
 import { splitStudyMentions } from "../study-mentions.js";
 import type { CatalogStudy } from "../types.js";
-import { emojiFor, formatBs } from "../whatsapp-quote.js";
+import { emojiFor, formatBs, turnaroundSuffix } from "../whatsapp-quote.js";
 import type { Fact, ToolCall, ToolContext, ToolDef, ToolErrorCode, ToolRun } from "./contracts.js";
 
 // Herramientas del agente conversacional: SOLO LECTURA y deterministas. Envuelven lo que ya funciona (conocimiento aprobado, catálogo, motor de cotización, memoria); no inventan datos, no envían y no derivan.
@@ -120,7 +120,7 @@ const SUGGESTION_LIMIT = 5;
 function formatStudyOptions(studies: readonly CatalogStudy[]): string | undefined {
   const valid = studies.filter((study) => study.active && Number.isFinite(study.priceBs) && study.priceBs >= 0).slice(0, SUGGESTION_LIMIT);
   if (valid.length === 0) return undefined;
-  return ["🩺 *PlusMedik* · Opciones que encontré", "", ...valid.map((study) => `${emojiFor(study.name)} ${study.name} — ${formatBs(study.priceBs)}${study.turnaroundText ? ` (entrega: ${study.turnaroundText})` : ""}`), "", "Dime cuál te interesa y te armo la cotización. 😊"].join("\n");
+  return ["🩺 *PlusMedik* · Opciones que encontré", "", ...valid.map((study) => `${emojiFor(study.name)} ${study.name} — ${formatBs(study.priceBs)}${study.turnaroundText ? turnaroundSuffix(study.turnaroundText) : ""}`), "", "Dime cuál te interesa y te armo la cotización. 😊"].join("\n");
 }
 
 // Qué estudios del catálogo corresponden a lo que el paciente nombró. NUNCA devuelve precios: un precio solo llega al paciente por la cotización del catálogo.
@@ -466,19 +466,23 @@ export function quoteStudiesTool(options: { loadCatalog: () => Promise<readonly 
       const facts: Array<Omit<Fact, "id">> = [];
       if (sure.size > 0) facts.push({ source: "QUOTE_ENGINE", text: `Estudios identificados con certeza en el catálogo (${sure.size}): ${[...sure.values()].map((study) => study.name).join("; ")}`, refs: [...sure.keys()].map((id) => `study:${id}`) });
       if (possible.length > 0) facts.push({ source: "CATALOG", text: `Estudios POSIBLES para lo que pidió, sin confirmar (el sistema los muestra numerados con su precio, fuera del total, agrupados por lo que pidió): ${optionGroups.map((item) => `«${item.label}»: ${item.studies.slice(0, OPTIONS_PER_MENTION).map((study) => study.name).join("; ")}`).join(" · ")}`, refs: possible.slice(0, OPTIONS_TOTAL_LIMIT).map((study) => `option:${study.id}`) });
-      if (notFound.length > 0) facts.push({ source: "QUOTE_ENGINE", text: `No se encontró en el catálogo nada parecido a: ${notFound.join("; ")}`, refs: [] });
+      // Lo que no se parece a nada del catálogo: lo confirma LA DOCTORA (indicación del laboratorio, 20-nov). El sistema lo dice en un bloque fijo; el modelo no debe decir que no lo tenemos.
+      if (notFound.length > 0) facts.push({ source: "QUOTE_ENGINE", text: `Estudios que confirma la doctora (el sistema ya lo dice en un bloque debajo, con la lista): ${notFound.join("; ")}. NO sabes si se realizan: no digas que sí ni que no (ni «podemos hacerlos» ni «no los tenemos»), no menciones otros laboratorios y no los enumeres en tu texto; solo que esos se los confirma la doctora.`, refs: [] });
       const blocks: string[] = [];
       if (sure.size > 0) {
         const item: SessionItem = { id: "agent", seq: 1, kind: "TEXT", status: "RESOLVED", studyIds: [...sure.keys()], ambiguous: [], unresolved: 0, reasons: [] };
         const evaluation = evaluateSession([item], [...catalog]);
         if (evaluation.kind === "QUOTE") {
           const complete = possible.length === 0 && notFound.length === 0;
-          facts.push({ source: "QUOTE_ENGINE", text: complete ? quoteNote : `${quoteNote} La cotización es PARCIAL: solo suma los estudios identificados con certeza.${possible.length > 0 ? " Debajo van los POSIBLES con su precio: pregunta en una frase si quiere agregar alguno." : ""}${notFound.length > 0 ? " Di cuál no encontraste." : ""}`, refs: [] });
-          blocks.push(formatSessionQuote(evaluation.lines, evaluation.duplicates, QUOTE_TEXTS));
+          facts.push({ source: "QUOTE_ENGINE", text: complete ? quoteNote : `${quoteNote} La cotización es PARCIAL: solo suma los estudios identificados con certeza.${possible.length > 0 ? " Debajo van los POSIBLES con su precio: pregunta en una frase si quiere agregar alguno." : ""}${notFound.length > 0 ? " Debajo también va el aviso de los que confirma la doctora." : ""}`, refs: [] });
+          // Cada estudio con su tiempo de entrega junto al precio (dueño, 20-nov); «Tu cotización»: el paciente escribió los estudios, no mandó una receta.
+          blocks.push(formatSessionQuote(evaluation.lines, evaluation.duplicates, QUOTE_TEXTS, { catalog, title: "Tu cotización" }));
         }
       }
       const optionsBlock = formatGroupedOptions(optionGroups, blocks.length > 0);
       if (optionsBlock) blocks.push(optionsBlock);
+      const doctorBlock = formatDoctorConfirms(notFound);
+      if (doctorBlock) blocks.push(doctorBlock);
       if (blocks.length > 0) return { facts, blocks };
       return facts.length > 0 ? { facts } : { noData: "NOT_QUOTABLE" };
     }

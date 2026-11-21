@@ -243,7 +243,7 @@ describe.skipIf(!bin)("ejecutores del plan de un lote contra PostgreSQL real", (
     const p = patient();
     const w = setup();
     await batch(w, p.phone, ["quiero cotizar", "hemograma", "xhq"]);
-    expect(lastBody(w)).toContain("No encontré en nuestro catálogo: «xhq»");
+    expect(lastBody(w)).toContain("Estos estudios te los confirma la doctora por este chat: «xhq»");
     expect(hasPrice(lastBody(w))).toBe(true);
     expect(await itemStatuses(p.key)).toEqual(["RESOLVED"]);
     expect((await sessionsOf(p.key))[0]).toMatchObject({ status: "QUOTED" });

@@ -1,6 +1,6 @@
 import type { AnalysisResult } from "./analyze.js";
 import type { CatalogStudy } from "./types.js";
-import { emojiFor, formatBs } from "./whatsapp-quote.js";
+import { emojiFor, formatBs, turnaroundSuffix } from "./whatsapp-quote.js";
 
 // Estudios POSIBLES (dudosos): lo que el motor no pudo confirmar con certeza pero que el catálogo sí tiene. En vez de rechazarlos, se muestran con su precio del catálogo, NUMERADOS y FUERA del total, para que
 // el paciente confirme cuál quiso (decisión del dueño, 19-nov: «que mi agente no sea tan rechazador»). Lo usan la cotización por texto del agente y la de fotos. Nunca se suman ni se cotizan solos.
@@ -14,7 +14,7 @@ const priced = (study: CatalogStudy): boolean => study.active && Number.isFinite
 export function formatDoubtfulOptions(studies: readonly CatalogStudy[], afterQuote: boolean): string | undefined {
   const valid = studies.filter(priced).slice(0, DOUBTFUL_LIMIT);
   if (valid.length === 0) return undefined;
-  const lines = valid.map((study, index) => `${index + 1}. ${emojiFor(study.name)} ${shortName(study.name)} — ${formatBs(study.priceBs)}${study.turnaroundText ? ` (entrega: ${study.turnaroundText})` : ""}`);
+  const lines = valid.map((study, index) => `${index + 1}. ${emojiFor(study.name)} ${shortName(study.name)} — ${formatBs(study.priceBs)}${study.turnaroundText ? turnaroundSuffix(study.turnaroundText) : ""}`);
   return afterQuote
     ? ["🔎 *Posiblemente también pediste alguno de estos* (no están sumados en el total):", "", ...lines, "", "¿Quieres que agregue alguno a tu cotización? Responde con el número o el nombre. 😊"].join("\n")
     : ["🩺 *PlusMedik* · Opciones que encontré", "", ...lines, "", "Dime cuál (o cuáles) te interesa y te armo la cotización. 😊"].join("\n");
@@ -30,12 +30,29 @@ export function formatGroupedOptions(groups: ReadonlyArray<{ label: string; stud
   for (const group of groups) {
     const valid = group.studies.filter(priced).slice(0, Math.min(OPTIONS_PER_MENTION, OPTIONS_TOTAL_LIMIT - n));
     if (valid.length === 0) continue;
-    sections.push(`*Para «${group.label}»:*`, ...valid.map((study) => `${++n}. ${emojiFor(study.name)} ${shortName(study.name)} — ${formatBs(study.priceBs)}${study.turnaroundText ? ` (entrega: ${study.turnaroundText})` : ""}`), "");
+    sections.push(`*Para «${group.label}»:*`, ...valid.map((study) => `${++n}. ${emojiFor(study.name)} ${shortName(study.name)} — ${formatBs(study.priceBs)}${study.turnaroundText ? turnaroundSuffix(study.turnaroundText) : ""}`), "");
   }
   if (n === 0) return undefined;
   return afterQuote
-    ? ["🔎 *Posiblemente también pediste alguno de estos* (no están sumados en el total):", "", ...sections, "¿Quieres que agregue alguno a tu cotización? Responde con el número o el nombre. 😊"].join("\n")
-    : ["🩺 *PlusMedik* · Opciones que encontré", "", ...sections, "Dime cuál (o cuáles) te interesa y te armo la cotización. 😊"].join("\n");
+    ? ["🔎 *Posiblemente también pediste alguno de estos* (no están sumados en el total):", "", ...sections, "¿Quieres que agregue alguno a tu cotización? Responde con el número o el nombre. 😊", OPTIONS_DOCTOR_NOTE].join("\n")
+    : ["🩺 *PlusMedik* · Opciones que encontré", "", ...sections, "Dime cuál (o cuáles) te interesa y te armo la cotización. 😊", OPTIONS_DOCTOR_NOTE].join("\n");
+}
+
+// Lo que el paciente pidió y el catálogo no tiene (ni parecido). Indicación del laboratorio (dueño, 20-nov): se cotiza lo que sí está y de lo demás se le dice que LA DOCTORA se lo confirma por este chat.
+// Nunca se dice que no lo tenemos o que no lo realizamos, ni se mencionan otros laboratorios (algunos estudios se envían a otro laboratorio: eso lo decide la doctora).
+export const OPTIONS_DOCTOR_NOTE = "Si no es ninguno de estos, te lo confirma la doctora por este chat.";
+const DOCTOR_CONFIRMS_LIMIT = 10;
+export function formatDoctorConfirms(mentions: readonly string[]): string | undefined {
+  const shown = [...new Set(mentions.map((mention) => mention.trim()).filter((mention) => mention !== ""))].slice(0, DOCTOR_CONFIRMS_LIMIT);
+  if (shown.length === 0) return undefined;
+  const label = (mention: string) => mention.charAt(0).toUpperCase() + mention.slice(1);
+  return [
+    shown.length === 1 ? "👩‍⚕️ *Este estudio te lo confirma la doctora:*" : "👩‍⚕️ *Estos estudios te los confirma la doctora:*",
+    "",
+    ...shown.map((mention) => `▫️ ${label(mention)}`),
+    "",
+    "Te escribirá por este chat con el precio y el tiempo de entrega. 😊"
+  ].join("\n");
 }
 
 // Máximo de candidatos de UNA línea dudosa de la receta: más que esto ya no es «posiblemente», es no saber qué dice (se pide otra foto o lo ve una persona).

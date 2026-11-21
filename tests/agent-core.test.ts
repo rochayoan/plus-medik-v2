@@ -185,12 +185,15 @@ describe("herramientas: solo lectura, acotadas, que nunca lanzan, y «sin datos�
       noPrices(result);
     });
 
-    it("un estudio seguro junto a uno que el catálogo no tiene: se cotiza el seguro (PARCIAL) y se dice cuál no se encontró", async () => {
+    it("un estudio seguro junto a uno que el catálogo no tiene: se cotiza el seguro (PARCIAL) y del otro se dice que lo confirma la doctora (indicación del laboratorio, 20-nov)", async () => {
       const result = (await quote.run({ studies: ["hemograma", "ecografia abdominal"] }, ctx)) as { facts: Array<{ text: string }>; blocks: string[] };
-      expect(result.blocks).toHaveLength(1);
+      expect(result.blocks).toHaveLength(2);
       expect(result.blocks[0]).toMatch(/HEMOGRAMA COMPLETO — Bs 45/);
+      expect(result.blocks[1]).toMatch(/Este estudio te lo confirma la doctora:\*\n\n▫️ Ecografia abdominal/);
+      // Nunca «no lo tenemos», «no lo realizamos» ni otros laboratorios.
+      expect(result.blocks.join("\n")).not.toMatch(/no (lo )?tenemos|no (lo )?realizamos|otro laboratorio|no encontr/i);
       expect(result.facts.some((f) => /PARCIAL/.test(f.text))).toBe(true);
-      expect(result.facts.some((f) => /No se encontró en el catálogo nada parecido a: ecografia abdominal/.test(f.text))).toBe(true);
+      expect(result.facts.some((f) => /confirma la doctora.*ecografia abdominal/.test(f.text))).toBe(true);
       noPrices(result);
     });
 
@@ -200,12 +203,12 @@ describe("herramientas: solo lectura, acotadas, que nunca lanzan, y «sin datos�
       expect(result.blocks[0]).toMatch(/Total de los estudios cotizados: Bs 45/);
     });
 
-    it("estudios que no están en el catálogo dan el hecho «no se encontró», no «sin datos»: el agente puede decirlo y preguntar", async () => {
+    it("estudios que no están en el catálogo: no es «sin datos» ni una cotización; los confirma la doctora (o se ofrecen opciones parecidas)", async () => {
       for (const studies of [["ecografia abdominal"], ["ecografia abdominal", "resonancia"]]) {
         const result = (await quote.run({ studies }, ctx)) as { facts: Array<{ text: string }>; blocks?: string[] };
-        // Nunca una cotización con total: a lo sumo, opciones parecidas para que el paciente elija.
+        // Nunca una cotización con total: a lo sumo, opciones parecidas para que el paciente elija y el aviso de la doctora.
         expect((result.blocks ?? []).join(" "), studies.join(",")).not.toMatch(/Cotización|Total/);
-        expect(result.facts.some((f) => /No se encontró en el catálogo nada parecido|POSIBLES/.test(f.text))).toBe(true);
+        expect(result.facts.some((f) => /confirma la doctora|POSIBLES/.test(f.text))).toBe(true);
       }
     });
 
@@ -218,10 +221,11 @@ describe("herramientas: solo lectura, acotadas, que nunca lanzan, y «sin datos�
     });
 
     it("un estudio inactivo o con precio inválido no se cotiza (el catálogo manda)", async () => {
+      // Sin precio ni cotización: a lo sumo el aviso de que lo confirma la doctora.
       const inactive = quoteStudiesTool({ loadCatalog: async () => CATALOG.map((s) => (s.id === uuid(1) ? ({ ...s, active: false } as CatalogStudy) : s)) });
-      expect(((await inactive.run({ studies: ["hemograma"] }, ctx)) as { blocks?: string[] }).blocks ?? []).toEqual([]);
+      expect((((await inactive.run({ studies: ["hemograma"] }, ctx)) as { blocks?: string[] }).blocks ?? []).join("\n")).not.toMatch(/Bs \d|Total|HEMOGRAMA COMPLETO/);
       const broken = quoteStudiesTool({ loadCatalog: async () => CATALOG.map((s) => (s.id === uuid(1) ? ({ ...s, priceBs: 0 } as CatalogStudy) : s)) });
-      expect(((await broken.run({ studies: ["hemograma"] }, ctx)) as { blocks?: string[] }).blocks ?? []).toEqual([]);
+      expect((((await broken.run({ studies: ["hemograma"] }, ctx)) as { blocks?: string[] }).blocks ?? []).join("\n")).not.toMatch(/Bs \d|Total|HEMOGRAMA COMPLETO/);
     });
 
     it("la entrada se valida (1 a 30 textos de hasta 600 caracteres, sin campos de más)", () => {

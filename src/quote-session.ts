@@ -562,8 +562,9 @@ export function cleanMention(value: string): string {
 export const INTERPRETER_TEXTS = {
   interpreted: "Interpreté",
   interpreted_as: "como",
-  not_found: "No encontré en nuestro catálogo:",
-  not_found_outro: "Si quieres, escribe el nombre exacto de otro estudio o envíame una foto de tu receta."
+  // Lo que el catálogo no tiene lo confirma la doctora (indicación del laboratorio, 20-nov): nunca «no lo tenemos» (algunos estudios se envían a otro laboratorio; eso lo decide ella).
+  not_found: "Estos estudios te los confirma la doctora por este chat:",
+  not_found_outro: "Te escribirá con el precio y el tiempo de entrega."
 } as const;
 
 // Misma regla que los demás textos fijos: sin cifras, moneda ni promesas.
@@ -989,7 +990,12 @@ export function compactQuote(body: string): string {
   return out.join("\n");
 }
 
-export function formatSessionQuote(lines: readonly QuoteLine[], duplicates: number, texts: QuoteTexts): string {
-  const quote = formatQuoteMessage(buildPublicQuote(lines.map((line) => ({ name: line.name, priceBs: line.priceBs }))));
+// options.catalog: el tiempo de entrega de cada estudio va junto a su precio (si no se pasa, como antes: una cotización repetida de la auditoría sale igual que la primera vez).
+// options.title: el encabezado («Tu cotización» cuando el paciente escribió los estudios: no mandó ninguna receta).
+export function formatSessionQuote(lines: readonly QuoteLine[], duplicates: number, texts: QuoteTexts, options: { catalog?: readonly CatalogStudy[]; title?: string } = {}): string {
+  const turnaround = options.catalog ? new Map(options.catalog.map((study) => [study.id, study.turnaroundText ?? null])) : undefined;
+  const base = buildPublicQuote(lines.map((line) => ({ name: line.name, priceBs: line.priceBs })));
+  const shown = turnaround ? { ...base, studies: base.studies.map((study, index) => ({ ...study, turnaroundText: turnaround.get(lines[index]!.studyId) ?? null })) } : base;
+  const quote = formatQuoteMessage(shown, { title: options.title });
   return duplicates > 0 ? `${quote}\n\n${texts.repeated_note}` : quote;
 }

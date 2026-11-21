@@ -99,7 +99,8 @@ export async function runAgentTurn(deps: AgentDeps, input: AgentTurnInput): Prom
   // 2. Herramientas de solo lectura. «Sin datos» pasa al modelo como una nota, no como un fallo.
   const patientText = input.utterances.map((utterance) => utterance.text).join("\n");
   const { runs, facts, blocks, notes } = await runToolCalls(deps.tools, plan.toolCalls, { now, patientText });
-  const hasQuoteBlock = blocks.length > 0;
+  // Hay cotización si algún bloque trae precios (la cotización o las opciones). El aviso de los estudios que confirma la doctora no trae precios: solo, no es una cotización.
+  const hasQuoteBlock = blocks.some((block) => /\bBs \d/.test(block));
   const quotePartial = facts.some((fact) => fact.source === "QUOTE_ENGINE" && /PARCIAL/.test(fact.text));
   const handoff = plan.handoff !== undefined && capabilities.handoff && Boolean(deps.handoff) ? plan.handoff : undefined;
   const base = { toolRuns: runs, facts, ...planInfo };

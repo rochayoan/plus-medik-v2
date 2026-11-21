@@ -22,11 +22,11 @@ const ctx = { now: new Date("2026-11-06T09:00:00Z") };
 describe("quote_studies: un nombre que no se encuentra NO es «sin datos»", () => {
   const quote = quoteStudiesTool({ loadCatalog: async () => CATALOG });
 
-  it("lo que no está en el catálogo da un hecho «no se encontró» (sin precios), nunca «sin datos» ni una cotización", async () => {
+  it("lo que no está en el catálogo da un hecho «lo confirma la doctora» (sin precios), nunca «sin datos» ni una cotización", async () => {
     for (const studies of [["ecografia abdominal"], ["ecografia abdominal", "resonancia"]]) {
       const result = (await quote.run({ studies }, ctx)) as { facts: Array<{ text: string }>; blocks?: string[] };
       expect((result.blocks ?? []).join(" "), studies.join(",")).not.toMatch(/Cotización|Total/);
-      expect(result.facts.some((fact) => /No se encontró en el catálogo nada parecido|POSIBLES/.test(fact.text))).toBe(true);
+      expect(result.facts.some((fact) => /confirma la doctora|POSIBLES/.test(fact.text))).toBe(true);
       expect(JSON.stringify(result.facts)).not.toMatch(/\b45\b|30[.,]5|Bs/);
     }
   });
@@ -60,7 +60,10 @@ describe("de punta a punta con el adaptador real (cliente simulado)", () => {
       { tool: "quote_studies", ok: true, factIds: ["quote_studies:1"] },
       { tool: "lab_info", ok: false, error: "NO_DATA", why: "NO_TOPIC", factIds: [] }
     ]);
-    expect(decision.reply).toBe("No encontré ese estudio en el catálogo. ¿Me dices cómo se llama exactamente?");
+    // Debajo del texto del modelo, el sistema agrega lo que encontró: opciones parecidas o el aviso de que lo confirma la doctora (20-nov). Nunca una cotización con total.
+    expect((decision.reply ?? "").startsWith("No encontré ese estudio en el catálogo. ¿Me dices cómo se llama exactamente?")).toBe(true);
+    expect(decision.reply).toMatch(/confirma la doctora/);
+    expect(decision.reply).not.toMatch(/Total de los estudios/);
   });
 
   it("la respuesta es texto libre: cualquier redacción válida pasa, sin formato que respetar; ya no existe una salida «inválida» en la respuesta", async () => {
