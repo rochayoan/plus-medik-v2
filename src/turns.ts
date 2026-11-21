@@ -2,6 +2,8 @@ import { MENU_OPTIONS, mightBeMenuChoice } from "./greeting-menu.js";
 import { repeatCandidate } from "./attention-filter.js";
 import { withPhotoContextWait } from "./photo-context-wait.js";
 import { AT_DOOR_MESSAGE, isAtClosedDoor } from "./at-door.js";
+import { plain as plainText } from "./text-normalize.js";
+import { HUMAN_REQUEST_MESSAGE, HUMAN_REQUEST_SIGNATURE, isHumanRequest } from "./human-request.js";
 import { HOME_VISIT_SIGNATURE, HOME_VISIT_THANKS, looksLikeHomeVisitData } from "./home-visit.js";
 import { asksOtherPersonPickup, decideResultsAction, isCourtesy, looksLikeIdentification, patientDataIn, RESULTS_SIGNATURES, resultsReplyBody, routeResultsMessage, type ResultsAction } from "./results-silence.js";
 import { audioFailureProducer, resolveAudioTurns } from "./audio-turns.js";
@@ -412,7 +414,26 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
     atDoor.set(from, doorIndices[doorIndices.length - 1]!);
     deps.log("at_door", {});
   }
-  const resultsOnly = new Set([...resultsRouting.entries()].filter(([from, action]) => action === "SILENT" && !atDoor.has(from)).map(([from]) => from));
+  const isGreetingOnly = (text: string) => /^(hola|holi|buen(os|as)? (dias|tardes|noches)|buenas|buen dia|que tal|saludos)( \w+)?$/.test(plainText(text));
+  // CAMINO 5 «Hablar con una persona» (src/human-request.ts, dueño 21-nov): el pedido recibe el texto fijo en el último mensaje que lo dice; si ya se le envió en las últimas 24 h, el agente calla con
+  // ese contacto (la persona lo atiende). Solo la persona en la puerta va antes.
+  const personReply = new Map<string, number>();
+  const personSilent = new Set<string>();
+  for (const [from, indices] of perContact) {
+    if (atDoor.has(from)) continue;
+    const asks = indices.filter((index) => turns[index]!.kind === "TEXT" && typeof turns[index]!.text === "string" && isHumanRequest(turns[index]!.text!));
+    const waiting = deps.turns?.waitingForPerson ? await deps.turns.waitingForPerson({ from, messageId: turns[indices[0]!]!.messageId, excludeIds: indices.map((index) => turns[index]!.messageId) }).catch(() => false) : false;
+    if (waiting) {
+      personSilent.add(from);
+      deps.log("human_request_path", { action: "SILENT" });
+    } else if (asks.length > 0 && indices.every((index) => turns[index]!.kind === "TEXT" && typeof turns[index]!.text === "string" && (isHumanRequest(turns[index]!.text!) || isCourtesy(turns[index]!.text!) || isGreetingOnly(turns[index]!.text!)))) {
+      // Solo si el lote es el pedido (y cortesía o saludo): mezclado con otra cosa (p. ej. una urgencia médica) sigue el camino de siempre, que conserva sus avisos de seguridad.
+      personReply.set(from, asks[asks.length - 1]!);
+      deps.log("human_request_path", { action: "ACK" });
+    }
+  }
+  const resultsOnly = new Set([...resultsRouting.entries()].filter(([from, action]) => action === "SILENT" && !atDoor.has(from) && !personReply.has(from) && !personSilent.has(from)).map(([from]) => from));
+  for (const from of personSilent) resultsOnly.add(from);
   // CAMINO 2 «Consultar resultados» (src/results-silence.ts, decisión del dueño 21-nov): pedir los datos, pedir el nombre completo UNA vez si falta, agradecer y desde ahí silencio (lo atiende la Dra). El paso
   // del contacto se lee de los mensajes recientes solo si el lote es una consulta de resultados o parece el dato pedido (un nombre, una foto, «gracias»). Responde UNA vez por lote (en el último texto); el
   // resto del lote se cierra sin respuesta. Las fotos no se analizan.
@@ -420,7 +441,7 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
   const resultsReply = new Map<string, { action: Exclude<ResultsAction, "SILENT">; responder: number }>();
   for (const [from, indices] of perContact) {
     const routing = resultsRouting.get(from);
-    if (atDoor.has(from) || routing === "SILENT" || routing === "OFFICE_HOURS") continue;
+    if (atDoor.has(from) || personReply.has(from) || personSilent.has(from) || routing === "SILENT" || routing === "OFFICE_HOURS") continue;
     const textOf = (index: number): string | undefined => (turns[index]!.kind === "TEXT" && typeof turns[index]!.text === "string" ? turns[index]!.text! : undefined);
     const texts = indices.flatMap((index) => textOf(index) ?? []);
     const hasImage = indices.some((index) => turns[index]!.kind === "IMAGE");
@@ -445,7 +466,7 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
   const homeSilent = new Set<string>();
   if (homeVisitStage) {
     for (const [from, indices] of perContact) {
-      if (atDoor.has(from) || resultsReply.has(from) || resultsOnly.has(from) || resultsRouting.has(from)) continue;
+      if (atDoor.has(from) || personReply.has(from) || resultsReply.has(from) || resultsOnly.has(from) || resultsRouting.has(from)) continue;
       const isText = (index: number) => turns[index]!.kind === "TEXT" && typeof turns[index]!.text === "string";
       const textIndices = indices.filter(isText);
       const homeData = textIndices.filter((index) => looksLikeHomeVisitData(turns[index]!.text!));
@@ -504,11 +525,22 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
     }
     return { kind: "reply", body: AT_DOOR_MESSAGE, result: "conversation", processingStatus: "COMPLETED", stale: "NONE", signature: "AT_DOOR" };
   };
+  const personProducer = (turn: IncomingTurn): TurnProducer => async (ctx) => {
+    const crm = deps.turns?.crmHandoff;
+    if (crm) {
+      try {
+        await crm.submit(ctx, [{ kapsoMessageId: turn.messageId, contactPhone: turn.from, kind: "CONVERSATION", reasons: ["HUMAN_REQUEST"] }]);
+      } catch {
+        deps.log("human_request_crm_submit_failed", {});
+      }
+    }
+    return { kind: "reply", body: HUMAN_REQUEST_MESSAGE, result: "conversation", processingStatus: "COMPLETED", stale: "NONE", signature: HUMAN_REQUEST_SIGNATURE };
+  };
   const homeThanksProducer: TurnProducer = async () => ({ kind: "reply", body: HOME_VISIT_THANKS, result: "conversation", processingStatus: "COMPLETED", stale: "NONE", signature: HOME_VISIT_SIGNATURE });
   // Un contacto del PILOTO (solo mensajes de texto o audio) también se atiende como lote, aunque traiga un solo mensaje: así su respuesta sale por la misma ruta de un solo envío por lote.
   const pilot = deps.turns?.agentPilot;
   const isPilotBatch = (from: string, indices: readonly number[]) => Boolean(pilot?.isPilot(from)) && indices.every((index) => turns[index]!.kind === "TEXT" || turns[index]!.kind === "AUDIO");
-  const batched = new Set([...perContact.entries()].filter(([from, indices]) => !resultsOnly.has(from) && !resultsReply.has(from) && !atDoor.has(from) && !homeThanks.has(from) && !homeSilent.has(from) && (indices.length > 1 || isPilotBatch(from, indices))).map(([from]) => from));
+  const batched = new Set([...perContact.entries()].filter(([from, indices]) => !resultsOnly.has(from) && !resultsReply.has(from) && !atDoor.has(from) && !personReply.has(from) && !homeThanks.has(from) && !homeSilent.has(from) && (indices.length > 1 || isPilotBatch(from, indices))).map(([from]) => from));
 
   const claims = new Map<number, ClaimedTurn>();
   // Mensajes que no se reclamaron porque una persona tiene la palabra (pausa humana): no se atienden solos, pero la memoria en sombra los registra como pendientes.
@@ -567,10 +599,11 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
         const results = resultsReply.get(turn.from);
         const door = atDoor.get(turn.from);
         const home = homeThanks.get(turn.from);
-        const base = door !== undefined ? (door === index ? doorProducer(turn) : silenceProducer) : home !== undefined ? (home === index ? homeThanksProducer : silenceProducer) : homeSilent.has(turn.from) ? silenceProducer : results ? (results.responder === index ? resultsProducer(turn, results.action) : silenceProducer) : resultsOnly.has(turn.from) ? silenceProducer : producerFor(turn, deps)!;
+        const person = personReply.get(turn.from);
+        const base = door !== undefined ? (door === index ? doorProducer(turn) : silenceProducer) : person !== undefined ? (person === index ? personProducer(turn) : silenceProducer) : home !== undefined ? (home === index ? homeThanksProducer : silenceProducer) : homeSilent.has(turn.from) ? silenceProducer : results ? (results.responder === index ? resultsProducer(turn, results.action) : silenceProducer) : resultsOnly.has(turn.from) ? silenceProducer : producerFor(turn, deps)!;
         // Una foto que se atiende SOLA y que no se pudo cotizar espera un rato a que llegue el texto del paciente (ver src/photo-context-wait.ts); sin la configuración, responde de inmediato.
         const photoWait = deps.turns?.photoContextWait;
-        const producer = turn.kind === "IMAGE" && !atDoor.has(turn.from) && !homeSilent.has(turn.from) && !resultsReply.has(turn.from) && !resultsOnly.has(turn.from) && photoWait ? withPhotoContextWait(base, turn.from, { ...photoWait, contactKeyFor: deps.turns!.contactKeyFor, log: deps.log }) : base;
+        const producer = turn.kind === "IMAGE" && !atDoor.has(turn.from) && !personReply.has(turn.from) && !homeSilent.has(turn.from) && !resultsReply.has(turn.from) && !resultsOnly.has(turn.from) && photoWait ? withPhotoContextWait(base, turn.from, { ...photoWait, contactKeyFor: deps.turns!.contactKeyFor, log: deps.log }) : base;
         const result = await claimed.run(producer);
         reports[index] = { messageId: turn.messageId, result };
         if (resultsOnly.has(turn.from)) deps.log("results_query_silenced", { kind: "RESULTS_ONLY", sent: false });
