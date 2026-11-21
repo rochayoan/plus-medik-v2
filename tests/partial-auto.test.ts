@@ -112,7 +112,7 @@ describe("AUTO PARCIAL: cada estudio seguro se cotiza aunque otros requieran rev
     expect(result.publicQuote?.totalBs).toBe(75);
     expect(result.internal).toMatchObject({ recipeComplete: false, reviewRequired: true });
     expect(result.internal?.quoted.subtotalBs).toBe(75);
-    expect(result.internal?.pending).toEqual([{ key: "examen inventado", kind: "STUDY", text: "Examen inventado", blockers: ["catalog_unmatched"], candidates: undefined }]);
+    expect(result.internal?.pending).toEqual([{ key: "examen inventado", kind: "STUDY", text: "Examen inventado", blockers: ["catalog_unmatched"], uncertainty: ["IDENTITY"], candidates: undefined }]);
     expect(result.internal?.studies.map((s) => [s.text, s.decision])).toEqual([["Hemograma completo", "AUTO"], ["Creatinina", "AUTO"], ["Examen inventado", "HUMAN_REVIEW"]]);
   });
 

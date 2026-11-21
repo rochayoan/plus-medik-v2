@@ -214,7 +214,7 @@ describe("un elemento de la línea no leído impide el AUTO completo", () => {
     expect(result.decision).toBe("HUMAN_REVIEW");
     expect(result.reasons).toContain("line_item_unrepresented");
     expect(result.internal?.quoted.lines.map((l) => l.code)).toEqual(["z"]);
-    expect(result.internal?.pending).toEqual([{ key: "line:omegaina", kind: "STUDY", text: "Omegaina", blockers: ["line_item_unrepresented"] }]);
+    expect(result.internal?.pending).toEqual([{ key: "line:omegaina", kind: "STUDY", text: "Omegaina", blockers: ["line_item_unrepresented"], uncertainty: ["READING"] }]);
     expect(result.internal?.recipeComplete).toBe(false);
     expect(JSON.stringify(result.publicQuote)).not.toMatch(/omegaina|pendiente|line_item/i);
   });
