@@ -100,9 +100,10 @@ export const BUSINESS_DATA: BusinessData = {
   // Una línea por dato y por sucursal (copia el bloque por cada sucursal): nombre, dirección completa, referencias y enlace https al mapa si lo hay.
   SUCURSALES: {
     estado: "CONFIRMADO",
-    fuente: "imagen_oficial_donde_estamos_2026-11-10",
+    fuente: "imagen_oficial_donde_estamos_2026-11-10/unica_sede_confirmada_por_el_dueno_2026-11-21",
     vigenteHasta: "2026-12-31",
     datos: `
+- Es la ÚNICA sede de PLUSMEDIK: no hay otras sucursales ni puntos de toma de muestra, ni en Santa Cruz ni en otras ciudades.
 - Sucursal 1 — Nombre: PLUSMEDIK (sede central).
 - Sucursal 1 — Dirección: Calle Cuellar casi esquina Santa Bárbara, Santa Cruz de la Sierra, Bolivia.
 - Sucursal 1 — Referencias: diagonal a la puerta principal del hospital San Juan de Dios.
@@ -114,11 +115,12 @@ export const BUSINESS_DATA: BusinessData = {
   HORARIOS: {
     // Horario GENERAL confirmado; no extiende a cada servicio ni a tiempos de entrega.
     estado: "CONFIRMADO",
-    fuente: "confirmacion_responsable_2026-10-30",
+    fuente: "confirmacion_responsable_2026-10-30/precio_igual_a_toda_hora_dueno_2026-11-21",
     vigenteHasta: "2026-12-31",
     datos: `
 - Atención general del laboratorio: las 24 horas, todos los días del año (lunes a domingo, los 365 días).
 - No es necesario sacar cita previa.
+- El precio de los estudios es el mismo a cualquier hora y cualquier día.
 `
   },
 
