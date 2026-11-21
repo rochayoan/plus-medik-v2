@@ -63,6 +63,14 @@ describe("en qué paso está el contacto (mensajes recientes del asistente)", ()
   it("si la Dra escribió después, ella ya lo atiende: silencio", () => {
     expect(resultsStageOf([ask, { from: "STAFF", text: "verifico" }])).toBe("THANKED");
   });
+  it("si la Dra ya atiende un resultado en el chat (sin que el agente haya pedido nada): silencio", () => {
+    for (const text of ["verifico", "Ya está listo su _Resultado de Laboratorio_, puede pasar a recogerlo o consultarlo en linea.", "aun sigue en proceso", "su resultado previo ya esta, el final sale el miercoles", "Nombre del paciente", "foto de su comprobante porfavor"]) {
+      expect(resultsStageOf([{ from: "PATIENT", text: "ya estan mis resultados?" }, { from: "STAFF", text }]), text).toBe("THANKED");
+    }
+  });
+  it("una respuesta de la Dra que no es sobre un resultado (precio, horario, tiempo de entrega) no cuenta", () => {
+    for (const text of ["45bs en dos horas su resultado", "entrega de resultados en 2 a 3 horas", "atendemos 24 horas todos los dias"]) expect(resultsStageOf([{ from: "STAFF", text }]), text).toBeUndefined();
+  });
   it("sin textos de este camino: ningún paso", () => {
     expect(resultsStageOf([])).toBeUndefined();
     expect(resultsStageOf([{ from: "ASSISTANT", text: "¡Hola! ¿En qué te ayudo?" }, { from: "STAFF", text: "Buenos días" }])).toBeUndefined();
@@ -97,6 +105,28 @@ describe("qué es una consulta de resultados (ajustes del 21-nov con casos reale
     "mi esposa puede pasar a recoger los resultados?"
   ])("«%s» es del camino de resultados", (text) => {
     expect(routeResultsMessage(text)).toBe("READY_CHECK");
+  });
+  it.each([
+    "¿Y cuándo me entregarían los resultados disculpe?",
+    "En cuanto salen los resultados?",
+    "Cuántas horas el resultado??",
+    "y cuando estaria los resultados",
+    "Disculpe en que tiempo son los resultados es para la caja petrolera"
+  ])("cuánto TARDA (antes de hacerse el estudio, p. ej. tras una cotización): flujo normal, no se piden datos: «%s»", (text) => {
+    expect(routeResultsMessage(text)).toBe("NORMAL");
+  });
+  it.each(["En cuanto salen los resultados? ya me tomaron la muestra", "Me hice ayer el hemograma, en cuanto tiempo sale el resultado?", "ya estan mis resultados? en cuanto salen"])("cuánto falta para un estudio YA hecho: camino de resultados: «%s»", (text) => {
+    expect(routeResultsMessage(text)).toBe("READY_CHECK");
+  });
+  it("«Dejé una muestra anoche, ¿me puede enviar los resultados?»: la muestra ya se entregó, es del camino de resultados", () => {
+    expect(routeResultsMessage("Dejé una muestra de heces anoche\nMe puede enviar los resultados")).toBe("READY_CHECK");
+    expect(routeResultsMessage("¿Cómo se toma la muestra de orina para el resultado?")).toBe("NORMAL");
+  });
+  it.each(["me pide contraseña y orden para poder entrar ?", "No logro entrar a su sistema", "No puedo ingresar a la pagina con mi clave"])("problemas para ver el resultado en línea: camino de resultados: «%s»", (text) => {
+    expect(routeResultsMessage(text)).toBe("READY_CHECK");
+  });
+  it.each(["no puedo abrir el link de la ubicacion", "Quiero cotizar, no puedo entrar a la pagina"])("otros «no puedo entrar» siguen su flujo: «%s»", (text) => {
+    expect(routeResultsMessage(text)).toBe("NORMAL");
   });
   it.each(["Tengo sangrado y necesito mis resultados", "Quiero hablar con una persona por mis resultados", "Quiero cotizar unos exámenes que me hice el año pasado"])("«%s» no cambia (sigue su flujo)", (text) => {
     expect(routeResultsMessage(text)).not.toBe("READY_CHECK");

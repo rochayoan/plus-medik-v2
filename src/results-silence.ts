@@ -24,22 +24,33 @@ export type ResultsRouting = "SILENT" | "READY_CHECK" | "OFFICE_HOURS" | "NORMAL
 // «mis estudios que me realicé ayer»: el estudio YA se hizo (se pregunta por el resultado, no por hacérselo).
 const DONE_ALREADY = /\b(que me (hice|realice|saque|tome|hicieron|tomaron|sacaron)|me (hice|realice|saque) (el|los|la|las|unos|unas|ayer|hoy|el dia|en la manana))\b/;
 
+const SAMPLE_DONE = /\b(ya )?(me (tomaron|sacaron)|le (tomaron|sacaron)|deje|traje|lleve|envie|mande|entregue) (la |mi |las |mis |una |unas |su |sus )?muestras?\b/g;
+// Problemas para ver el resultado en línea («me pide orden y contraseña», «no logro entrar a su sistema»): son del camino de resultados aunque no digan «resultado».
+const PORTAL = /\b(contrasena|clave)\b.*\b(orden|entrar|ingresar|resultado\w*|sistema|pagina)\b|\b(orden|entrar|ingresar)\b.*\b(contrasena|clave)\b|\b(entrar|ingresar|acceder|abrir)\b.*\b(sistema|pagina|portal|plataforma)\b/;
+const HYPOTHETICAL = /\b(entregarian|entregaria|estaria|estarian|saldria|saldrian|tendria|tendrian|demoraria|demorarian|tardaria|tardarian)\b/;
+const HOW_LONG = /\b(en cuanto( tiempo)?|cuantas horas|cuantos dias|en que tiempo|que tiempo)\b/;
+const ALREADY = /\b(ya|listos?|salio|salieron|ayer|anoche|esta manana|hace \d+ dias|el (lunes|martes|miercoles|jueves|viernes|sabado|domingo))\b/;
+
 // Se analiza el lote completo. Solo las consultas inequívocas se redirigen.
 // La frase de horario es canónica: jamás se traslada la parte privada de
 // resultados a las herramientas, al LLM ni a la respuesta.
 export function routeResultsMessage(text: string): ResultsRouting {
   const message = plain(text.slice(0, 4000));
   if (!message) return "NORMAL";
-  const resultsContext = RESULTS.test(message) || (STUDY.test(message) && (RESULTS_STATUS.test(message) || PICKUP.test(message) || DONE_ALREADY.test(message)));
+  const resultsContext = RESULTS.test(message) || PORTAL.test(message) || (STUDY.test(message) && (RESULTS_STATUS.test(message) || PICKUP.test(message) || DONE_ALREADY.test(message)));
   if (!resultsContext) return "NORMAL";
   // «¿Puede recoger otra persona mis resultados?»: es del camino de resultados (no un pedido de hablar con una persona).
   if (asksOtherPersonPickup(message)) return "READY_CHECK";
-  if (OTHER_INTENT.test(message)) return "NORMAL";
+  // «ya me tomaron la muestra», «dejé una muestra anoche»: la muestra YA se entregó (no es una pregunta sobre cómo tomarla).
+  if (OTHER_INTENT.test(message.replace(SAMPLE_DONE, " "))) return "NORMAL";
   if (OFFICE_HOURS.test(message) && !RESULTS_HOURS.test(message)) return "OFFICE_HOURS";
   // Interpretación o urgencia: sigue en silencio (no se orienta sobre resultados).
   if (INTERPRET.test(message)) return "SILENT";
   // Cuánto tarda un resultado, sin hablar de uno propio: información para hacerse el estudio (flujo normal).
   if (TURNAROUND_INFO.test(message) && !MINE.test(message)) return "NORMAL";
+  // «¿En cuánto salen?», «¿cuándo me entregarían?» sin nada que diga que el estudio YA se hizo: es cuánto TARDA (para hacérselo; suele venir justo después de una cotización). Lo responde el agente
+  // con el tiempo de entrega del catálogo, no se piden datos de un resultado que no existe.
+  if ((HYPOTHETICAL.test(message) || HOW_LONG.test(message)) && !ALREADY.test(message) && !DONE_ALREADY.test(message) && !new RegExp(SAMPLE_DONE.source).test(message) && !PORTAL.test(message)) return "NORMAL";
   // Cualquier otra consulta sobre un resultado propio («quiero consultar mis resultados», «resultado de Juan Pérez»): recepción verifica con los datos del paciente (decisión del dueño, 19-nov: ya no se calla).
   return "READY_CHECK";
 }
@@ -88,11 +99,16 @@ const STAGE_MARKERS: ReadonlyArray<readonly [ResultsStage, string]> = [
   ["ASKED", plain("Para verificar tu resultado, pásame por favor")],
   ["ASKED", plain("Ve pasándome el nombre completo del paciente")] // texto anterior (hasta el 21-nov)
 ];
+const STAFF_ON_RESULTS = /\b(ya esta listo su resultado|ya esta (en sistema|su resultado|el resultado)|verifico|en proceso|resultado previo|se le avisara|le avisare|le aviso|(este|ese|esos|estos) (es|son) sus? resultados?|nombre (completo )?del paciente|comprobante|comprovante)\b/;
 export function resultsStageOf(recent: ReadonlyArray<{ readonly from: string; readonly text: string }>): ResultsStage | undefined {
   let staffSpoke = false;
   for (let index = recent.length - 1; index >= 0; index--) {
     const entry = recent[index]!;
-    if (entry.from === "STAFF") staffSpoke = true;
+    if (entry.from === "STAFF") {
+      // La Dra ya está atendiendo un resultado en este chat («verifico», «ya está listo su resultado», «en proceso»): es suyo, silencio.
+      if (STAFF_ON_RESULTS.test(plain(entry.text))) return "THANKED";
+      staffSpoke = true;
+    }
     if (entry.from !== "ASSISTANT") continue;
     const text = plain(entry.text);
     const hit = STAGE_MARKERS.find(([, marker]) => text.includes(marker));
