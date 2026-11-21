@@ -63,7 +63,8 @@ export interface ToolDef {
 
 // ───────────────────────────── el modelo (puerto) ─────────────────────────────
 
-export interface RecentEntry { from: "PATIENT" | "ASSISTANT" | "STAFF"; text: string }
+// `at`: hora del mensaje (ISO) cuando el historial la trae (para saber qué veía el paciente al escribir).
+export interface RecentEntry { from: "PATIENT" | "ASSISTANT" | "STAFF"; text: string; at?: string }
 
 export interface ModelUsage { inputTokens: number; outputTokens: number; reasoningTokens: number; calls: number }
 

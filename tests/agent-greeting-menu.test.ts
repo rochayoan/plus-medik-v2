@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AgentModel } from "../src/agent/contracts.js";
-import { greetingMenu, isMenuMessage, MENU_OPTIONS, GREETING_WAIT_MS, menuChoiceOf, menuNumberOf, shouldShowGreetingMenu } from "../src/greeting-menu.js";
+import { greetingMenu, isMenuMessage, MENU_OPTIONS, GREETING_WAIT_MS, menuChoiceDecision, menuChoiceOf, menuNumberOf, shouldShowGreetingMenu } from "../src/greeting-menu.js";
+import { createPendingInboundCheck } from "../src/kapso-pending.js";
 import { createAgentPilot } from "../src/agent/pilot.js";
 import { isGreetingOnly, isGreetingText } from "../src/agent/shadow.js";
 import { verifyReply } from "../src/agent/verify.js";
@@ -143,7 +144,7 @@ describe("en los turnos: «2» después del menú pide los datos del resultado",
 describe("en los turnos: espera del saludo antes de enviar el menú", () => {
   const lease = { owner: "o", fence: 1 };
   const from = "59170000000";
-  const build = (newer: boolean) => {
+  const build = (newer: boolean, pending?: boolean) => {
     const audit = {
       claim: vi.fn(async () => ({ kind: "claimed" as const, runId: "run-g", lease, seq: 7 })),
       renewLease: vi.fn(async () => true),
@@ -155,12 +156,13 @@ describe("en los turnos: espera del saludo antes de enviar el menú", () => {
     } as unknown as AuditRepository;
     const sendText = vi.fn(async () => undefined);
     const newerTurn = vi.fn(async () => newer);
+    const pendingInbound = vi.fn(async () => pending === true);
     const agentPilot = { mode: "live" as const, isPilot: () => true, produce: vi.fn(async () => ({ body: MENU, result: "conversation" as const, processingStatus: "COMPLETED" as const, stale: "NEWER_TURN" as const, signature: "AGENT:MENU", quality: "ANSWER" as const, quotedStudyIds: [], menu: true as const })) };
     const deps = {
       audit, sendText, loadCatalog: vi.fn(async () => []), analyze: vi.fn(), downloadImage: vi.fn(), log: vi.fn(),
-      turns: { handlers: { text: vi.fn(async () => ({ body: "ruta de siempre" })) }, contactKeyFor: () => "a".repeat(64), agentPilot, greetingWait: { waitMs: 9000, pollMs: 3000, newerTurn, sleep: async () => undefined } }
+      turns: { handlers: { text: vi.fn(async () => ({ body: "ruta de siempre" })) }, contactKeyFor: () => "a".repeat(64), agentPilot, greetingWait: { waitMs: 9000, pollMs: 3000, newerTurn, sleep: async () => undefined, ...(pending === undefined ? {} : { pendingInbound }) } }
     } as unknown as QuoteDeps;
-    return { deps, sendText, newerTurn };
+    return { deps, sendText, newerTurn, pendingInbound };
   };
   it("el paciente sigue escribiendo: el menú NO sale", async () => {
     const { deps, sendText, newerTurn } = build(true);
@@ -174,6 +176,94 @@ describe("en los turnos: espera del saludo antes de enviar el menú", () => {
     expect(newerTurn).toHaveBeenCalledTimes(3);
     expect(sendText).toHaveBeenCalledTimes(1);
     expect((sendText.mock.calls[0] as unknown as [string, string])[1]).toBe(MENU);
+  });
+  it("caso real 21-nov: el paciente ya escribió «necesito cotizar» pero Kapso todavía lo retiene → el menú NO sale", async () => {
+    const { deps, sendText, pendingInbound } = build(false, true);
+    await processTurns([{ kind: "TEXT", text: "Buen dia", from, messageId: "h-3", timestamp: 1_795_265_202 }], deps);
+    expect(pendingInbound).toHaveBeenCalledWith(from, 1_795_265_202);
+    expect(sendText).not.toHaveBeenCalled();
+  });
+  it("Kapso no tiene nada nuevo (o no responde): el menú sale como siempre", async () => {
+    const { deps, sendText } = build(false, false);
+    await processTurns([{ kind: "TEXT", text: "hola", from, messageId: "h-4", timestamp: 1_795_265_202 }], deps);
+    expect((sendText.mock.calls[0] as unknown as [string, string])[1]).toBe(MENU);
+  });
+});
+
+describe("Kapso: mensajes que todavía no entregó al webhook", () => {
+  const rows = [
+    { from: "59170000000", timestamp: "1795265202", kapso: { direction: "inbound", phoneNumber: "+59170000000" } },
+    { from: "59171111111", timestamp: "1795265238", kapso: { direction: "inbound" } },
+    { from: "59170000000", timestamp: "1795265238", kapso: { direction: "inbound" } }
+  ];
+  it("solo cuenta un mensaje del MISMO paciente posterior al saludo", async () => {
+    const query = vi.fn(async () => ({ data: rows }));
+    const check = createPendingInboundCheck({ query, phoneNumberId: () => "lab" });
+    expect(await check("59170000000", 1_795_265_202)).toBe(true);
+    expect(await check("59170000000", 1_795_265_238)).toBe(false);
+    expect(await check("59172222222", 1_795_265_202)).toBe(false);
+    expect(query).toHaveBeenCalledWith(expect.objectContaining({ phoneNumberId: "lab", direction: "inbound", since: new Date(1_795_265_202_000).toISOString() }));
+  });
+  it("si Kapso falla o tarda, responde false (el menú sale como antes)", async () => {
+    const failing = createPendingInboundCheck({ query: vi.fn(async () => { throw new Error("caído"); }), phoneNumberId: () => "lab" });
+    expect(await failing("59170000000", 1)).toBe(false);
+    const slow = createPendingInboundCheck({ query: () => new Promise(() => undefined), phoneNumberId: () => "lab", timeoutMs: 10 });
+    expect(await slow("59170000000", 1)).toBe(false);
+  });
+});
+
+describe("número del menú que se CRUZA con otra respuesta (caso real 21-nov)", () => {
+  // 08:46:42 «Buen dia» · 08:47:18 «Necesito cotizar…» (retenido por Kapso) · 08:47:24 menú · 08:47:39 «1» · 08:47:42 «¡Claro! Escríbeme los nombres de los estudios…»
+  const at = (ms: string) => `2026-11-21T12:${ms}.000Z`;
+  const recent = [
+    { from: "PATIENT" as const, text: "Buen dia", at: at("46:42") },
+    { from: "PATIENT" as const, text: "Necesito cotizar unos laboratorios", at: at("47:18") },
+    { from: "ASSISTANT" as const, text: MENU, at: at("47:24") },
+    { from: "ASSISTANT" as const, text: "¡Claro! Escríbeme los nombres de los estudios que necesitas, todos juntos o uno por mensaje. Si te resulta más fácil, puedes enviarme una foto de tu receta u orden.", at: at("47:42") }
+  ];
+  const sentAt = Date.parse(at("47:39"));
+  it("el «1» se escribió mirando el menú: es la opción 1, y la respuesta que se cruzó ya la atiende → no se repite", () => {
+    const decision = menuChoiceDecision("1", recent, sentAt);
+    expect(decision?.option.code).toBe("QUOTE");
+    expect(decision?.alreadyAnswered).toBe(true);
+  });
+  it("si eligió OTRA opción («2»), se atiende: la respuesta cruzada no habla de resultados", () => {
+    const decision = menuChoiceDecision("2", recent, sentAt);
+    expect(decision?.option.code).toBe("RESULTS");
+    expect(decision?.alreadyAnswered).toBe(false);
+  });
+  it("sin la hora del mensaje se comporta como antes: el último del asistente no es el menú → no es elección", () => {
+    expect(menuChoiceDecision("1", recent)).toBeUndefined();
+  });
+  it("un «1» escrito DESPUÉS de una lista de opciones de estudios sigue siendo de esa lista", () => {
+    const list = [...recent, { from: "ASSISTANT" as const, text: "Tengo estas opciones:\n1. Glucosa en ayunas — Bs 30", at: at("48:10") }];
+    expect(menuChoiceDecision("1", list, Date.parse(at("48:20")))).toBeUndefined();
+  });
+  it("en los turnos: el «1» cruzado y ya atendido no envía nada", async () => {
+    const lease = { owner: "o", fence: 1 };
+    const audit = {
+      claim: vi.fn(async () => ({ kind: "claimed" as const, runId: "run-x", lease, seq: 3 })),
+      renewLease: vi.fn(async () => true),
+      recordIgnored: vi.fn(async () => undefined),
+      recordFailure: vi.fn(async () => undefined),
+      recordReply: vi.fn(async () => undefined),
+      reserveSend: vi.fn(async () => "reserved" as const),
+      confirmSend: vi.fn(async () => "proceed" as const)
+    } as unknown as AuditRepository;
+    const sendText = vi.fn(async () => undefined);
+    const produce = vi.fn(async () => ({ body: "¿Qué estudios quieres cotizar?", result: "conversation" as const, processingStatus: "COMPLETED" as const, stale: "NEWER_TURN" as const, quality: "ANSWER" as const, quotedStudyIds: [] }));
+    const menuChoice = vi.fn(async ({ text, sentAt: seconds }: { text: string; sentAt?: number }) => {
+      const decision = menuChoiceDecision(text, recent, seconds === undefined ? undefined : seconds * 1000);
+      return decision?.alreadyAnswered ? { canonical: decision.option.canonical, alreadyAnswered: true as const } : decision?.option.canonical;
+    });
+    const deps = {
+      audit, sendText, loadCatalog: vi.fn(async () => []), analyze: vi.fn(), downloadImage: vi.fn(), log: vi.fn(),
+      turns: { handlers: { text: vi.fn(async () => ({ body: "ruta de siempre" })) }, contactKeyFor: () => "a".repeat(64), menuChoice, agentPilot: { mode: "live" as const, isPilot: () => true, produce } }
+    } as unknown as QuoteDeps;
+    await processTurns([{ kind: "TEXT", text: "1", from: "59170000000", messageId: "c-1", timestamp: sentAt / 1000 }], deps);
+    expect(menuChoice).toHaveBeenCalledWith(expect.objectContaining({ sentAt: sentAt / 1000 }));
+    expect(produce).not.toHaveBeenCalled();
+    expect(sendText).not.toHaveBeenCalled();
   });
 });
 

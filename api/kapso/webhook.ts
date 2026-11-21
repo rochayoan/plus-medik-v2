@@ -16,7 +16,8 @@ import { ANSWER_TEXTS, answerFromKnowledge, detectTopics, lazyKnowledge, ttlCach
 import { resolveAgentSettings } from "../../src/agent/openai.js";
 import { createAgentPilot, createPilotSwitch, createRecentProvider } from "../../src/agent/pilot.js";
 import { resolveAgentMode } from "../../src/agent/pipeline.js";
-import { GREETING_WAIT_MS, isMenuMessage, lastAssistantMessage, menuChoiceOf } from "../../src/greeting-menu.js";
+import { GREETING_WAIT_MS, isMenuMessage, lastAssistantMessage, menuChoiceDecision } from "../../src/greeting-menu.js";
+import { createPendingInboundCheck } from "../../src/kapso-pending.js";
 import { resultsStageOf } from "../../src/results-silence.js";
 import { homeVisitStageOf } from "../../src/home-visit.js";
 import { waitingForPerson } from "../../src/human-request.js";
@@ -132,7 +133,12 @@ const pauseExpiry = pauseExpiryHours === undefined ? undefined : (contactKey: st
 const photoWaitMs = resolvePhotoContextWaitMs(process.env);
 const photoContextWait = photoWaitMs > 0 ? { waitMs: photoWaitMs, newerTurn: createNewerTurnCheck() } : undefined;
 // Menú del saludo: espera FIJA (src/greeting-menu.ts, sin variable) antes de enviarlo por si el paciente sigue escribiendo. Se suma a la agrupación de mensajes de Kapso.
-const greetingWait = { waitMs: GREETING_WAIT_MS, newerTurn: createNewerTurnCheck() };
+// Antes de enviarlo se pregunta también a Kapso por lo que el paciente ya escribió y Kapso todavía retiene (src/kapso-pending.ts).
+const greetingWait = {
+  waitMs: GREETING_WAIT_MS,
+  newerTurn: createNewerTurnCheck(),
+  pendingInbound: createPendingInboundCheck({ query: (input) => kapsoClient().messages.query(input) as Promise<{ data?: unknown[] }>, phoneNumberId: () => phoneNumberId(), log: (event, data) => logLine(event, data) })
+};
 const contactKeyFor = (phone: string) => contactKeyOf({ hmacKey: process.env.PLUSMEDIK_CONTACT_HMAC_KEY, labPhoneNumberId: process.env.KAPSO_PHONE_NUMBER_ID, contactPhone: phone });
 // Historial de TODOS los mensajes (ENCENDIDO por defecto, sin variables nuevas; ver docs/g6/05-historial-de-mensajes.md y src/message-history.ts): guarda en Supabase lo que escriben los pacientes, las respuestas del agente
 // y los mensajes de la recepción humana, para conservarlos y usarlos desde otros proyectos. Exige las migraciones 21 y 22 aplicadas (sin ellas la escritura falla sin afectar al agente), PLUSMEDIK_CONTACT_HMAC_KEY y
@@ -241,11 +247,14 @@ logLine("agent_webhook_config", {
 });
 if (agentSettings && !(turnsEnabled && textHandlerEnabled)) logLine("agent_config_invalid", { error: "TURNS_AND_TEXT_HANDLER_REQUIRED" });
 // Un número suelto justo después del menú («2») es la elección de esa opción: se lee el último mensaje del asistente en el historial (solo ante un número).
-const recentForMenu = createRecentProvider({});
-const menuChoice = async ({ from, messageId, text, excludeIds }: { from: string; text: string; messageId: string; excludeIds: readonly string[] }): Promise<string | undefined> => {
+const recentForMenu = createRecentProvider({ withTimes: true });
+// Con la hora del mensaje se lee lo que el paciente VEÍA al escribir: un «1» escrito mirando el menú es la opción 1 aunque justo después saliera otra respuesta; si esa respuesta ya la atiende, no se repite.
+const menuChoice = async ({ from, messageId, text, excludeIds, sentAt }: { from: string; text: string; messageId: string; excludeIds: readonly string[]; sentAt?: number }) => {
   const contactKey = contactKeyFor(from);
   if (!contactKey) return undefined;
-  return menuChoiceOf(text, await recentForMenu({ from, messageId, contactKey, excludeIds }))?.canonical;
+  const decision = menuChoiceDecision(text, await recentForMenu({ from, messageId, contactKey, excludeIds }), sentAt === undefined ? undefined : sentAt * 1000);
+  if (!decision) return undefined;
+  return decision.alreadyAnswered ? { canonical: decision.option.canonical, alreadyAnswered: true as const } : decision.option.canonical;
 };
 // ¿El último mensaje del asistente fue el menú? (solo para medir una elección de «resultados» escrita con palabras).
 const afterMenu = async ({ from, messageId, excludeIds }: { from: string; messageId: string; excludeIds: readonly string[] }): Promise<boolean> => {
