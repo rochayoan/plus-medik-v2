@@ -388,11 +388,30 @@ describe("runAgentTurn: tubería corta con un modelo simulado", () => {
       expect(failing.status).toBe("SILENT");
     });
 
-    it("domicilio: se registra y el texto puede mencionar al asesor", async () => {
+    it("domicilio: sale el texto fijo y el aviso al CRM NO sale aquí (sale al agradecer los datos, dueño 21-nov)", async () => {
       const handoff = vi.fn(async () => true);
-      const decision = await runAgentTurn({ model: model({ handoff: "HOME_VISIT" }, ["Sí, hacemos estudios a domicilio, con costo de delivery. Un asesor le dará la información."]), tools, handoff }, { utterances: [u("hacen estudios a domicilio?")], capabilities: withCrm });
-      expect(decision).toMatchObject({ status: "VERIFIED", handoffRegistered: true });
-      expect(handoff).toHaveBeenCalledWith("HOME_VISIT");
+      const decision = await runAgentTurn({ model: model({ handoff: "HOME_VISIT" }, ["no debería usarse"]), tools, handoff }, { utterances: [u("hacen estudios a domicilio?")], capabilities: withCrm });
+      expect(decision).toMatchObject({ status: "VERIFIED", handoffRequested: true });
+      expect(decision.handoffRegistered).toBeUndefined();
+      expect(decision.reply).toContain("¡Sí ofrecemos ese servicio! 🏠");
+      expect(handoff).not.toHaveBeenCalled();
+    });
+
+    it("«lo confirma la doctora»: si la cotización trae ese aviso, va STUDY_TO_CONFIRM al CRM (sin cambiar la respuesta); sin el aviso o sin CRM, nada", async () => {
+      const doctor = ["👩‍⚕️ *Este estudio te lo confirma la doctora:*", "", "▫️ Ecografia de abdomen", "", "Te escribirá por este chat con el precio y el tiempo de entrega. 😊"].join("\n");
+      const fakeQuote = (blocks: string[]) => createToolRegistry([{ name: "quote_studies", description: "x", readOnly: true, input: z.object({}).passthrough(), run: async () => ({ facts: [{ source: "QUOTE_ENGINE", text: "Estudios que confirma la doctora: ecografia de abdomen", refs: [] }], blocks }) }]);
+      const call = { tool: "quote_studies", input: {} };
+      const handoff = vi.fn(async () => true);
+      const decision = await runAgentTurn({ model: model({ toolCalls: [call] }, ["Ese estudio te lo confirma la doctora."]), tools: fakeQuote([doctor]), handoff }, { utterances: [u("cotiza ecografia de abdomen")], capabilities: withCrm });
+      expect(decision.status).toBe("VERIFIED");
+      expect(decision.reply).toContain(doctor);
+      expect(handoff).toHaveBeenCalledWith("STUDY_TO_CONFIRM");
+      const none = vi.fn(async () => true);
+      await runAgentTurn({ model: model({ toolCalls: [call] }, ["Listo."]), tools: fakeQuote(["🩺 *PlusMedik* · Tu cotización"]), handoff: none }, { utterances: [u("cotiza hemograma")], capabilities: withCrm });
+      expect(none).not.toHaveBeenCalled();
+      const off = vi.fn(async () => true);
+      await runAgentTurn({ model: model({ toolCalls: [call] }, ["Ese estudio te lo confirma la doctora."]), tools: fakeQuote([doctor]), handoff: off }, { utterances: [u("cotiza ecografia de abdomen")] });
+      expect(off).not.toHaveBeenCalled();
     });
   });
 

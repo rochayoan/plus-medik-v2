@@ -19,6 +19,8 @@ export interface CrmOutboxOptions {
   encryptionKey: string;
   // phone_number_id de WhatsApp del laboratorio (lo exige el contrato del CRM).
   phoneNumberId: string;
+  // Números de prueba (solo dígitos): sus casos van marcados como prueba (sin alarma en el CRM).
+  testPhones?: ReadonlySet<string>;
   log(event: string, data: Record<string, unknown>): void;
   // Intentos en línea dentro del turno (por defecto 2, separados por immediateDelayMs). Cada uno cuenta para el máximo de intentos.
   immediateAttempts?: number;
@@ -76,7 +78,7 @@ export class CrmOutbox implements CrmHandoff {
       const origin = input.originRunId ?? runId;
       let built;
       try {
-        built = buildPayload(input, origin, this.options.phoneNumberId);
+        built = buildPayload(input, origin, this.options.phoneNumberId, this.options.testPhones);
       } catch (error) {
         failure = error instanceof PayloadError ? error.code : "PAYLOAD";
         return;

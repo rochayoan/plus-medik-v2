@@ -48,6 +48,16 @@ describe("carga útil: el contrato del receptor del CRM", () => {
     expect(buildPayload(input(), RUN, PHONE_ID).failureReason.startsWith("HUMAN_REQUEST:")).toBe(true);
   });
 
+  it("puerta y «confirma la doctora»: también encabezan failureReason con su etiqueta", () => {
+    for (const label of ["AT_DOOR", "STUDY_TO_CONFIRM"] as const) expect(buildPayload(input({ label }), RUN, PHONE_ID).failureReason).toMatch(new RegExp(`^${label}: `));
+  });
+
+  it("números de prueba del dueño: el caso va con agentResult.test = true (el CRM lo muestra como «Prueba», sin alarma); los demás, sin marca", () => {
+    expect(buildPayload(input(), RUN, PHONE_ID, new Set(["59170000001"])).agentResult.test).toBe(true);
+    expect(buildPayload(input(), RUN, PHONE_ID, new Set(["59170000099"])).agentResult.test).toBeUndefined();
+    expect(buildPayload(input(), RUN, PHONE_ID).agentResult.test).toBeUndefined();
+  });
+
   it("respeta los límites del receptor: eventId ≤ 120, failureReason ≤ 1000, ≤ 60 estudios y agentResult + detectedTests ≤ 40.000 caracteres (nunca se pierde el motivo)", () => {
     expect(eventIdOf(RUN).length).toBeLessThanOrEqual(LIMITS.eventId);
     const many = Array.from({ length: 200 }, (_, i) => ({ catalogTestId: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`, name: `ESTUDIO ${i} ` + "X".repeat(150) }));

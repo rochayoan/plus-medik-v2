@@ -27,7 +27,8 @@ export interface Utterance {
 }
 
 // ALLIED_LAB: convenio o laboratorio aliado (solo humano: se registra el caso y el agente CALLA). HOME_VISIT: pide un estudio a domicilio (se registra y se responde con el aviso aprobado).
-export type HandoffReason = "HUMAN_REQUEST" | "MEDICAL" | "OUT_OF_SCOPE" | "ALLIED_LAB" | "HOME_VISIT";
+// STUDY_TO_CONFIRM: la cotización dice que la doctora confirma estudios que no están en el catálogo (aviso al CRM; no cambia la respuesta).
+export type HandoffReason = "HUMAN_REQUEST" | "MEDICAL" | "OUT_OF_SCOPE" | "ALLIED_LAB" | "HOME_VISIT" | "STUDY_TO_CONFIRM";
 
 export interface ToolCall { tool: string; input: unknown }
 
