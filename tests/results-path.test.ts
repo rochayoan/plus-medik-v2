@@ -53,6 +53,8 @@ describe("en qué paso está el contacto (mensajes recientes del asistente)", ()
     expect(resultsStageOf([ask])).toBe("ASKED");
     expect(resultsStageOf([ask, { from: "PATIENT", text: "Porfirio" }, { from: "ASSISTANT", text: RESULTS_NAME_ASK }])).toBe("NAME_ASKED");
     expect(resultsStageOf([ask, { from: "PATIENT", text: "Porfirio Lozada" }, { from: "ASSISTANT", text: RESULTS_THANKS }])).toBe("THANKED");
+    // Quien recibió el agradecimiento anterior (hasta el 21-nov) sigue en silencio.
+    expect(resultsStageOf([ask, { from: "ASSISTANT", text: "Gracias 🙏 ya tengo tus datos. La doctora verifica tu resultado y te lo envía por aquí." }])).toBe("THANKED");
   });
   it("el texto anterior (hasta el 21-nov) también cuenta como datos pedidos", () => {
     expect(resultsStageOf([{ from: "ASSISTANT", text: "Buenas tardes, gracias por preferirnos 😊 Verifico. Ve pasándome el nombre completo del paciente y su carnet de identidad, o el comprobante de pago, por favor." }])).toBe("ASKED");

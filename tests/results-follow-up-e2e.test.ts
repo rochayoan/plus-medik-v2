@@ -42,6 +42,12 @@ describe("camino 2: después de pedir los datos", () => {
     expect(sent()).toEqual([RESULTS_THANKS]);
     expect(handler).not.toHaveBeenCalled();
   });
+  it("se presenta con el nombre completo en un mensaje largo (caso real 21-nov): agradece con el texto fijo, sin pasar por el agente", async () => {
+    const { deps, sent, handler } = build("ASKED");
+    await processTurns([turn("Mi nombre es Ronald Sosa Céspedes y este número dejé como referencia", "n-long")], deps);
+    expect(sent()).toEqual([RESULTS_THANKS]);
+    expect(handler).not.toHaveBeenCalled();
+  });
   it("solo una foto (el comprobante): agradece y la foto NO se analiza", async () => {
     const { deps, sent, analyze } = build("ASKED");
     await processTurns([image("img-1")], deps);
