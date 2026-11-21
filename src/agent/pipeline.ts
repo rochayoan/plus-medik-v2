@@ -1,3 +1,4 @@
+import { homeVisitMessage } from "../home-visit.js";
 import { isCourtesyOnly } from "./courtesy.js";
 import { stripPaymentTalk } from "../payment-talk.js";
 import { describeProviderError } from "../provider-error.js";
@@ -144,13 +145,5 @@ export async function runAgentTurn(deps: AgentDeps, input: AgentTurnInput): Prom
   return done({ status: "REJECTED", ...base });
 }
 
-// Respuesta fija ante un pedido de estudios a domicilio: confirma el servicio, avisa del transporte (sin cifras) y pide lo que la Dra siempre pide para ir (ubicación, estudios, nombre y edad; internado: servicio, piso y cama).
-export function homeVisitMessage(registered: boolean): string {
-  return [
-    "¡Sí ofrecemos ese servicio! 🏠 Enseguida veremos si hay personal disponible para ir; el transporte tiene un costo aparte. Ve pasándome, por favor:",
-    "📍 La ubicación (puedes enviarla por WhatsApp)",
-    "🧪 Qué estudios necesitas (o la foto de la receta)",
-    "👤 Nombre completo y edad del paciente (si está internado: servicio, piso y cama)",
-    ...(registered ? ["", "Una persona del laboratorio te confirmará por este chat."] : [])
-  ].join("\n");
-}
+// Respuesta fija ante un pedido de estudios a domicilio: vive en src/home-visit.ts (los turnos reconocen el paso por ese texto).
+export { homeVisitMessage } from "../home-visit.js";

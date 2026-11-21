@@ -9,6 +9,7 @@ import type { ConversationRecorder } from "./conversation-state-store.js";
 import type { CrmHandoff } from "./crm-outbox/types.js";
 import type { QuoteSessionsConfig } from "./quote-session.js";
 import type { ResultsStage } from "./results-silence.js";
+import type { HomeVisitStage } from "./home-visit.js";
 import type { ReplyGuardConfig } from "./reply-guard.js";
 import type { TurnHandlers } from "./turns.js";
 import type { QuoteDeps } from "./whatsapp-quote.js";
@@ -35,6 +36,8 @@ export interface TurnsConfig {
   // En qué paso del camino «Consultar resultados» está el contacto (pidió los datos, pidió el nombre completo o ya agradeció), según los mensajes recientes del asistente (src/results-silence.ts,
   // resultsStageOf). Nunca lanza; sin esto, cada consulta de resultados empieza de cero.
   resultsStage?(input: { from: string; messageId: string; excludeIds: readonly string[] }): Promise<ResultsStage | undefined>;
+  // Igual para el camino «Estudios a domicilio» (src/home-visit.ts, homeVisitStageOf): ¿ya se le envió el texto fijo o ya se agradecieron los datos? Nunca lanza.
+  homeVisitStage?(input: { from: string; messageId: string; excludeIds: readonly string[] }): Promise<HomeVisitStage | undefined>;
   // Espera de contexto de una foto dudosa que se atiende sola (src/photo-context-wait.ts): sin ella, la foto responde de inmediato.
   photoContextWait?: { waitMs: number; pollMs?: number; newerTurn(contactKey: string, seq: number): Promise<boolean>; sleep?(ms: number): Promise<void> };
   // MENÚ del saludo: antes de enviarlo se espera hasta `waitMs` por si el paciente escribe algo más (suele hacerlo en segundos); si llega otro mensaje, el menú no sale y ese mensaje se atiende con su contexto.
