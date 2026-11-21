@@ -247,7 +247,7 @@ logLine("agent_webhook_config", {
 });
 if (agentSettings && !(turnsEnabled && textHandlerEnabled)) logLine("agent_config_invalid", { error: "TURNS_AND_TEXT_HANDLER_REQUIRED" });
 // Un número suelto justo después del menú («2») es la elección de esa opción: se lee el último mensaje del asistente en el historial (solo ante un número).
-const recentForMenu = createRecentProvider({});
+const recentForMenu = createRecentProvider({ withTimes: true });
 // Con la hora del mensaje se lee lo que el paciente VEÍA al escribir: un «1» escrito mirando el menú es la opción 1 aunque justo después saliera otra respuesta; si esa respuesta ya la atiende, no se repite.
 const menuChoice = async ({ from, messageId, text, excludeIds, sentAt }: { from: string; text: string; messageId: string; excludeIds: readonly string[]; sentAt?: number }) => {
   const contactKey = contactKeyFor(from);

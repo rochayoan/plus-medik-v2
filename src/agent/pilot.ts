@@ -68,6 +68,8 @@ export function createPilotSwitch(options: {
 export function createRecentProvider(options: {
   rpc?: (name: string, args: Record<string, unknown>) => Promise<Record<string, unknown>>;
   now?: () => number;
+  // Incluir la hora de cada mensaje (`at`). Solo para la elección del menú (qué veía el paciente al escribir); al modelo le llegan los mensajes sin hora, igual que siempre.
+  withTimes?: boolean;
 }): NonNullable<AgentContextOptions["recent"]> {
   let rpc = options.rpc;
   const call = (name: string, args: Record<string, unknown>) => (rpc ??= createSupabaseRpc({ requestTimeoutMs: 3000, retryDelayMs: 150 }))(name, args);
@@ -82,7 +84,7 @@ export function createRecentProvider(options: {
       if (typeof body !== "string" || body.trim() === "") continue;
       const from: RecentEntry["from"] | undefined = direction === "IN" ? "PATIENT" : actor === "AGENT" ? "ASSISTANT" : actor === "HUMAN" ? "STAFF" : undefined;
       if (!from) continue;
-      entries.push({ from, text: body, ...(typeof at === "string" ? { at } : {}) });
+      entries.push({ from, text: body, ...(options.withTimes && typeof at === "string" ? { at } : {}) });
     }
     return entries;
   };
