@@ -2,6 +2,7 @@ import { MENU_OPTIONS, mightBeMenuChoice } from "./greeting-menu.js";
 import { repeatCandidate } from "./attention-filter.js";
 import { withPhotoContextWait } from "./photo-context-wait.js";
 import { AT_DOOR_MESSAGE, isAtClosedDoor } from "./at-door.js";
+import { HOME_VISIT_SIGNATURE, HOME_VISIT_THANKS, looksLikeHomeVisitData } from "./home-visit.js";
 import { asksOtherPersonPickup, decideResultsAction, isCourtesy, looksLikeIdentification, patientDataIn, RESULTS_SIGNATURES, resultsReplyBody, routeResultsMessage, type ResultsAction } from "./results-silence.js";
 import { audioFailureProducer, resolveAudioTurns } from "./audio-turns.js";
 import type { AudioFailureCode } from "./audio/types.js";
@@ -437,6 +438,35 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
     const textIndices = indices.filter((index) => textOf(index) !== undefined);
     resultsReply.set(from, { action, responder: textIndices.length > 0 ? textIndices[textIndices.length - 1]! : indices[indices.length - 1]! });
   }
+  // CAMINO 4 «Estudios a domicilio» (src/home-visit.ts, dueño 21-nov): después del texto fijo, los datos del paciente (nombre, edad, servicio, piso, cama, dirección) se agradecen UNA vez y desde ahí
+  // silencio en todo lo del domicilio (lo confirma la Dra). Estudios, la foto de la receta o una pregunta siguen el flujo normal (se cotizan o se responden).
+  const homeVisitStage = deps.turns?.homeVisitStage;
+  const homeThanks = new Map<string, number>();
+  const homeSilent = new Set<string>();
+  if (homeVisitStage) {
+    for (const [from, indices] of perContact) {
+      if (atDoor.has(from) || resultsReply.has(from) || resultsOnly.has(from) || resultsRouting.has(from)) continue;
+      const isText = (index: number) => turns[index]!.kind === "TEXT" && typeof turns[index]!.text === "string";
+      const textIndices = indices.filter(isText);
+      const homeData = textIndices.filter((index) => looksLikeHomeVisitData(turns[index]!.text!));
+      const allText = textIndices.length === indices.length;
+      const courtesyOnly = allText && textIndices.length > 0 && textIndices.every((index) => isCourtesy(turns[index]!.text!));
+      // Solo interesa un lote hecho de datos del paciente, cortesía o fotos; cualquier pedido propio sigue el flujo normal.
+      if (!textIndices.every((index) => looksLikeHomeVisitData(turns[index]!.text!) || isCourtesy(turns[index]!.text!))) continue;
+      if (allText && homeData.length === 0 && !courtesyOnly) continue;
+      const stage = await homeVisitStage({ from, messageId: turns[indices[0]!]!.messageId, excludeIds: indices.map((index) => turns[index]!.messageId) }).catch(() => undefined);
+      if (!stage) continue;
+      // Antes de agradecer, una foto sigue su flujo (puede ser la receta: se cotiza).
+      if (stage === "ASKED" && !allText) continue;
+      if (stage === "THANKED" || courtesyOnly) {
+        homeSilent.add(from);
+        deps.log("home_visit_path", { action: "SILENT", stage });
+        continue;
+      }
+      homeThanks.set(from, homeData[homeData.length - 1]!);
+      deps.log("home_visit_path", { action: "THANKS", stage });
+    }
+  }
   // Si también pregunta por el HORARIO GENERAL, procesar exclusivamente
   // esa consulta. Nunca entregar al modelo ni al conocimiento el texto privado
   // sobre resultados. Se conserva claim/lease y un solo envío por lote.
@@ -474,10 +504,11 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
     }
     return { kind: "reply", body: AT_DOOR_MESSAGE, result: "conversation", processingStatus: "COMPLETED", stale: "NONE", signature: "AT_DOOR" };
   };
+  const homeThanksProducer: TurnProducer = async () => ({ kind: "reply", body: HOME_VISIT_THANKS, result: "conversation", processingStatus: "COMPLETED", stale: "NONE", signature: HOME_VISIT_SIGNATURE });
   // Un contacto del PILOTO (solo mensajes de texto o audio) también se atiende como lote, aunque traiga un solo mensaje: así su respuesta sale por la misma ruta de un solo envío por lote.
   const pilot = deps.turns?.agentPilot;
   const isPilotBatch = (from: string, indices: readonly number[]) => Boolean(pilot?.isPilot(from)) && indices.every((index) => turns[index]!.kind === "TEXT" || turns[index]!.kind === "AUDIO");
-  const batched = new Set([...perContact.entries()].filter(([from, indices]) => !resultsOnly.has(from) && !resultsReply.has(from) && !atDoor.has(from) && (indices.length > 1 || isPilotBatch(from, indices))).map(([from]) => from));
+  const batched = new Set([...perContact.entries()].filter(([from, indices]) => !resultsOnly.has(from) && !resultsReply.has(from) && !atDoor.has(from) && !homeThanks.has(from) && !homeSilent.has(from) && (indices.length > 1 || isPilotBatch(from, indices))).map(([from]) => from));
 
   const claims = new Map<number, ClaimedTurn>();
   // Mensajes que no se reclamaron porque una persona tiene la palabra (pausa humana): no se atienden solos, pero la memoria en sombra los registra como pendientes.
@@ -535,10 +566,11 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
       try {
         const results = resultsReply.get(turn.from);
         const door = atDoor.get(turn.from);
-        const base = door !== undefined ? (door === index ? doorProducer(turn) : silenceProducer) : results ? (results.responder === index ? resultsProducer(turn, results.action) : silenceProducer) : resultsOnly.has(turn.from) ? silenceProducer : producerFor(turn, deps)!;
+        const home = homeThanks.get(turn.from);
+        const base = door !== undefined ? (door === index ? doorProducer(turn) : silenceProducer) : home !== undefined ? (home === index ? homeThanksProducer : silenceProducer) : homeSilent.has(turn.from) ? silenceProducer : results ? (results.responder === index ? resultsProducer(turn, results.action) : silenceProducer) : resultsOnly.has(turn.from) ? silenceProducer : producerFor(turn, deps)!;
         // Una foto que se atiende SOLA y que no se pudo cotizar espera un rato a que llegue el texto del paciente (ver src/photo-context-wait.ts); sin la configuración, responde de inmediato.
         const photoWait = deps.turns?.photoContextWait;
-        const producer = turn.kind === "IMAGE" && !atDoor.has(turn.from) && !resultsReply.has(turn.from) && !resultsOnly.has(turn.from) && photoWait ? withPhotoContextWait(base, turn.from, { ...photoWait, contactKeyFor: deps.turns!.contactKeyFor, log: deps.log }) : base;
+        const producer = turn.kind === "IMAGE" && !atDoor.has(turn.from) && !homeSilent.has(turn.from) && !resultsReply.has(turn.from) && !resultsOnly.has(turn.from) && photoWait ? withPhotoContextWait(base, turn.from, { ...photoWait, contactKeyFor: deps.turns!.contactKeyFor, log: deps.log }) : base;
         const result = await claimed.run(producer);
         reports[index] = { messageId: turn.messageId, result };
         if (resultsOnly.has(turn.from)) deps.log("results_query_silenced", { kind: "RESULTS_ONLY", sent: false });
