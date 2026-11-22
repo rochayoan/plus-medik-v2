@@ -4,6 +4,7 @@ import { withPhotoContextWait } from "./photo-context-wait.js";
 import { AT_DOOR_MESSAGE, isAtClosedDoor } from "./at-door.js";
 import { plain as plainText } from "./text-normalize.js";
 import { HUMAN_REQUEST_MESSAGE, HUMAN_REQUEST_SIGNATURE, isHumanRequest } from "./human-request.js";
+import { isCorrectionFollowUp, isResultCorrection, RESULT_CORRECTION_MESSAGE, RESULT_CORRECTION_SIGNATURE } from "./result-correction.js";
 import { HOME_VISIT_SIGNATURE, HOME_VISIT_THANKS, looksLikeHomeVisitData } from "./home-visit.js";
 import { asksOtherPersonPickup, decideResultsAction, isCourtesy, looksLikeIdentification, patientDataIn, RESULTS_SIGNATURES, resultsReplyBody, routeResultsMessage, type ResultsAction } from "./results-silence.js";
 import { audioFailureProducer, resolveAudioTurns } from "./audio-turns.js";
@@ -438,8 +439,28 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
       deps.log("human_request_path", { action: "ACK" });
     }
   }
-  const resultsOnly = new Set([...resultsRouting.entries()].filter(([from, action]) => action === "SILENT" && !atDoor.has(from) && !personReply.has(from) && !personSilent.has(from)).map(([from]) => from));
+  // CORREGIR UN DATO DEL RESULTADO (src/result-correction.ts, revisión del 21-nov): «me lo pueden corregir el nombre» (con o sin la foto del resultado) recibe un texto fijo cálido UNA vez y el caso va al
+  // CRM; lo que mande después sobre la corrección («Es Yuselin», «con U») se deja a la Dra. Solo la persona en la puerta y el pedido de una persona van antes.
+  const correctionReply = new Map<string, number>();
+  const correctionSilent = new Set<string>();
+  for (const [from, indices] of perContact) {
+    if (atDoor.has(from) || personReply.has(from) || personSilent.has(from) || !deps.turns?.agentPilot?.isPilot(from)) continue;
+    const textIndices = indices.filter((index) => turns[index]!.kind === "TEXT" && typeof turns[index]!.text === "string");
+    const asks = textIndices.filter((index) => isResultCorrection(turns[index]!.text!));
+    if (asks.length > 0) {
+      correctionReply.set(from, asks[asks.length - 1]!);
+      deps.log("result_correction_path", { action: "ACK" });
+      continue;
+    }
+    if (!deps.turns?.correctionAcked || !indices.every((index) => turns[index]!.kind === "IMAGE" || (textIndices.includes(index) && (isCorrectionFollowUp(turns[index]!.text!) || isCourtesy(turns[index]!.text!))))) continue;
+    if (await deps.turns.correctionAcked({ from, messageId: turns[indices[0]!]!.messageId, excludeIds: indices.map((index) => turns[index]!.messageId) }).catch(() => false)) {
+      correctionSilent.add(from);
+      deps.log("result_correction_path", { action: "SILENT" });
+    }
+  }
+  const resultsOnly = new Set([...resultsRouting.entries()].filter(([from, action]) => action === "SILENT" && !atDoor.has(from) && !personReply.has(from) && !personSilent.has(from) && !correctionReply.has(from)).map(([from]) => from));
   for (const from of personSilent) resultsOnly.add(from);
+  for (const from of correctionSilent) resultsOnly.add(from);
   // CAMINO 2 «Consultar resultados» (src/results-silence.ts, decisión del dueño 21-nov): pedir los datos, pedir el nombre completo UNA vez si falta, agradecer y desde ahí silencio (lo atiende la Dra). El paso
   // del contacto se lee de los mensajes recientes solo si el lote es una consulta de resultados o parece el dato pedido (un nombre, una foto, «gracias»). Responde UNA vez por lote (en el último texto); el
   // resto del lote se cierra sin respuesta. Las fotos no se analizan.
@@ -447,7 +468,7 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
   const resultsReply = new Map<string, { action: Exclude<ResultsAction, "SILENT">; responder: number }>();
   for (const [from, indices] of perContact) {
     const routing = resultsRouting.get(from);
-    if (atDoor.has(from) || personReply.has(from) || personSilent.has(from) || routing === "SILENT" || routing === "OFFICE_HOURS") continue;
+    if (atDoor.has(from) || personReply.has(from) || personSilent.has(from) || correctionReply.has(from) || routing === "SILENT" || routing === "OFFICE_HOURS") continue;
     const textOf = (index: number): string | undefined => (turns[index]!.kind === "TEXT" && typeof turns[index]!.text === "string" ? turns[index]!.text! : undefined);
     const texts = indices.flatMap((index) => textOf(index) ?? []);
     const hasImage = indices.some((index) => turns[index]!.kind === "IMAGE");
@@ -472,7 +493,7 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
   const homeSilent = new Set<string>();
   if (homeVisitStage) {
     for (const [from, indices] of perContact) {
-      if (atDoor.has(from) || personReply.has(from) || resultsReply.has(from) || resultsOnly.has(from) || resultsRouting.has(from)) continue;
+      if (atDoor.has(from) || personReply.has(from) || correctionReply.has(from) || resultsReply.has(from) || resultsOnly.has(from) || resultsRouting.has(from)) continue;
       const isText = (index: number) => turns[index]!.kind === "TEXT" && typeof turns[index]!.text === "string";
       const textIndices = indices.filter(isText);
       const homeData = textIndices.filter((index) => looksLikeHomeVisitData(turns[index]!.text!));
@@ -542,6 +563,18 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
     }
     return { kind: "reply", body: HUMAN_REQUEST_MESSAGE, result: "conversation", processingStatus: "COMPLETED", stale: "NONE", signature: HUMAN_REQUEST_SIGNATURE };
   };
+  // Corrección de un dato del resultado: el aviso a la Dra va al CRM con la etiqueta de resultados (mejor esfuerzo; el texto fijo sale igual).
+  const correctionProducer = (turn: IncomingTurn): TurnProducer => async (ctx) => {
+    const crm = deps.turns?.crmHandoff;
+    if (crm) {
+      try {
+        await crm.submit(ctx, [{ kapsoMessageId: turn.messageId, contactPhone: turn.from, kind: "CONVERSATION", reasons: ["HUMAN_REQUEST"], label: "RESULTS_READY" }]);
+      } catch {
+        deps.log("result_correction_crm_submit_failed", {});
+      }
+    }
+    return { kind: "reply", body: RESULT_CORRECTION_MESSAGE, result: "conversation", processingStatus: "COMPLETED", stale: "NONE", signature: RESULT_CORRECTION_SIGNATURE };
+  };
   // Domicilio: el aviso al CRM va AQUÍ, con los datos ya reunidos (dueño, 21-nov: la alarma llega cuando ya mandó sus datos). Mejor esfuerzo.
   const homeThanksProducer = (turn: IncomingTurn): TurnProducer => async (ctx) => {
     const crm = deps.turns?.crmHandoff;
@@ -557,7 +590,7 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
   // Un contacto del PILOTO (solo mensajes de texto o audio) también se atiende como lote, aunque traiga un solo mensaje: así su respuesta sale por la misma ruta de un solo envío por lote.
   const pilot = deps.turns?.agentPilot;
   const isPilotBatch = (from: string, indices: readonly number[]) => Boolean(pilot?.isPilot(from)) && indices.every((index) => turns[index]!.kind === "TEXT" || turns[index]!.kind === "AUDIO");
-  const batched = new Set([...perContact.entries()].filter(([from, indices]) => !resultsOnly.has(from) && !resultsReply.has(from) && !atDoor.has(from) && !personReply.has(from) && !homeThanks.has(from) && !homeSilent.has(from) && (indices.length > 1 || isPilotBatch(from, indices))).map(([from]) => from));
+  const batched = new Set([...perContact.entries()].filter(([from, indices]) => !resultsOnly.has(from) && !resultsReply.has(from) && !atDoor.has(from) && !personReply.has(from) && !correctionReply.has(from) && !homeThanks.has(from) && !homeSilent.has(from) && (indices.length > 1 || isPilotBatch(from, indices))).map(([from]) => from));
 
   const claims = new Map<number, ClaimedTurn>();
   // Mensajes que no se reclamaron porque una persona tiene la palabra (pausa humana): no se atienden solos, pero la memoria en sombra los registra como pendientes.
@@ -617,10 +650,11 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
         const door = atDoor.get(turn.from);
         const home = homeThanks.get(turn.from);
         const person = personReply.get(turn.from);
-        const base = door !== undefined ? (door === index ? doorProducer(turn) : silenceProducer) : person !== undefined ? (person === index ? personProducer(turn) : silenceProducer) : home !== undefined ? (home === index ? homeThanksProducer(turn) : silenceProducer) : homeSilent.has(turn.from) ? silenceProducer : results ? (results.responder === index ? resultsProducer(turn, results.action) : silenceProducer) : resultsOnly.has(turn.from) ? silenceProducer : producerFor(turn, deps)!;
+        const correction = correctionReply.get(turn.from);
+        const base = door !== undefined ? (door === index ? doorProducer(turn) : silenceProducer) : person !== undefined ? (person === index ? personProducer(turn) : silenceProducer) : correction !== undefined ? (correction === index ? correctionProducer(turn) : silenceProducer) : home !== undefined ? (home === index ? homeThanksProducer(turn) : silenceProducer) : homeSilent.has(turn.from) ? silenceProducer : results ? (results.responder === index ? resultsProducer(turn, results.action) : silenceProducer) : resultsOnly.has(turn.from) ? silenceProducer : producerFor(turn, deps)!;
         // Una foto que se atiende SOLA y que no se pudo cotizar espera un rato a que llegue el texto del paciente (ver src/photo-context-wait.ts); sin la configuración, responde de inmediato.
         const photoWait = deps.turns?.photoContextWait;
-        const producer = turn.kind === "IMAGE" && !atDoor.has(turn.from) && !personReply.has(turn.from) && !homeSilent.has(turn.from) && !resultsReply.has(turn.from) && !resultsOnly.has(turn.from) && photoWait ? withPhotoContextWait(base, turn.from, { ...photoWait, contactKeyFor: deps.turns!.contactKeyFor, log: deps.log }) : base;
+        const producer = turn.kind === "IMAGE" && !atDoor.has(turn.from) && !personReply.has(turn.from) && !correctionReply.has(turn.from) && !homeSilent.has(turn.from) && !resultsReply.has(turn.from) && !resultsOnly.has(turn.from) && photoWait ? withPhotoContextWait(base, turn.from, { ...photoWait, contactKeyFor: deps.turns!.contactKeyFor, log: deps.log }) : base;
         const result = await claimed.run(producer);
         reports[index] = { messageId: turn.messageId, result };
         if (resultsOnly.has(turn.from)) deps.log("results_query_silenced", { kind: "RESULTS_ONLY", sent: false });
@@ -854,13 +888,18 @@ async function processContactBatch(
       // Convenio/aliado y domicilio se guardan con un motivo ya permitido de la cola, pero viajan al CRM con su propia etiqueta (encabeza failureReason).
       const LABELS: Partial<Record<keyof typeof REASONS, "ALLIED_LAB" | "HOME_VISIT" | "STUDY_TO_CONFIRM">> = { ALLIED_LAB: "ALLIED_LAB", HOME_VISIT: "HOME_VISIT", STUDY_TO_CONFIRM: "STUDY_TO_CONFIRM" };
       produce = async (ctx) => {
+        // Un silencio del agente CIERRA su corrida («sin respuesta»), como todo productor que devuelve «none»: antes quedaba «en proceso» para siempre (revisión 21-nov: menú saltado, convenio).
+        const closeSilent = async (): Promise<Produced> => {
+          await ctx.persist("close", (audit, runId, lease) => audit.recordIgnored(runId, "NO_REPLY", lease)).catch(() => undefined);
+          return { kind: "none" };
+        };
         // El número del menú se cruzó con una respuesta que ya lo atiende (el paciente la recibió justo después de escribirlo): no se repite. Se cierra como un silencio atendido.
         if (contactTurns.length === 1 && contactTurns[0]!.menuAlreadyAnswered) {
           await Promise.all(drafts.map((draft) => draft.claimed.skip().catch(() => undefined)));
           included = runnable.map(() => true);
           deps.log("agent_menu", { event: "CROSSED_SILENT" });
           deps.turns?.convState?.agentReply({ from, messageId: `silent:${leadId}`, replyTo: leadId, reply: { body: "", result: "silent", quality: "ANSWER" } });
-          return { kind: "none" };
+          return closeSilent();
         }
         const piloted = await pilot.produce({
           from,
@@ -874,7 +913,7 @@ async function processContactBatch(
         // Silencio ante lo claramente ajeno al laboratorio: no se envía nada; la memoria da por atendida la petición para que no quede como pendiente.
         if (piloted.silent) {
           deps.turns?.convState?.agentReply({ from, messageId: `silent:${leadId}`, replyTo: leadId, reply: { body: "", result: "silent", quality: "ANSWER" } });
-          return { kind: "none" };
+          return closeSilent();
         }
         // MENÚ del saludo: se espera un poco por si el paciente sigue escribiendo; si escribe, el menú no sale (su mensaje nuevo se atiende con el saludo en el contexto).
         const greetingWait = deps.turns?.greetingWait;
@@ -891,7 +930,7 @@ async function processContactBatch(
               deps.log("agent_menu", { event: "SKIPPED", reason: "PATIENT_KEPT_WRITING", waitedMs: waited });
               void deps.turns?.menuEvents?.(contactKey, { event: "SKIPPED" });
               deps.turns?.convState?.agentReply({ from, messageId: `silent:${leadId}`, replyTo: leadId, reply: { body: "", result: "silent", quality: "ANSWER" } });
-              return { kind: "none" };
+              return closeSilent();
             }
           }
           // Lo que Kapso todavía retiene (agrupa ~20 s antes de entregar): si el paciente ya escribió algo después del saludo, el menú no sale; ese mensaje llega enseguida y se atiende con el saludo en el contexto.
@@ -900,7 +939,7 @@ async function processContactBatch(
             deps.log("agent_menu", { event: "SKIPPED", reason: "PATIENT_KEPT_WRITING_KAPSO", waitedMs: waited });
             void deps.turns?.menuEvents?.(contactKey, { event: "SKIPPED" });
             deps.turns?.convState?.agentReply({ from, messageId: `silent:${leadId}`, replyTo: leadId, reply: { body: "", result: "silent", quality: "ANSWER" } });
-            return { kind: "none" };
+            return closeSilent();
           }
         }
         // Medición del menú: salió el menú, eligió una opción con palabras, o escribió un número que no está en el menú.

@@ -321,7 +321,7 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
       const model = fakeAgentModel({ text: "Respuesta del agente nuevo. ¿Algo más?" });
       const w = setup({ pilot: { phones: [p.phone], model } });
       await switchTo(true);
-      await say(w, p.phone, "hola buenas, tengo una consulta");
+      await say(w, p.phone, "hola buenas, tienen atención los domingos?");
       expect(w.sends.at(-1)!.body).toBe("Respuesta del agente nuevo. ¿Algo más?");
       await switchTo(false);
       const before = model.plans.length;
@@ -354,7 +354,7 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
       const model = fakeAgentModel();
       const w = setup({ pilot: { phones: [p.phone], model } });
       await switchTo(true);
-      const event = textEvent(id("txt"), p.phone, "hola, quiero una cotización");
+      const event = textEvent(id("txt"), p.phone, "hola, tienen atención los domingos?");
       await send(w, event);
       await send(w, event);
       await send(w, event);
@@ -423,7 +423,7 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
     it("modelo caído (429 de cuota), verificación fallida (cifra inventada o precio escrito) y plazo vencido: el paciente recibe EXACTAMENTE lo de siempre, una sola vez", async () => {
       const reference = patient();
       const refWorld = setup({ memory: true });
-      await say(refWorld, reference.phone, "quiero cotizar mis estudios");
+      await say(refWorld, reference.phone, "tienen atención los domingos?");
       const expected = refWorld.sends.map((s) => s.body);
       const quota = Object.assign(new Error(`secreto ${SENTINEL}`), { name: "RateLimitError", status: 429, code: "insufficient_quota" });
       const scripts: Array<[string, Script, number?]> = [["cuota", { fail: quota }], ["cifra inventada", { text: "Te respondemos en 24 horas sin falta." }], ["precio", { text: "El hemograma cuesta Bs 45." }], ["plazo", { hang: true }, 150]];
@@ -431,7 +431,7 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
         const p = patient();
         const w = setup({ pilot: { phones: [p.phone], model: fakeAgentModel(script), ...(deadline ? { deadlineMs: deadline } : {}) } });
         await switchTo(true);
-        await say(w, p.phone, "quiero cotizar mis estudios");
+        await say(w, p.phone, "tienen atención los domingos?");
         expect(w.sends.map((s) => s.body), name).toEqual(expected);
         expect(JSON.stringify(w.logs), name).not.toContain(SENTINEL);
       }
@@ -591,7 +591,7 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
       const w = setup({ pilot: { everyone: {}, model } });
       await switchTo(true);
       const [a, b, c] = [patient(), patient(), patient()];
-      for (const p of [a, b, c]) await say(w, p.phone, "hola, tengo una consulta");
+      for (const p of [a, b, c]) await say(w, p.phone, "hola, tienen atención los domingos?");
       expect(w.sends.map((s) => (s.to === a.phone ? "a" : s.to === b.phone ? "b" : "c") + ":" + s.body).sort()).toEqual(["a:Hola, con gusto te ayudo. ¿Qué necesitas?", "b:Hola, con gusto te ayudo. ¿Qué necesitas?", "c:Hola, con gusto te ayudo. ¿Qué necesitas?"]);
       expect(model.plans).toHaveLength(3);
     });
@@ -606,7 +606,7 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
       expect(w.sends.map((s) => s.body)).toEqual(expected);
       expect(model.plans).toEqual([]);
       const included = patient();
-      await say(w, included.phone, "hola, tengo una consulta");
+      await say(w, included.phone, "hola, tienen atención los domingos?");
       expect(w.sends.at(-1)!.body).toBe("RESPUESTA DEL AGENTE NUEVO");
     });
 
@@ -615,8 +615,8 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
       const w = setup({ pilot: { everyone: {}, model } });
       const [a, b] = [patient(), patient()];
       await switchTo(true);
-      await say(w, a.phone, "hola, tengo una consulta");
-      await say(w, b.phone, "hola, tengo una consulta");
+      await say(w, a.phone, "hola, tienen atención los domingos?");
+      await say(w, b.phone, "hola, tienen atención los domingos?");
       expect(model.plans).toHaveLength(2);
       await switchTo(false);
       const expected = await reference("quiero cotizar mis estudios");
@@ -628,13 +628,13 @@ describe.skipIf(!bin)("piloto del nuevo agente de extremo a extremo contra Postg
     });
 
     it("CAÍDA DEL PROVEEDOR: tras 3 fallos seguidos el corta-circuito deja de esperar al modelo; ningún paciente se queda sin respuesta y todos reciben exactamente lo de siempre", async () => {
-      const expected = await reference("quiero cotizar mis estudios");
+      const expected = await reference("tienen atención los domingos?");
       const quota = Object.assign(new Error("x"), { name: "RateLimitError", status: 429, code: "insufficient_quota" });
       const model = fakeAgentModel({ fail: quota });
       const w = setup({ pilot: { everyone: {}, model } });
       await switchTo(true);
       const patients = [patient(), patient(), patient(), patient(), patient()];
-      for (const p of patients) await say(w, p.phone, "quiero cotizar mis estudios");
+      for (const p of patients) await say(w, p.phone, "tienen atención los domingos?");
       for (const p of patients) expect(w.sends.filter((s) => s.to === p.phone).map((s) => s.body)).toEqual(expected);
       expect(model.plans).toHaveLength(3);
       expect(w.logs.some(([event, data]) => event === "agent_pilot_breaker" && data.open === true)).toBe(true);

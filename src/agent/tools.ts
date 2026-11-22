@@ -354,6 +354,19 @@ function reviewFuzzy(study: CatalogStudy, mention: string, catalog: readonly Cat
   return siblings.length === 0 ? { keep: study } : { doubt: [study, ...siblings].slice(0, 8) };
 }
 
+// El paciente nombra la muestra con «de/en + sustantivo» y el catálogo con el adjetivo: «frotis de sangre periférica» → «frotis sanguineo», «calprotectina en heces» → «calprotectina fecal», «sedimento de
+// orina» → «sedimento urinario». «Periférica» es la sangre de una vena (la de siempre): no cambia el estudio. Solo agrega una forma más para buscar; si no hay cambio, devuelve el mismo texto.
+export const sampleAsAdjective = (core: string): string =>
+  core
+    .replace(/\b(?:de|en)\s+(?:la\s+)?sangre(?:\s+(?:periferica|venosa|total))?\b/g, "sanguineo")
+    .replace(/\bsangre\s+periferica\b/g, "sanguineo")
+    .replace(/\bperiferic[oa]\b/g, "sanguineo")
+    .replace(/\b(?:de|en)\s+(?:las\s+)?(?:heces|deposiciones?)(?:\s+fecales)?\b/g, "fecal")
+    .replace(/\b(?:de|en)\s+(?:la\s+)?orina\b/g, "urinario")
+    .replace(/\b(sanguineo)(?:\s+sanguineo)+\b/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+
 // Palabras de relleno delante del nombre de un estudio («prueba de», «dosaje de», «examen de»).
 const FILLER = /^(?:(?:la|el|una?|unos?|las|los)\s+)?(?:pruebas?|examen(?:es)?|analisis|estudios?|dosajes?|dosificacion|test|nivel(?:es)?)(?!\s+rapid)\s+(?:de\s+(?:la\s+|el\s+|los\s+|las\s+)?|del\s+|para\s+(?:el\s+|la\s+)?)?/;
 export const coreOfMention = (text: string): string => text.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim().replace(FILLER, "").trim();
@@ -397,7 +410,9 @@ export function quoteStudiesTool(options: { loadCatalog: () => Promise<readonly 
         // «zinc sérico o plasmático»: la muestra en sangre no cambia el estudio; también se prueba sin esas palabras.
         const core = coreOfMention(text);
         const withoutBlood = core.replace(/\b(?:serico|serica|plasmatico|plasmatica|sanguineo|sanguinea|en sangre)\b/g, " ").replace(/\s+/g, " ").trim();
-        const forms = [...new Set([text, core, withoutBlood].filter((form) => form.length >= 2))];
+        // La muestra dicha con «de/en + sustantivo» donde el catálogo usa el adjetivo (caso real 21-nov: «frotis de sangre periférica» = MORFOLOGIA DE FROTIS SANGUINEO; iba a «confirma la doctora»).
+        const asAdjective = sampleAsAdjective(core);
+        const forms = [...new Set([text, core, asAdjective, withoutBlood].filter((form) => form.length >= 2))];
         for (const form of forms) {
           const { extraction, notes } = extractWithNotes(`cotizar ${form}`, catalog, { fuzzy: true });
           if (!extraction?.isRequest || (extraction.matched.length === 0 && extraction.result.ambiguous.length === 0)) continue;
@@ -477,6 +492,9 @@ export function quoteStudiesTool(options: { loadCatalog: () => Promise<readonly 
           facts.push({ source: "QUOTE_ENGINE", text: complete ? quoteNote : `${quoteNote} La cotización es PARCIAL: solo suma los estudios identificados con certeza.${possible.length > 0 ? " Debajo van los POSIBLES con su precio: pregunta en una frase si quiere agregar alguno." : ""}${notFound.length > 0 ? " Debajo también va el aviso de los que confirma la doctora." : ""}`, refs: [] });
           // Cada estudio con su tiempo de entrega junto al precio (dueño, 20-nov); «Tu cotización»: el paciente escribió los estudios, no mandó una receta.
           blocks.push(formatSessionQuote(evaluation.lines, evaluation.duplicates, QUOTE_TEXTS, { catalog, title: "Tu cotización" }));
+          // El tiempo de entrega va en el bloque, pero el redactor no lo veía y decía «no tengo confirmado el tiempo de entrega» encima de «(entrega: en el día)» (caso real 21-nov, progesterona).
+          const turnarounds = [...sure.values()].map((study) => `${study.name}: ${study.turnaroundText?.trim() || "lo confirma la doctora"}`);
+          facts.push({ source: "QUOTE_ENGINE", text: `Tiempo de entrega de cada estudio cotizado (ya va en la cotización, junto a su precio): ${turnarounds.join("; ")}. Si pregunta cuánto tarda o cuándo sale, dilo con estos datos o di que va en la cotización; nunca digas que no tienes el tiempo de entrega.`, refs: [] });
         }
       }
       const optionsBlock = formatGroupedOptions(optionGroups, blocks.length > 0);

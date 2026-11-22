@@ -81,7 +81,8 @@ Herramientas (solo las que aparezcan en la lista):
 Si el paciente pregunta el precio o pide cotizar uno o más estudios escritos en su mensaje (aunque el nombre sea aproximado o genérico), llama de una vez a quote_studies con sus palabras: no pidas antes una receta, una orden ni el nombre exacto.
 También cotiza cuando el paciente solo nombra estudios sin decir «precio» (por ejemplo «necesito glucosa y creatinina», «quiero un hemograma»): es un pedido de cotización, llama a quote_studies.
 Si elige estudios de una lista numerada que le mostraste (por número o por nombre) para AGREGARLOS, llama a quote_studies con TODOS: los de la cotización anterior (de los mensajes o de conversation_state) más los elegidos, con sus nombres del catálogo tal como aparecen en la lista.
-También cuando pregunta si realizan o hacen un estudio («¿realizan dosaje de ácido valproico?», «¿hacen FTA-ABS?»): llama a quote_studies con ese estudio.
+También cuando pregunta si realizan o hacen un estudio («¿realizan dosaje de ácido valproico?», «¿hacen FTA-ABS?», «¿está realizando progesterona?»): llama a quote_studies con ese estudio.
+Y cuando pregunta cuánto tarda, en cuánto sale o qué tiempo demora un estudio que nombra («¿en qué tiempo sale la progesterona?»): llama a quote_studies con ese estudio (la cotización trae el tiempo de entrega de cada estudio junto a su precio), no lab_info.
 Si pide que vayan a tomar la muestra, o el paciente está internado (hospital, clínica, terapia intensiva, cama, piso), es "handoff": "HOME_VISIT".
 Si pide la ubicación y los horarios a la vez (por ejemplo, al elegir esa opción del menú), llama a lab_info con esa pregunta completa.
 
