@@ -40,6 +40,8 @@ export interface TurnsConfig {
   homeVisitStage?(input: { from: string; messageId: string; excludeIds: readonly string[] }): Promise<HomeVisitStage | undefined>;
   // Camino «Hablar con una persona» (src/human-request.ts): ¿se le envió el texto fijo en los mensajes recientes (24 h)? Entonces el agente calla con ese contacto. Nunca lanza.
   waitingForPerson?(input: { from: string; messageId: string; excludeIds: readonly string[] }): Promise<boolean>;
+  // Corrección de un dato del resultado (src/result-correction.ts): ¿se le envió el texto fijo en los mensajes recientes (24 h)? Entonces lo que manda sobre la corrección se deja a la Dra. Nunca lanza.
+  correctionAcked?(input: { from: string; messageId: string; excludeIds: readonly string[] }): Promise<boolean>;
   // Espera de contexto de una foto dudosa que se atiende sola (src/photo-context-wait.ts): sin ella, la foto responde de inmediato.
   photoContextWait?: { waitMs: number; pollMs?: number; newerTurn(contactKey: string, seq: number): Promise<boolean>; sleep?(ms: number): Promise<void> };
   // MENÚ del saludo: antes de enviarlo se espera hasta `waitMs` por si el paciente escribe algo más (suele hacerlo en segundos); si llega otro mensaje, el menú no sale y ese mensaje se atiende con su contexto.

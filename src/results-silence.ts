@@ -24,7 +24,10 @@ export type ResultsRouting = "SILENT" | "READY_CHECK" | "OFFICE_HOURS" | "NORMAL
 // «mis estudios que me realicé ayer»: el estudio YA se hizo (se pregunta por el resultado, no por hacérselo).
 const DONE_ALREADY = /\b(que me (hice|realice|saque|tome|hicieron|tomaron|sacaron)|me (hice|realice|saque) (el|los|la|las|unos|unas|ayer|hoy|el dia|en la manana))\b/;
 
-const SAMPLE_DONE = /\b(ya )?(me (tomaron|sacaron)|le (tomaron|sacaron)|deje|traje|lleve|envie|mande|entregue) (la |mi |las |mis |una |unas |su |sus )?muestras?\b/g;
+// El laboratorio QUEDÓ en enviarle algo y el paciente lo espera (caso real 21-nov: «unos análisis que me tenían que enviar» no se reconocía y el modelo solo respondió «Hola, buenos días.»).
+const PENDING_DELIVERY = /\b(?:me|nos|le|les) (?:tenian|tenia|iban|iba|habian|habia|quedaron|quedo|dijeron|dijo) (?:que |a |de |en )?(?:enviar|mandar|pasar|entregar|dar)\w*|\bquedaron (?:de|en) (?:enviar|mandar|pasar|entregar)\w*|\b(?:estoy|sigo|seguimos|estamos|quedo|quedamos) esperando\b|\bno me (?:llega|llego|llegan|llegaron|enviaron|mandaron|pasaron|entregaron)\b|\b(?:enviarme|mandarme|pasarme|entregarme)\b/;
+
+const SAMPLE_DONE =/\b(ya )?(me (tomaron|sacaron)|le (tomaron|sacaron)|deje|traje|lleve|envie|mande|entregue) (la |mi |las |mis |una |unas |su |sus )?muestras?\b/g;
 // Problemas para ver el resultado en línea («me pide orden y contraseña», «no logro entrar a su sistema»): son del camino de resultados aunque no digan «resultado».
 const PORTAL = /\b(contrasena|clave)\b.*\b(orden|entrar|ingresar|resultado\w*|sistema|pagina)\b|\b(orden|entrar|ingresar)\b.*\b(contrasena|clave)\b|\b(entrar|ingresar|acceder|abrir)\b.*\b(sistema|pagina|portal|plataforma)\b/;
 const HYPOTHETICAL = /\b(entregarian|entregaria|estaria|estarian|saldria|saldrian|tendria|tendrian|demoraria|demorarian|tardaria|tardarian)\b/;
@@ -37,7 +40,7 @@ const ALREADY = /\b(ya|listos?|salio|salieron|ayer|anoche|esta manana|hace \d+ d
 export function routeResultsMessage(text: string): ResultsRouting {
   const message = plain(text.slice(0, 4000));
   if (!message) return "NORMAL";
-  const resultsContext = RESULTS.test(message) || PORTAL.test(message) || (STUDY.test(message) && (RESULTS_STATUS.test(message) || PICKUP.test(message) || DONE_ALREADY.test(message)));
+  const resultsContext = RESULTS.test(message) || PORTAL.test(message) || (STUDY.test(message) && (RESULTS_STATUS.test(message) || PICKUP.test(message) || DONE_ALREADY.test(message) || PENDING_DELIVERY.test(message)));
   if (!resultsContext) return "NORMAL";
   // «¿Puede recoger otra persona mis resultados?»: es del camino de resultados (no un pedido de hablar con una persona).
   if (asksOtherPersonPickup(message)) return "READY_CHECK";

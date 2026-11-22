@@ -3,7 +3,7 @@ import { socialOf } from "../attention-filter.js";
 import type { ConversationReader, ObservedTurn } from "../conversation-state-store.js";
 import type { KnowledgeAnswer } from "../knowledge-answers.js";
 import { stripPaymentTalk } from "../payment-talk.js";
-import { fold } from "../text-normalize.js";
+import { fold, plain } from "../text-normalize.js";
 import { asksForPrice, classifyText } from "../text-handler.js";
 import type { CatalogStudy } from "../types.js";
 import type { AgentDecision, Capabilities, RecentEntry, ToolDef, Utterance } from "./contracts.js";
@@ -117,6 +117,58 @@ function oneEditApart(a: string, b: string): boolean {
   return false;
 }
 export const isGreetingOnly = (utterances: readonly Utterance[]): boolean => utterances.length > 0 && utterances.every((utterance) => isGreetingText(utterance.text));
+
+// ───────────── Mensajes de apertura SIN intención concreta (revisión del 21-nov) ─────────────
+// «Dra», «?», «¿Con quién deseaba hablar?», «una consulta», «disculpe»: el paciente abre la conversación pero todavía no dice qué necesita. Igual que un saludo, abren el MENÚ (que cubre todos los caminos).
+// Antes los redactaba el modelo («¿Quieres hablar con la doctora o necesitas ayuda con algún estudio?», «Buenas tardes, estás conversando con el asistente…»). Vocabulario CERRADO: si queda cualquier otra
+// palabra («progesterona», «precio», «resultado»), no es apertura y se atiende por su intención.
+const OPENING_PHRASES = [
+  /\bcon quien (?:hablo|tengo el gusto|estoy hablando|deseaba hablar|desea hablar|quiere hablar|queria hablar|quisiera hablar|deseo hablar)\b/g,
+  /\bquien (?:es|habla|me escribio|me escribe|me llamo|me llamaron|me hablo|me marco|llamo)\b/g,
+  /\bme (?:llamaron|escribieron|marcaron|hablaron)(?: de este numero| de aqui)?\b/g,
+  /\b(?:tengo|tenia|quisiera hacer|quiero hacer|quisiera|queria|hago) una (?:consulta|pregunta)\b/g,
+  /\buna (?:consulta|pregunta|informacion)\b/g,
+  /\b(?:quiero|quisiera|queria|necesito) (?:una )?informacion\b/g,
+  /\b(?:me|nos) (?:puede|pueden|podria|podrian) (?:ayudar|colaborar|atender)\b/g,
+  /\b(?:me ayuda|me ayudan|hay alguien|alguien me atiende|alguien que me atienda)\b/g,
+  /\b(?:por favor|porfa|porfavor|xfa|xfavor)\b/g
+];
+const OPENING_WORDS = new Set<string>([...GREETING_WORDS, "doc", "licenciado", "señora", "senora", "joven", "disculpe", "disculpa", "disculpen", "perdon", "oiga", "alo", "consulta", "pregunta", "informacion", "info", "ayuda", "y", "e"]);
+export function isOpeningText(text: string): boolean {
+  if (isGreetingText(text)) return true;
+  // Un número («333 A», «1600») o «¿a cómo?» (= ¿cuánto cuesta?) ya dicen algo: no son apertura.
+  if (/\d/.test(text) || isQuoteAskText(text)) return false;
+  let rest = fold(text).replace(/[^a-zñ\s]/g, " ").replace(/\s+/g, " ").trim();
+  if (rest === "") return /^[\s?¿!¡.…]+$/.test(text) && text.trim() !== "";
+  for (const phrase of OPENING_PHRASES) rest = rest.replace(phrase, " ");
+  const words = rest.split(/\s+/).filter(Boolean);
+  if (words.length > LOOSE_MAX_WORDS) return false;
+  return words.every((word) => OPENING_WORDS.has(word) || (word.length >= 5 && [...OPENING_WORDS].some((known) => nearWord(word, known))));
+}
+export const isOpeningOnly = (utterances: readonly Utterance[]): boolean => utterances.length > 0 && utterances.every((utterance) => isOpeningText(utterance.text));
+
+// «¿Cuánto me sale?», «quiero cotizar», «precios» SIN nombrar ningún estudio (y lo demás, apertura): es el camino 1 del menú. Sale su texto fijo sin pasar por el modelo. Solo sin conversación previa
+// (quien llama lo comprueba): con una cotización a la vista, «¿cuánto me sale?» es una pregunta sobre ella.
+const QUOTE_ASK = /^(?:(?:yo )?(?:quiero|quisiera|queria|necesito|deseo|deseaba|me (?:puede|pueden|podria|podrian)|puede|pueden|podria|podrian) )?(?:(?:hacer |saber )?(?:una )?(?:cotizacion|cotizar|cotizarme|cotizarnos|cotizacion de precios)|(?:saber )?(?:el |los )?(?:precio|precios|costo|costos|tarifa|tarifas))(?: (?:de )?(?:unos|algunos|los|mis|unas|las)? ?(?:estudios|analisis|examenes|laboratorios|pruebas))?$|^(?:y )?cuanto (?:me |nos )?(?:sale|saldria|cuesta|costaria|cobran|cobrarian|es|seria|vale|valdria)$|^(?:y )?a (?:como|cuanto)(?: (?:sale|esta|es|son|me sale|me lo deja))?$/;
+export function isQuoteAskText(text: string): boolean {
+  let rest = fold(text).replace(/[^a-zñ\s]/g, " ").replace(/\s+/g, " ").trim();
+  for (const phrase of OPENING_PHRASES) rest = rest.replace(phrase, " ");
+  const words = rest.split(/\s+/).filter(Boolean);
+  // Fuera las palabras de saludo del principio («buenos días cuánto me sale»).
+  while (words.length > 0 && !QUOTE_ASK.test(words.join(" ")) && OPENING_WORDS.has(words[0]!)) words.shift();
+  return words.length > 0 && QUOTE_ASK.test(words.join(" "));
+}
+export const isQuoteAskOnly = (utterances: readonly Utterance[]): boolean => utterances.some((utterance) => isQuoteAskText(utterance.text)) && utterances.every((utterance) => isQuoteAskText(utterance.text) || isOpeningText(utterance.text));
+
+// Texto fijo del camino 1 cuando todavía no nombró los estudios (el mismo para «1» tras el menú y para «¿cuánto me sale?» sin estudios).
+export const QUOTE_ASK_MESSAGE = "¡Claro! 😊 Escríbeme los nombres de los estudios que necesitas, todos juntos o uno por mensaje. Si te es más fácil, envíame una foto de tu receta u orden médica.";
+
+// Una respuesta del redactor que NO ayuda: solo un saludo («Hola, buenos días.», caso real 21-nov) o una pregunta genérica de qué necesita. En su lugar sale el menú, que ofrece todos los caminos.
+// Quien llama solo lo aplica a una respuesta SIN datos (sin herramientas ni cotización): así nunca tapa una respuesta útil.
+const GENERIC_OFFER = /\b(?:en|con) que (?:te |le |los |las )?(?:puedo|podemos) (?:ayudar|servir|orientar)(?:te|le|los|las)?(?: hoy| el dia de hoy)?$|\bestas conversando con el asistente\b|\bquieres hablar con la doctora o\b|\bquieres que te cotice algun estudio o\b|\bquieres cotizar algun estudio o\b/;
+export function isUnhelpfulReply(reply: string): boolean {
+  return isGreetingText(reply) || GENERIC_OFFER.test(plain(reply));
+}
 
 // ¿Pide hablar con una persona sin pedir precios? (el pilot la deriva al modo esencial cuando no se puede registrar la derivación)
 export const asksPersonOnly = (utterances: readonly Utterance[]): boolean => utterances.some((utterance) => utterance.topic === "HUMAN_REQUEST") && !utterances.some((utterance) => asksForPrice(utterance.text));
