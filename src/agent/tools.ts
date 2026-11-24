@@ -513,9 +513,12 @@ export function quoteStudiesTool(options: { loadCatalog: () => Promise<readonly 
           // Muestra por defecto EN SANGRE (decisión del dueño, 19-nov): «fósforo», «calcio», «creatinina» a secas → la versión en sangre con ese mismo nombre, si hay UNA. Nunca elige entre dos en sangre.
           const blood = preferredBySample(candidates, text);
           // «psa total»: entre PSA TOTAL (ECLIA), PSA TOTAL (FIA) y PSA LIBRE (ECLIA) quedan los que tienen TODAS las palabras pedidas, y entre esos el método preferido (el mismo de la ruta de siempre).
-          const named = blood ? undefined : namedChoice(candidates, text);
+          // Un alias que comparten TODAS las opciones («atg» en la anti-TG CLIA y ECLIA; «panel ITS» en los 4 paneles de ITS): lo escrito no distingue entre ellas, así que no se elige por las palabras
+          // del nombre (antes «panel its» elegía el único panel que dice «ITS» en el nombre). Se elige la versión como siempre o, si no son versiones del mismo estudio, se ofrecen las opciones.
+          const sharedAlias = candidates.length > 1 && candidates.every((study) => (study.normalizedAliases ?? []).includes(normalizeStudyKey(coreOfMention(text))));
+          const named = blood || sharedAlias ? undefined : namedChoice(candidates, text);
           // Versiones del mismo estudio sin especificar: como las elige la Dra (ver chooseVersions).
-          const chosen = blood ? [blood] : named ? [named] : chooseVersions(withVersionSiblings(candidates, catalog), text);
+          const chosen = blood ? [blood] : named ? [named] : chooseVersions(withVersionSiblings(candidates, catalog), sharedAlias ? [...versionBase(candidates[0]!.name)].join(" ") : text);
           // Si a lo elegido le falta algo que el paciente escribió y UN estudio lo tiene todo, es ese («hemoglobina glicosilad» no es la «HEMOGLOBINA» en sangre).
           const fixed = chosen?.map((study) => { const review = reviewFuzzy(study, text, catalog); return "replace" in review ? review.replace : study; });
           if (fixed) for (const study of fixed) sure.set(study.id, study);

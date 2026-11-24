@@ -68,11 +68,12 @@ const ALIASES: ReadonlyArray<{ study: string; aliases: readonly string[] }> = [
 
 // ───────────── 2. Correcciones de estudios existentes ─────────────
 const INTIMA_34 = "PANEL INTIMA PLUS 34 PATOGENOS – INFECCIONES DE TRANSMISION SEXUAL + HPV + VIH 4ta Generacion (Elisa) VIRUS: Virus del Herpes simple 1, Virus del Herpes simple 2. BACTERIAS: Gardnerella vaginalis, Chlamydia trachomatis, Neisseria gonorrhoeae, Treponema pallidum, Ureaplasma parvum, Ureaplasma urealyticum, Mycoplasma genitalium, Mycoplasma hominis, Haemophilus ducreyi, Streptococcus agalactiae. PARASITOS: Trichomonas vaginalis. HONGOS: Candida albicans, Candida parapsilosis, Candida krusei, Candida glabrata, Candida tropicalis, Candida auris. HPV SCREENING 14 Genotipos de Alto Riesgo, Genotipificacion: HPV 16 y 18, Deteccion: HPV 31, 33, 35, 39, 45, 51, 52, 56, 58, 59, 66 y 68. HIV 1,2 AG-AC 4ta Generacion (Elisa)";
-type Patch = Partial<Pick<Row, "name" | "normalized_name" | "notes" | "sample_type" | "price_bs" | "price_medicos_bs">>;
+// normalized_name es una columna GENERADA en la base: nunca se envía.
+type Patch = Partial<Pick<Row, "name" | "notes" | "sample_type" | "price_bs" | "price_medicos_bs">>;
 const UPDATES: ReadonlyArray<{ study: string; why: string; patch: (row: Row) => Patch }> = [
   { study: "HOMOCISTEINA", why: "tiempo de entrega 4 días (laboratorio)", patch: (row) => ({ notes: `${(row.notes ?? "").replace(/\s*\|\s*tiempo de entrega:[^|]*/i, "").trim()} | Tiempo de entrega: 4 dias` }) },
-  { study: "PANEL INTIMA PLUS 32 PATOGENOS*", why: "34 patógenos y lista del laboratorio", patch: () => ({ name: INTIMA_34, normalized_name: normalizeStudyKey(INTIMA_34) }) },
-  { study: "CITOGRAMA NASAL DERECHO / IZQUIERDO 60BS C/U", why: "precio por lado Bs 50, sin el precio en el nombre", patch: () => ({ name: "CITOGRAMA NASAL (DERECHO O IZQUIERDO, PRECIO POR LADO)", normalized_name: normalizeStudyKey("CITOGRAMA NASAL (DERECHO O IZQUIERDO, PRECIO POR LADO)"), price_bs: 50 }) },
+  { study: "PANEL INTIMA PLUS 32 PATOGENOS*", why: "34 patógenos y lista del laboratorio", patch: () => ({ name: INTIMA_34 }) },
+  { study: "CITOGRAMA NASAL DERECHO / IZQUIERDO 60BS C/U", why: "precio por lado Bs 50, sin el precio en el nombre", patch: () => ({ name: "CITOGRAMA NASAL (DERECHO O IZQUIERDO, PRECIO POR LADO)", price_bs: 50 }) },
   // Precios Médicos revisados a mano por el laboratorio (Revision_precios_PlusMedik.csv).
   ...([
     ["BETA HCG-CUANTITATIVA - VARON (FIA Fluorescencia)", 130],
@@ -88,12 +89,13 @@ const UPDATES: ReadonlyArray<{ study: string; why: string; patch: (row: Row) => 
 ];
 
 // ───────────── 3. Altas nuevas (fotos de la lista del laboratorio, 24-nov) ─────────────
+// Sin código: los números de las fotos (352, 353) ya los usan otros estudios en la base (GALACTOMANANO IgG, IgA SALIVAL).
 const NEW_STUDIES = [
   { code: null, name: "Tamizaje Neonatal (4 enfermedades)", category: "PRUEBAS ESPECIALES", sample_type: "Suero 500 ul", price_bs: 850, price_convenio_bs: 830, price_medicos_bs: 1186, price_emergencia_bs: 1000, notes: "Preparacion: No requiere condiciones especiales, pero se sugiere 8 a 12 horas de ayuno para evitar la lipemia. | Tiempo de entrega: 7 - 10 dias" },
   { code: null, name: "Tamizaje Neonatal (7 enfermedades)", category: "PRUEBAS ESPECIALES", sample_type: "Suero 500 ul", price_bs: 950, price_convenio_bs: 930, price_medicos_bs: 1329, price_emergencia_bs: 1188, notes: "Preparacion: No requiere condiciones especiales, pero se sugiere 8 a 12 horas de ayuno para evitar la lipemia. | Tiempo de entrega: 7 - 10 dias" },
   { code: null, name: "Tamizaje Neonatal Beta 22 enfermedades", category: "PRUEBAS ESPECIALES", sample_type: "Suero 500 ul", price_bs: 2500, price_convenio_bs: 2450, price_medicos_bs: 3500, price_emergencia_bs: 3125, notes: "Preparacion: No requiere condiciones especiales, pero se sugiere 8 a 12 horas de ayuno para evitar la lipemia. | Tiempo de entrega: 15 dias" },
-  { code: "352", name: "Linfocitos CD4 , CD8", category: "PRUEBAS ESPECIALES", sample_type: "Sangre total con EDTA 3 ml", price_bs: 950, price_convenio_bs: 950, price_medicos_bs: 1357, price_emergencia_bs: 1188, notes: "Preparacion: No requiere ninguna preparación especial. | Tiempo de entrega: 7 dias" },
-  { code: "353", name: "Linfocitos T Maduros CD3", category: "PRUEBAS ESPECIALES", sample_type: "Sangre total con EDTA 3 ml", price_bs: 420, price_convenio_bs: 410, price_medicos_bs: 586, price_emergencia_bs: 525, notes: "Preparacion: No requiere ninguna preparación especial. | Tiempo de entrega: 7 dias" }
+  { code: null, name: "Linfocitos CD4 , CD8", category: "PRUEBAS ESPECIALES", sample_type: "Sangre total con EDTA 3 ml", price_bs: 950, price_convenio_bs: 950, price_medicos_bs: 1357, price_emergencia_bs: 1188, notes: "Preparacion: No requiere ninguna preparación especial. | Tiempo de entrega: 7 dias" },
+  { code: null, name: "Linfocitos T Maduros CD3", category: "PRUEBAS ESPECIALES", sample_type: "Sangre total con EDTA 3 ml", price_bs: 420, price_convenio_bs: 410, price_medicos_bs: 586, price_emergencia_bs: 525, notes: "Preparacion: No requiere ninguna preparación especial. | Tiempo de entrega: 7 dias" }
 ] as const;
 
 const rows = (await call("GET", "lab_tests?select=id,code,name,normalized_name,sample_type,notes,price_bs,price_convenio_bs,price_medicos_bs,price_emergencia_bs,active&limit=5000", undefined, "")) as Row[];
@@ -134,7 +136,7 @@ for (const { study, why, patch } of UPDATES) {
 }
 for (const study of NEW_STUDIES) {
   if (rows.some((row) => normalizeStudyKey(row.name) === normalizeStudyKey(study.name))) continue;
-  plan.push({ label: `ALTA    ${study.name} · Paciente Bs ${study.price_bs} · Convenio ${study.price_convenio_bs} · Médicos ${study.price_medicos_bs} · Emergencia ${study.price_emergencia_bs} · ${study.notes.split("|")[1]?.trim()}`, run: () => call("POST", "lab_tests", { ...study, normalized_name: normalizeStudyKey(study.name), active: true, metadata: {} }) });
+  plan.push({ label: `ALTA    ${study.name} · Paciente Bs ${study.price_bs} · Convenio ${study.price_convenio_bs} · Médicos ${study.price_medicos_bs} · Emergencia ${study.price_emergencia_bs} · ${study.notes.split("|")[1]?.trim()}`, run: () => call("POST", "lab_tests", { ...study, active: true, metadata: {} }) });
 }
 
 for (const item of plan) console.log(item.label);

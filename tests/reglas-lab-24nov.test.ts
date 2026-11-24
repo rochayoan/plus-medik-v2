@@ -152,6 +152,26 @@ describe("elecciones del laboratorio cuando el estudio se nombra a secas", () =>
   });
 });
 
+describe("un alias que comparten varios estudios (cargados el 24-nov)", () => {
+  const shared = quoteStudiesTool({ loadCatalog: async () => [
+    study("ANTICUERPOS ANTI-TIROGLOBULINA a-TG (CLIA)", 160, "En el día", undefined, ["atg"]),
+    study("ANTICUERPOS ANTI-TIROGLOBULINA a-TG (ECLIA)", 140, "En el día", undefined, ["atg"]),
+    study("PANEL INTIMA PLUS 34 PATOGENOS – INFECCIONES DE TRANSMISION SEXUAL + HPV + VIH 4ta Generacion (Elisa)", 1250, "24 horas", undefined, ["panel its"]),
+    study("PANEL qPCR 12 PATOGENOS DE ITS + HIV 4ta GENERACION ELISA", 700, "24 horas", undefined, ["panel its"]),
+    study("PANEL qPCR 12 PATOGENOS DE INFECCIONES DE TRANSMISION SEXUAL", 600, "24 horas", undefined, ["panel its"])
+  ] });
+  const run = async (text: string) => (await shared.run({ studies: [text] }, { now: new Date(), patientText: text } as never)) as Result;
+  it("«atg» (en la CLIA y la ECLIA) → la más barata", async () => {
+    expect((await run("atg")).facts?.[0]?.text).toContain("ANTICUERPOS ANTI-TIROGLOBULINA a-TG (ECLIA)");
+  });
+  it("«panel its» (en los paneles de ITS) → se ofrecen todos con su precio, no el único que dice «ITS» en el nombre", async () => {
+    const result = await run("panel its");
+    expect(result.facts?.some((fact) => fact.text.startsWith("Estudios identificados"))).toBe(false);
+    const blocks = result.blocks!.join("\n");
+    for (const price of ["Bs 1250", "Bs 700", "Bs 600"]) expect(blocks).toContain(price);
+  });
+});
+
 describe("preparación: el texto de la lista del laboratorio (lab_tests.notes)", () => {
   it("se lee de las notas junto al tiempo de entrega", () => {
     const notes = "Preparacion: Se requiere ayuno de 8 a 12 horas. | Tiempo de entrega: 2 horas";
