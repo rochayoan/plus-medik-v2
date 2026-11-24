@@ -58,6 +58,7 @@ export function summarizeDecision(decision: AgentDecision, extra: { utterances: 
     tools: decision.toolRuns.map((run) => ({ tool: run.tool, ok: run.ok, ...(run.error ? { error: run.error } : {}), ...(run.why ? { why: run.why } : {}) })),
     violations: decision.violations.map((violation) => violation.code),
     ...(decision.planFallback ? { planFallback: decision.planFallback } : {}),
+    ...(decision.guidance ? { guidance: decision.guidance } : {}),
     ...(decision.repairs ? { repairs: decision.repairs, firstViolations: (decision.firstViolations ?? []).map((violation) => violation.code) } : {}),
     ...(decision.reply ? { replyChars: decision.reply.length, replyHash: hashOf(decision.reply), withQuote: decision.quoted === true } : {}),
     ...(decision.modelError ? { modelError: decision.modelError } : {}),

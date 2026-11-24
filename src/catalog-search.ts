@@ -1,6 +1,7 @@
 import { normalizeStudyKey } from "./consensus.js";
 import { synonymsOf } from "./study-synonyms.js";
 import type { CatalogStudy } from "./types.js";
+import { isTypoOf } from "./typo.js";
 
 // Búsqueda aproximada en el catálogo (nombres y alias aprobados de lab_tests ACTIVOS). Es la herramienta que usa el intérprete de estudios: tolera errores de ortografía, plurales, palabras
 // de relleno y abreviaturas conocidas (study-synonyms.ts), pero NO decide nada: devuelve candidatos con una puntuación y el backend valida lo que se haga con ellos.
@@ -141,6 +142,33 @@ export function searchCatalog(query: string, catalog: readonly CatalogStudy[], o
     if (best && best.score >= minScore) hits.push(best);
   }
   return hits.sort((a, b) => b.score - a.score || (a.study.id < b.study.id ? -1 : 1)).slice(0, limit);
+}
+
+// ERRATAS (revisión del 23-nov, caso «hgc» → HCG): estudios cuyo nombre o alias tiene TODAS las palabras escritas, al menos una con una errata (letras cambiadas de lugar, una de más o de menos; ver
+// src/typo.ts). La búsqueda por parecido de arriba no las ve en las siglas (una palabra de menos de 4 letras solo vale si es igual) y cuenta dos letras cambiadas de lugar como dos errores. Sirve para TODO el
+// catálogo sin cargar alias a mano. Solo da candidatos: quien llama los ofrece como sugerencia para que el paciente confirme, nunca los cotiza solo. Del más al menos completo (cuánto del nombre cubre lo escrito).
+export function typoCandidates(mention: string, catalog: readonly CatalogStudy[], limit = 5): CatalogStudy[] {
+  const written = meaningful(tokensOf(mention.slice(0, SEARCH_LIMITS.maxQueryChars))).filter((token) => !/^\d+$/.test(token));
+  if (written.length === 0 || written.length > 4) return [];
+  const scored: Array<{ study: CatalogStudy; score: number }> = [];
+  for (const { study, forms } of indexOf(catalog)) {
+    let best = 0;
+    for (const form of forms) {
+      let typos = 0;
+      const used = new Set<number>();
+      const covered = written.every((word) => {
+        const exact = form.tokens.findIndex((token) => token === word);
+        if (exact >= 0) return used.add(exact);
+        const near = form.tokens.findIndex((token) => isTypoOf(word, token));
+        if (near < 0) return false;
+        typos++;
+        return used.add(near);
+      });
+      if (covered && typos > 0) best = Math.max(best, used.size / form.tokens.length);
+    }
+    if (best > 0) scored.push({ study, score: best });
+  }
+  return scored.sort((a, b) => b.score - a.score || (a.study.id < b.study.id ? -1 : 1)).slice(0, limit).map((item) => item.study);
 }
 
 // ¿Algún tramo de 1 a 3 palabras del mensaje se parece mucho a un estudio del catálogo? Sirve de puerta barata para decidir si vale la pena consultar al intérprete.

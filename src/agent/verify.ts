@@ -1,5 +1,6 @@
 import { extractTokens } from "../conversation-facts.js";
 import { fold } from "../text-normalize.js";
+import { GUIDANCE_FIGURES } from "./clinical-guidance.js";
 import type { Fact, Violation } from "./contracts.js";
 
 // Verificador por PROCEDENCIA. No pregunta «¿suena a algo prohibido?» sino «¿de dónde salió cada dato?»:
@@ -29,7 +30,8 @@ const COURTESY = /\bbuen(os|as)? (dias?|tardes?|noches?)\b/g;
 
 // `patientText`: lo que el paciente escribió en este turno (puede citar sus propias cifras sin que sean un dato inventado). `handoff`: true si se registrará la derivación (entonces el texto puede decir que una persona
 // atenderá). Se verifica SOLO el texto del redactor: la cotización la agrega el sistema después.
-export function verifyReply(input: { text: string; facts: readonly Fact[]; patientText?: string; handoff?: boolean }): Violation[] {
+// `guidanceFigures`: la respuesta da orientación general de preparación (src/agent/clinical-guidance.ts): puede decir cantidades con su unidad («8 a 12 horas», «20 ml») sin que estén en los datos.
+export function verifyReply(input: { text: string; facts: readonly Fact[]; patientText?: string; handoff?: boolean; guidanceFigures?: boolean }): Violation[] {
   const problems: Violation[] = [];
   const body = input.text.replaceAll("\r\n", "\n").trim();
   if (body.length < 2) return [{ code: "EMPTY_REPLY" }];
@@ -39,7 +41,7 @@ export function verifyReply(input: { text: string; facts: readonly Fact[]; patie
   for (const fact of input.facts) for (const token of extractTokens(fact.text)) allowed.add(token);
   const folded = fold(body.replace(LIST_MARKER, "- ")).replace(COURTESY, " ");
   if (CURRENCY.test(folded)) problems.push({ code: "PRICE_OUTSIDE_QUOTE" });
-  const loose = [...extractTokens(folded)].filter((token) => !allowed.has(token));
+  const loose = [...extractTokens(input.guidanceFigures ? folded.replace(GUIDANCE_FIGURES, " ") : folded)].filter((token) => !allowed.has(token));
   if (loose.length > 0) problems.push({ code: "UNGROUNDED_FIGURE", detail: loose.slice(0, 5).map((token) => token.split(":")[0]).join(",") });
   if (VOSEO.test(body)) problems.push({ code: "VOSEO" });
   if (!input.handoff && folded.split(/[.!?¡¿\n,;]+|\bpero\b/).some((sentence) => HUMAN_PROMISE.test(sentence) && !REFUSAL.test(sentence))) problems.push({ code: "UNREGISTERED_HANDOFF_PROMISE" });

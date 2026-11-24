@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { searchCatalog } from "../catalog-search.js";
+import { searchCatalog, typoCandidates } from "../catalog-search.js";
 import { normalizeStudyKey } from "../consensus.js";
 import type { ConversationReader } from "../conversation-state-store.js";
 import { detectTopics, type KnowledgeAnswer } from "../knowledge-answers.js";
@@ -379,13 +379,16 @@ export function quoteStudiesTool(options: { loadCatalog: () => Promise<readonly 
     description: "Cotiza estudios por su nombre tal como los escribió el paciente. El sistema agrega el detalle con precios del catálogo; tú nunca escribes precios.",
     readOnly: true,
     // Acepta lo que el modelo separe como sea: una lista entera en un solo texto (hasta 600 caracteres) o variantes sueltas («hepatitis b», «c»). Antes una «c» suelta hacía fallar TODA la cotización.
-    input: z.object({ studies: z.array(z.string().max(600)).min(1).max(30) }).strict(),
+    // `guesses` (opcional, revisión del 23-nov): lo que el modelo CREE que quiso escribir el paciente cuando ve una errata o una abreviatura («hgc» → «beta hcg»). Solo se usa si lo escrito no aparece en el
+    // catálogo (ni por errata), y siempre como SUGERENCIA para que el paciente confirme: nunca entra solo a la cotización.
+    input: z.object({ studies: z.array(z.string().max(600)).min(1).max(30), guesses: z.array(z.object({ written: z.string().max(120), guess: z.string().max(120) }).strict()).max(10).optional() }).strict(),
     async run(input) {
       const catalog = withJoinedAcronyms(await options.loadCatalog());
       // Cada estudio por separado aunque vengan en una lista («testosterona total y libre», «hepatitis b y c», «clamidia igg-igm», viñetas, comas): ver src/study-mentions.ts.
       const known = knownNamesOf(catalog);
       // Lo que mandó el modelo se une en orden (un nombre por línea): una variante suelta («c» tras «hepatitis b») hereda la palabra común de la anterior.
       const written = (input as { studies: string[] }).studies.map((text) => text.trim()).filter((text) => text !== "");
+      const guesses = ((input as { guesses?: Array<{ written: string; guess: string }> }).guesses ?? []).filter((item) => item.written.trim() !== "" && item.guess.trim() !== "");
       if (written.length === 0) return { noData: "NOT_QUOTABLE" };
       const mentions = splitStudyMentions(written.join("\n"), { isKnownName: (name) => known.has(name) || isKnownStudyPhrase(name) });
       const studies = mentions.length > 0 ? mentions : written.filter((text) => text.length >= 2);
@@ -397,6 +400,8 @@ export function quoteStudiesTool(options: { loadCatalog: () => Promise<readonly 
       // solo cuenta como pedido si el texto habla de cotizar (prueba real del 6-nov); por eso se antepone «cotizar».
       // Las opciones dudosas se agrupan por lo que pidió el paciente («Para «pcr»: …»): así entiende por qué aparece cada una.
       const doubtGroups = new Map<string, CatalogStudy[]>();
+      // Los grupos que salieron de una errata o de lo que cree el modelo: con una sola opción se pregunta «¿Quisiste decir…?» (src/quote-options.ts).
+      const typoLabels = new Set<string>();
       const doubt = (mention: string, list: readonly CatalogStudy[]) => {
         for (const study of list) {
           doubtful.set(study.id, study);
@@ -421,6 +426,15 @@ export function quoteStudiesTool(options: { loadCatalog: () => Promise<readonly 
           return { matched: extraction.matched, groups: extraction.result.ambiguous, unresolved: extraction.result.unresolved > 0, forms, fuzzy };
         }
         return { matched: [], groups: [], unresolved: true, forms, fuzzy: new Set() };
+      };
+      // Lo que el modelo cree que quiso escribir el paciente con `text` (si lo dijo): los estudios del catálogo que corresponden a esa idea, por nombre o por parecido fuerte. Nunca seguros.
+      const guessedStudies = (text: string): CatalogStudy[] => {
+        const keys = new Set([normalizeStudyKey(text), normalizeStudyKey(coreOfMention(text))]);
+        const guess = guesses.find((item) => keys.has(normalizeStudyKey(item.written)) || keys.has(normalizeStudyKey(coreOfMention(item.written))))?.guess;
+        if (!guess || normalizeStudyKey(guess) === normalizeStudyKey(text)) return [];
+        const found = studiesOf(resolve(guess));
+        const studies = found.length > 0 ? found : searchCatalog(guess, catalog, { limit: 3, minScore: 0.75 }).map((hit) => hit.study);
+        return studies.filter((study) => !sure.has(study.id)).slice(0, OPTIONS_PER_MENTION);
       };
       const studiesOf = (result: { matched: CatalogStudy[]; groups: string[][] }) => [...result.matched, ...result.groups.flat().map((id) => byId.get(id)).filter((study): study is CatalogStudy => study !== undefined)];
       const queue = [...studies];
@@ -474,13 +488,23 @@ export function quoteStudiesTool(options: { loadCatalog: () => Promise<readonly 
         const nothing = matched.length === 0 && groups.length === 0;
         const hits = forms.flatMap((form) => searchCatalog(form, catalog, { limit: nothing ? SUGGESTION_LIMIT : 3, minScore: nothing ? 0.5 : 0.6 })).sort((a, b) => b.score - a.score).map((hit) => hit.study).filter((study) => !sure.has(study.id));
         if (hits.length > 0) doubt(text, [...new Map(hits.map((study) => [study.id, study])).values()].slice(0, nothing ? SUGGESTION_LIMIT : 3));
-        else if (nothing) notFound.push(text);
+        else if (nothing) {
+          // Antes de dejárselo a la doctora: ¿es una errata de algo del catálogo («hgc» → HCG, «lipsaa» → LIPASA)? Y si no, ¿qué cree el modelo que quiso escribir? Las dos son solo SUGERENCIAS.
+          const typos = forms.flatMap((form) => typoCandidates(form, catalog)).filter((study) => !sure.has(study.id));
+          const suggested = typos.length > 0 ? typos : guessedStudies(text);
+          if (suggested.length > 0) {
+            doubt(text, [...new Map(suggested.map((study) => [study.id, study])).values()].slice(0, SUGGESTION_LIMIT));
+            typoLabels.add(text);
+          } else notFound.push(text);
+        }
       }
       const possible = [...doubtful.values()].filter((study) => !sure.has(study.id));
-      const optionGroups = [...doubtGroups].map(([label, list]) => ({ label, studies: list.filter((study) => !sure.has(study.id)) })).filter((item) => item.studies.length > 0);
+      const optionGroups = [...doubtGroups].map(([label, list]) => ({ label, studies: list.filter((study) => !sure.has(study.id)), typo: typoLabels.has(label) })).filter((item) => item.studies.length > 0);
       const facts: Array<Omit<Fact, "id">> = [];
       if (sure.size > 0) facts.push({ source: "QUOTE_ENGINE", text: `Estudios identificados con certeza en el catálogo (${sure.size}): ${[...sure.values()].map((study) => study.name).join("; ")}`, refs: [...sure.keys()].map((id) => `study:${id}`) });
       if (possible.length > 0) facts.push({ source: "CATALOG", text: `Estudios POSIBLES para lo que pidió, sin confirmar (el sistema los muestra numerados con su precio, fuera del total, agrupados por lo que pidió): ${optionGroups.map((item) => `«${item.label}»: ${item.studies.slice(0, OPTIONS_PER_MENTION).map((study) => study.name).join("; ")}`).join(" · ")}`, refs: possible.slice(0, OPTIONS_TOTAL_LIMIT).map((study) => `option:${study.id}`) });
+      const typoGroups = optionGroups.filter((item) => item.typo);
+      if (typoGroups.length > 0) facts.push({ source: "CATALOG", text: `Lo que escribió como ${typoGroups.map((item) => `«${item.label}»`).join(", ")} parece un error de tipeo o una abreviatura: el sistema le muestra debajo lo que quizá quiso decir, con su precio, para que lo confirme. En una frase pregúntale si es eso (sin repetir nombres ni precios); si responde que sí, se agrega a la cotización.`, refs: [] });
       // Lo que no se parece a nada del catálogo: lo confirma LA DOCTORA (indicación del laboratorio, 20-nov). El sistema lo dice en un bloque fijo; el modelo no debe decir que no lo tenemos.
       if (notFound.length > 0) facts.push({ source: "QUOTE_ENGINE", text: `Estudios que confirma la doctora (el sistema ya lo dice en un bloque debajo, con la lista): ${notFound.join("; ")}. NO sabes si se realizan: no digas que sí ni que no (ni «podemos hacerlos» ni «no los tenemos»), no menciones otros laboratorios y no los enumeres en tu texto; solo que esos se los confirma la doctora.`, refs: [] });
       const blocks: string[] = [];

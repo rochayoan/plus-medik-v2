@@ -83,7 +83,7 @@ for (const [i, caso] of selected.entries()) {
   const routing = routeResultsMessage(texts.join("\n"));
   if (routing === "READY_CHECK") {
     const action = decideResultsAction({ query: true, data: patientDataIn(texts, false), courtesy: false }) ?? "ASK";
-    console.log(`   → RESULTADOS (${action}): ${action === "SILENT" ? "silencio" : resultsReplyBody(action, new Date())}\n`);
+    console.log(`   → RESULTADOS (${action}): ${action === "SILENT" ? "silencio" : action === "SWITCH_OFFER" ? "cambio de opción" : resultsReplyBody(action, new Date())}\n`);
     continue;
   }
   if (routing === "SILENT") { console.log("   → se calla (interpretación de resultados: la atiende la Dra)\n"); continue; }

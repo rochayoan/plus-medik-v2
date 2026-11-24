@@ -24,7 +24,18 @@ export function formatDoubtfulOptions(studies: readonly CatalogStudy[], afterQuo
 // de 8 de antes (dejaba estudios «pendientes» sin opciones); solo un máximo por pedido y uno total para que el mensaje no sea interminable.
 export const OPTIONS_PER_MENTION = 6;
 export const OPTIONS_TOTAL_LIMIT = 30;
-export function formatGroupedOptions(groups: ReadonlyArray<{ label: string; studies: readonly CatalogStudy[] }>, afterQuote: boolean): string | undefined {
+// `typo`: el grupo salió de una errata o de lo que el modelo cree que quiso escribir («hgc»). Si es la ÚNICA opción de todo el mensaje y tiene un solo estudio, se pregunta directo «¿Quisiste decir…?» con su
+// precio (revisión del 23-nov); si hay varias, va en la lista numerada de siempre.
+export function formatGroupedOptions(groups: ReadonlyArray<{ label: string; studies: readonly CatalogStudy[]; typo?: boolean }>, afterQuote: boolean): string | undefined {
+  const shown = groups.map((group) => ({ ...group, valid: group.studies.filter(priced) })).filter((group) => group.valid.length > 0);
+  if (shown.length === 1 && shown[0]!.typo === true && shown[0]!.valid.length === 1) {
+    const study = shown[0]!.valid[0]!;
+    return [
+      `🔎 ¿Con «${shown[0]!.label}» quisiste decir *${shortName(study.name)}*? ${emojiFor(study.name)} — ${formatBs(study.priceBs)}${study.turnaroundText ? turnaroundSuffix(study.turnaroundText) : ""}`,
+      afterQuote ? "Si es así, respóndeme «sí» y te lo sumo a la cotización 😊" : "Si es así, respóndeme «sí» y te armo la cotización 😊",
+      TYPO_DOCTOR_NOTE
+    ].join("\n");
+  }
   let n = 0;
   const sections: string[] = [];
   for (const group of groups) {
@@ -41,6 +52,7 @@ export function formatGroupedOptions(groups: ReadonlyArray<{ label: string; stud
 // Lo que el paciente pidió y el catálogo no tiene (ni parecido). Indicación del laboratorio (dueño, 20-nov): se cotiza lo que sí está y de lo demás se le dice que LA DOCTORA se lo confirma por este chat.
 // Nunca se dice que no lo tenemos o que no lo realizamos, ni se mencionan otros laboratorios (algunos estudios se envían a otro laboratorio: eso lo decide la doctora).
 export const OPTIONS_DOCTOR_NOTE = "Si no es ninguno de estos, te lo confirma la doctora por este chat.";
+export const TYPO_DOCTOR_NOTE = "Si no es ese, te lo confirma la doctora por este chat.";
 const DOCTOR_CONFIRMS_LIMIT = 10;
 export function formatDoctorConfirms(mentions: readonly string[]): string | undefined {
   const shown = [...new Set(mentions.map((mention) => mention.trim()).filter((mention) => mention !== ""))].slice(0, DOCTOR_CONFIRMS_LIMIT);

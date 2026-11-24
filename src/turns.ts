@@ -1,4 +1,4 @@
-import { MENU_OPTIONS, mightBeMenuChoice } from "./greeting-menu.js";
+import { MENU_OPTIONS, menuNumberOf, menuSwitchOffer, mightBeMenuChoice } from "./greeting-menu.js";
 import { repeatCandidate } from "./attention-filter.js";
 import { withPhotoContextWait } from "./photo-context-wait.js";
 import { AT_DOOR_MESSAGE, isAtClosedDoor } from "./at-door.js";
@@ -6,7 +6,7 @@ import { plain as plainText } from "./text-normalize.js";
 import { HUMAN_REQUEST_MESSAGE, HUMAN_REQUEST_SIGNATURE, isHumanRequest } from "./human-request.js";
 import { isCorrectionFollowUp, isResultCorrection, RESULT_CORRECTION_MESSAGE, RESULT_CORRECTION_SIGNATURE } from "./result-correction.js";
 import { HOME_VISIT_SIGNATURE, HOME_VISIT_THANKS, looksLikeHomeVisitData } from "./home-visit.js";
-import { asksOtherPersonPickup, decideResultsAction, isCourtesy, looksLikeIdentification, patientDataIn, RESULTS_SIGNATURES, resultsReplyBody, routeResultsMessage, type ResultsAction } from "./results-silence.js";
+import { asksOtherPersonPickup, decideResultsAction, isCourtesy, looksLikeIdentification, patientDataIn, RESULTS_NAME_ASK, RESULTS_SIGNATURES, resultsReplyBody, routeResultsMessage, type ResultsAction } from "./results-silence.js";
 import { audioFailureProducer, resolveAudioTurns } from "./audio-turns.js";
 import type { AudioFailureCode } from "./audio/types.js";
 import { engineCanDecide, engineReply, instantPhotoReply, photoOutcomeOf, shadowAfter, shadowBefore } from "./batch-engine.js";
@@ -376,12 +376,14 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
         // Se cruzó con una respuesta que ya atiende esa opción (ver menuChoiceDecision): solo si el número es lo único que escribió en este lote.
         if (typeof choice === "object" && choice.alreadyAnswered && indices.length === 1) turn.menuAlreadyAnswered = true;
         if (canonical) {
+          // «sí» a la pregunta de cambio de opción (greeting-menu.ts, menuSwitchOffer) cuenta como elegir con palabras.
+          const via = menuNumberOf(turn.text) !== undefined ? "NUMBER" : "WORDS";
           turn.text = canonical;
           const option = MENU_OPTIONS.find((candidate) => candidate.canonical === canonical)?.code ?? "OTHER";
-          deps.log("agent_menu", { event: "CHOSEN", via: "NUMBER", option, ...(turn.menuAlreadyAnswered ? { crossed: "ALREADY_ANSWERED" } : {}) });
+          deps.log("agent_menu", { event: "CHOSEN", via, option, ...(turn.menuAlreadyAnswered ? { crossed: "ALREADY_ANSWERED" } : {}) });
           chosenByNumber.add(from);
           const key = deps.turns!.contactKeyFor(from);
-          if (key) void deps.turns?.menuEvents?.(key, { event: "CHOSEN", option, via: "NUMBER" });
+          if (key) void deps.turns?.menuEvents?.(key, { event: "CHOSEN", option, via });
         }
       }
     }
@@ -465,7 +467,7 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
   // del contacto se lee de los mensajes recientes solo si el lote es una consulta de resultados o parece el dato pedido (un nombre, una foto, «gracias»). Responde UNA vez por lote (en el último texto); el
   // resto del lote se cierra sin respuesta. Las fotos no se analizan.
   const resultsStage = deps.turns?.resultsStage;
-  const resultsReply = new Map<string, { action: Exclude<ResultsAction, "SILENT">; responder: number }>();
+  const resultsReply = new Map<string, { action: Exclude<ResultsAction, "SILENT">; responder: number; option?: number }>();
   for (const [from, indices] of perContact) {
     const routing = resultsRouting.get(from);
     if (atDoor.has(from) || personReply.has(from) || personSilent.has(from) || correctionReply.has(from) || routing === "SILENT" || routing === "OFFICE_HOURS") continue;
@@ -476,7 +478,9 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
     const dataLike = indices.every((index) => turns[index]!.kind === "IMAGE" || (textOf(index) !== undefined && (looksLikeIdentification(textOf(index)!) || isCourtesy(textOf(index)!))));
     if (!query && !dataLike) continue;
     const stage = resultsStage ? await resultsStage({ from, messageId: turns[indices[0]!]!.messageId, excludeIds: indices.map((index) => turns[index]!.messageId) }).catch(() => undefined) : undefined;
-    const action = decideResultsAction({ stage, query, data: patientDataIn(texts, hasImage), courtesy: !hasImage && texts.length > 0 && texts.every(isCourtesy), pickup: texts.some(asksOtherPersonPickup) });
+    // Un lote que es SOLO un número del menú («3»): mientras se esperan los datos se ofrece cambiar a esa opción (revisión del 23-nov).
+    const menuNumber = indices.length === 1 && texts.length === 1 ? menuNumberOf(texts[0]!) : undefined;
+    const action = decideResultsAction({ stage, query, data: patientDataIn(texts, hasImage), courtesy: !hasImage && texts.length > 0 && texts.every(isCourtesy), pickup: texts.some(asksOtherPersonPickup), ...(menuNumber !== undefined ? { menuNumber } : {}) });
     if (!action) continue;
     deps.log("results_path", { action, stage: stage ?? "NONE" });
     if (action === "SILENT") {
@@ -484,7 +488,7 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
       continue;
     }
     const textIndices = indices.filter((index) => textOf(index) !== undefined);
-    resultsReply.set(from, { action, responder: textIndices.length > 0 ? textIndices[textIndices.length - 1]! : indices[indices.length - 1]! });
+    resultsReply.set(from, { action, responder: textIndices.length > 0 ? textIndices[textIndices.length - 1]! : indices[indices.length - 1]!, ...(action === "SWITCH_OFFER" && menuNumber !== undefined ? { option: menuNumber } : {}) });
   }
   // CAMINO 4 «Estudios a domicilio» (src/home-visit.ts, dueño 21-nov): después del texto fijo, los datos del paciente (nombre, edad, servicio, piso, cama, dirección) se agradecen UNA vez y desde ahí
   // silencio en todo lo del domicilio (lo confirma la Dra). Estudios, la foto de la receta o una pregunta siguen el flujo normal (se cotizan o se responden).
@@ -529,7 +533,7 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
     return done ? { kind: "none" } : { kind: "none" };
   };
   // Los textos del camino 2 salen siempre (ya no dependen del CRM). Con los datos reunidos (THANKS), el caso va además a la cola del CRM si existe: mejor esfuerzo, la respuesta no depende de eso.
-  const resultsProducer = (turn: IncomingTurn, action: Exclude<ResultsAction, "SILENT">): TurnProducer => async (ctx) => {
+  const resultsProducer = (turn: IncomingTurn, action: Exclude<ResultsAction, "SILENT">, option?: number): TurnProducer => async (ctx) => {
     const crm = deps.turns?.crmHandoff;
     if (action === "THANKS" && crm) {
       try {
@@ -538,7 +542,8 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
         deps.log("results_crm_submit_failed", {});
       }
     }
-    return { kind: "reply", body: resultsReplyBody(action, new Date()), result: "conversation", processingStatus: "COMPLETED", stale: "NONE", signature: RESULTS_SIGNATURES[action] };
+    const body = action === "SWITCH_OFFER" ? (option !== undefined ? menuSwitchOffer(option) : undefined) ?? RESULTS_NAME_ASK : resultsReplyBody(action, new Date());
+    return { kind: "reply", body, result: "conversation", processingStatus: "COMPLETED", stale: "NONE", signature: RESULTS_SIGNATURES[action] };
   };
   // La persona en la puerta: el texto fijo sale siempre; el aviso al personal va a la cola del CRM si existe (mejor esfuerzo; cuando se conecte el CRM, es una alerta urgente).
   const doorProducer = (turn: IncomingTurn): TurnProducer => async (ctx) => {
@@ -651,7 +656,7 @@ export async function processTurns(input: IncomingTurn[], deps: QuoteDeps): Prom
         const home = homeThanks.get(turn.from);
         const person = personReply.get(turn.from);
         const correction = correctionReply.get(turn.from);
-        const base = door !== undefined ? (door === index ? doorProducer(turn) : silenceProducer) : person !== undefined ? (person === index ? personProducer(turn) : silenceProducer) : correction !== undefined ? (correction === index ? correctionProducer(turn) : silenceProducer) : home !== undefined ? (home === index ? homeThanksProducer(turn) : silenceProducer) : homeSilent.has(turn.from) ? silenceProducer : results ? (results.responder === index ? resultsProducer(turn, results.action) : silenceProducer) : resultsOnly.has(turn.from) ? silenceProducer : producerFor(turn, deps)!;
+        const base = door !== undefined ? (door === index ? doorProducer(turn) : silenceProducer) : person !== undefined ? (person === index ? personProducer(turn) : silenceProducer) : correction !== undefined ? (correction === index ? correctionProducer(turn) : silenceProducer) : home !== undefined ? (home === index ? homeThanksProducer(turn) : silenceProducer) : homeSilent.has(turn.from) ? silenceProducer : results ? (results.responder === index ? resultsProducer(turn, results.action, results.option) : silenceProducer) : resultsOnly.has(turn.from) ? silenceProducer : producerFor(turn, deps)!;
         // Una foto que se atiende SOLA y que no se pudo cotizar espera un rato a que llegue el texto del paciente (ver src/photo-context-wait.ts); sin la configuración, responde de inmediato.
         const photoWait = deps.turns?.photoContextWait;
         const producer = turn.kind === "IMAGE" && !atDoor.has(turn.from) && !personReply.has(turn.from) && !correctionReply.has(turn.from) && !homeSilent.has(turn.from) && !resultsReply.has(turn.from) && !resultsOnly.has(turn.from) && photoWait ? withPhotoContextWait(base, turn.from, { ...photoWait, contactKeyFor: deps.turns!.contactKeyFor, log: deps.log }) : base;
