@@ -1,9 +1,9 @@
 import { homeVisitMessage } from "../home-visit.js";
-import { guidanceFacts, guidanceFor, withPreparationNote } from "./clinical-guidance.js";
+import { asksPreparation, guidanceFacts, guidanceFor, withPreparationNote } from "./clinical-guidance.js";
 import { isCourtesyOnly } from "./courtesy.js";
 import { stripPaymentTalk } from "../payment-talk.js";
 import { describeProviderError } from "../provider-error.js";
-import type { AgentDecision, AgentModel, Capabilities, HandoffReason, ModelUsage, RecentEntry, Utterance, Violation } from "./contracts.js";
+import type { AgentDecision, AgentModel, Capabilities, Fact, HandoffReason, ModelUsage, RecentEntry, Utterance, Violation } from "./contracts.js";
 import { runToolCalls, type ToolRegistry } from "./tools.js";
 import { filterAdministrativeQuoteCalls } from "./intent-guard.js";
 import { verifyReply } from "./verify.js";
@@ -103,9 +103,13 @@ export async function runAgentTurn(deps: AgentDeps, input: AgentTurnInput): Prom
   const tooled = await runToolCalls(deps.tools, plan.toolCalls, { now, patientText });
   const { runs, blocks } = tooled;
   // Orientación general (src/agent/clinical-guidance.ts): preparación o valores de referencia sin dato del laboratorio. Reemplaza el «sin datos» del conocimiento (no se le dice al modelo que no lo invente).
-  const guidance = guidanceFor(patientText, tooled.facts);
-  const facts = guidance.length > 0 ? [...tooled.facts, ...guidanceFacts(guidance)] : tooled.facts;
-  const notes = guidance.length > 0 ? tooled.notes.filter((note) => !note.startsWith("lab_info:")) : tooled.notes;
+  // Pregunta por la preparación y el plan no la buscó: se busca la del laboratorio (lista de estudios) en lo que escribió y, si no nombra el estudio, en los mensajes recientes (p. ej. la cotización anterior).
+  const preparationFacts = asksPreparation(patientText) && !tooled.facts.some((fact) => fact.refs.some((ref) => ref.startsWith("preparation:"))) ? await lookUpPreparation(deps.tools, patientText, recent, now) : [];
+  const toolFacts = [...tooled.facts, ...preparationFacts];
+  const guidance = guidanceFor(patientText, toolFacts);
+  const facts = guidance.length > 0 ? [...toolFacts, ...guidanceFacts(guidance)] : toolFacts;
+  const preparationFigures = guidance.includes("PREPARATION") || facts.some((fact) => fact.refs.some((ref) => ref.startsWith("preparation:")));
+  const notes = guidance.length > 0 || preparationFacts.length > 0 ? tooled.notes.filter((note) => !note.startsWith("lab_info:")) : tooled.notes;
   const guidanceInfo = guidance.length > 0 ? { guidance } : {};
   // Hay cotización si algún bloque trae precios (la cotización o las opciones). El aviso de los estudios que confirma la doctora no trae precios: solo, no es una cotización.
   const hasQuoteBlock = blocks.some((block) => /\bBs \d/.test(block));
@@ -136,7 +140,7 @@ export async function runAgentTurn(deps: AgentDeps, input: AgentTurnInput): Prom
     } catch (error) {
       return done({ status: "MODEL_ERROR", ...base, modelError: modelFailure(error), ...(firstViolations ? { repairs: 1, firstViolations } : {}) });
     }
-    const problems = verifyReply({ text, facts, patientText, handoff: handoff !== undefined, guidanceFigures: guidance.includes("PREPARATION") });
+    const problems = verifyReply({ text, facts, patientText, handoff: handoff !== undefined, guidanceFigures: preparationFigures });
     const repairInfo = firstViolations ? { repairs: 1, firstViolations } : {};
     if (problems.length === 0) {
       // Pasar con una persona: el texto solo puede decirlo si el caso QUEDÓ registrado. Se ejecuta DESPUÉS de verificar y ANTES de entregar el mensaje; si no se registra, no hay mensaje.
@@ -154,6 +158,17 @@ export async function runAgentTurn(deps: AgentDeps, input: AgentTurnInput): Prom
     feedback = firstViolations = problems;
   }
   return done({ status: "REJECTED", ...base });
+}
+
+// La preparación del laboratorio para lo que pregunta el paciente: primero en su mensaje, luego en los mensajes recientes (del más nuevo al más viejo). Nunca lanza.
+async function lookUpPreparation(tools: ToolRegistry, patientText: string, recent: readonly RecentEntry[], now: Date) {
+  if (!tools.get("study_preparation")) return [];
+  for (const text of [patientText, ...[...recent].reverse().slice(0, 4).map((entry) => entry.text)]) {
+    if (text.trim().length < 2) continue;
+    const { facts } = await runToolCalls(tools, [{ tool: "study_preparation", input: { text: text.slice(0, 1500) } }], { now, patientText }).catch(() => ({ facts: [] as Fact[] }));
+    if (facts.length > 0) return facts;
+  }
+  return [];
 }
 
 // Respuesta fija ante un pedido de estudios a domicilio: vive en src/home-visit.ts (los turnos reconocen el paso por ese texto).

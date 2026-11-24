@@ -76,6 +76,7 @@ Herramientas (solo las que aparezcan en la lista):
 - lab_info: datos aprobados del laboratorio: horarios, sucursales y ubicación, políticas, preparación y plazos de entrega por estudio. Pasa en "text" la pregunta del paciente, completa y sin inventar. NO la uses para precios ni cotizaciones (eso es quote_studies): el conocimiento aprobado no tiene precios.
 - find_studies: identifica un estudio del catálogo por su nombre (sin precios). Pasa el nombre en "text".
 - quote_studies: precio o cotización de estudios con nombre. Pasa en "studies" los nombres EXACTAMENTE como los escribió el paciente (o como los mencionó antes), sin agregar, completar ni corregir estudios. Si crees que alguno tiene un error de tipeo o es una abreviatura o un nombre común (por ejemplo «hgc» → «beta hcg», «tgo» → «transaminasa oxalacetica», «prueba de embarazo» → «hcg cualitativa»), agrega en "guesses" un par {"written": lo que escribió, "guess": el nombre del estudio que crees que quiso decir}; el sistema solo lo usa como sugerencia para que el paciente confirme. Si no tienes una idea clara, no lo pongas. En las demás herramientas, "guesses": null.
+- study_preparation: preparación, ayuno y condiciones de toma de muestra de estudios (el texto de la lista del laboratorio). Pasa en "text" los estudios o la pregunta del paciente.
 - conversation_state: los estudios de la última cotización y de la última receta de esta conversación. Úsala cuando el paciente se refiera a ellas sin nombrarlas ("el último", "lo que pedí", "esos").
 
 Si el paciente pregunta el precio o pide cotizar uno o más estudios escritos en su mensaje (aunque el nombre sea aproximado o genérico), llama de una vez a quote_studies con sus palabras: no pidas antes una receta, una orden ni el nombre exacto.
@@ -241,6 +242,7 @@ export function parsePlan(text: string): Omit<PlanOutput, "usage"> {
     switch (call.tool) {
       case "lab_info": return { tool: call.tool, input: { question: call.text ?? "" } };
       case "find_studies": return { tool: call.tool, input: { query: call.text ?? "" } };
+      case "study_preparation": return { tool: call.tool, input: { text: call.text ?? call.studies?.join(", ") ?? "" } };
       // El modelo a veces pone el nombre en "text" en vez de "studies": se acepta igual (si no, la consulta fallaba con INVALID_INPUT).
       case "quote_studies": return { tool: call.tool, input: { studies: call.studies && call.studies.length > 0 ? call.studies : call.text ? [call.text] : [], ...(call.guesses && call.guesses.length > 0 ? { guesses: call.guesses } : {}) } };
       default: return { tool: call.tool, input: {} };

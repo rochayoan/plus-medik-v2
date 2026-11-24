@@ -253,18 +253,28 @@ export function decideFuzzy(allHits: readonly SearchHit[], mention: string, mode
   return padded.length >= 2 ? { kind: "AMBIGUOUS", candidates: padded.map((hit) => hit.study) } : { kind: "NOTFOUND", mention };
 }
 
-// Método de análisis más rápido: ECLIA primero y CLIA después (definido por el laboratorio, 12-nov). Si el paciente no dice el método, se elige ese; solo si hay UN candidato con el mejor método.
-const FAST_METHODS: ReadonlyArray<RegExp> = [/\beclia\b/i, /\bclia\b/i];
+// Sin método especificado: el MÁS BARATO entre las versiones de un mismo estudio que solo difieren en el método (laboratorio, 24-nov; antes «ECLIA primero», 12-nov). Si empatan en precio, no se elige.
+const METHOD_TAG = /\b(eclia|clia|cmia|fia|elisa|ifi|quimioluminiscencia|fluorescencia|inmunofluorescencia)\b/i;
+const withoutMethod = (name: string): string => normalizeStudyKey(name.replace(/\([^)]*\)/g, " ").replace(/\([^)]*$/, " "));
 // ¿Es una frase de la lista de nombres habituales (G5.9)? Solo para no cortar por su «y» un nombre conocido entero («grupo sanguíneo y factor Rh»); no decide ningún estudio.
 export const isKnownStudyPhrase = (phrase: string): boolean => synonymsOf(phrase).length > 0;
 
+const cheapestOf = (list: readonly CatalogStudy[]): CatalogStudy | undefined => {
+  const lowest = Math.min(...list.map((candidate) => candidate.priceBs));
+  const cheapest = list.filter((candidate) => candidate.priceBs === lowest);
+  return cheapest.length === 1 ? cheapest[0] : undefined;
+};
 export function preferredByMethod(candidates: readonly CatalogStudy[]): CatalogStudy | undefined {
-  for (const method of FAST_METHODS) {
-    const withMethod = candidates.filter((candidate) => method.test(candidate.name));
-    if (withMethod.length === 1) return withMethod[0];
-    if (withMethod.length > 1) return undefined;
-  }
-  return undefined;
+  if (candidates.length < 2) return undefined;
+  // Todos son el MISMO estudio y solo cambia lo que va entre paréntesis (método o cuantificación: «PCR CUALITATIVO», «PCR CUANTITATIVO (FIA)»): el más barato.
+  if (new Set(candidates.map((candidate) => withoutMethod(candidate.name))).size === 1) return cheapestOf(candidates);
+  // Estudios distintos («TSH (ECLIA)» y «TSH NEONATAL»; «VITAMINA D 25 (OH) (ECLIA)» y «VITAMINA D3»): como antes, la versión estándar es la que tiene ECLIA o CLIA; entre ella y sus versiones por otro
+  // método (mismo nombre: «VITAMINA D 25 (OH) (FIA Fluorescencia)»), la más barata. Otros métodos solos («HIV … (Elisa)» frente a «HIV (PRUEBA RAPIDA)») no deciden entre estudios distintos.
+  const standard = candidates.filter((candidate) => /\b(eclia|clia)\b/i.test(candidate.name));
+  if (standard.length === 0 || new Set(standard.map((candidate) => withoutMethod(candidate.name))).size !== 1) return undefined;
+  const base = withoutMethod(standard[0]!.name);
+  const versions = candidates.filter((candidate) => withoutMethod(candidate.name) === base);
+  return versions.length === 1 ? versions[0] : cheapestOf(versions);
 }
 
 // Muestra por defecto: EN SANGRE (decidido por el dueño, 19-nov). Si el paciente nombra un estudio a secas («fósforo», «calcio», «magnesio», «creatinina») sin decir orina ni otra muestra, y una opción es
