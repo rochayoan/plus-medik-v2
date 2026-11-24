@@ -118,7 +118,7 @@ export interface PartialInput {
   variantMismatch: Set<string>;
 }
 
-const BILLABLE = new Set(["CONFIRMS_EXACT", "SEMANTIC_ONLY", "SEMANTIC_COMPOSITE"]);
+const BILLABLE = new Set(["CONFIRMS_EXACT", "SEMANTIC_ONLY", "SEMANTIC_COMPOSITE", "LAB_RULE"]);
 const validPrice = (priceBs: number) => Number.isFinite(priceBs) && priceBs >= 0;
 
 export const studyKeyOf = (text: string): string => normalizeStudyKey(text);
@@ -129,6 +129,7 @@ export function linesOf(match: StudyMatch): Array<{ id: string; basis: QuoteBasi
   if (info) {
     if (!BILLABLE.has(info.contrast)) return [];
     if (info.contrast === "SEMANTIC_COMPOSITE") return info.studyIds.map((id) => ({ id, basis: "COMPOSITE_COMPONENT" as const }));
+    if (info.contrast === "LAB_RULE") return info.studyIds.map((id) => ({ id, basis: "LAB_RULE" as const }));
     return info.studyIds.slice(0, 1).map((id) => ({ id, basis: info.contrast === "CONFIRMS_EXACT" ? ("EXACT_CONFIRMED" as const) : ("SEMANTIC" as const) }));
   }
   return match.status === "MATCHED" && match.study ? [{ id: match.study.id, basis: "EXACT_CONFIRMED" as const }] : [];

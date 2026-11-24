@@ -1,6 +1,5 @@
 import { z } from "zod";
-import { searchCatalog, typoCandidates } from "../catalog-search.js";
-import { isTypoOf } from "../typo.js";
+import { searchCatalog } from "../catalog-search.js";
 import { normalizeStudyKey } from "../consensus.js";
 import type { ConversationReader } from "../conversation-state-store.js";
 import { detectTopics, type KnowledgeAnswer } from "../knowledge-answers.js";
@@ -10,6 +9,8 @@ import { splitStudyMentions } from "../study-mentions.js";
 import type { CatalogStudy } from "../types.js";
 import { emojiFor, formatBs, turnaroundSuffix } from "../whatsapp-quote.js";
 import type { Fact, ToolCall, ToolContext, ToolDef, ToolErrorCode, ToolRun } from "./contracts.js";
+import { chooseAmong, knownNamesOf, reviewFuzzy, sampleAsAdjective, typoSuggestions, coreOfMention, allNameWords, namedChoice, namesWord, IG_WORDS, FORM_WORDS, STOP_WORDS, isPanel, hasWord, versionBase, withVersionSiblings, chooseVersions, withJoinedAcronyms, groupOf } from "../study-choice.js";
+export { chooseVersions, coreOfMention, sampleAsAdjective, withVersionSiblings } from "../study-choice.js";
 
 // Herramientas del agente conversacional: SOLO LECTURA y deterministas. Envuelven lo que ya funciona (conocimiento aprobado, catálogo, motor de cotización, memoria); no inventan datos, no envían y no derivan.
 // Cada una devuelve HECHOS con procedencia; si no hay dato devuelve «sin datos» con un MOTIVO en código (eso no es un fallo: el agente lo sabe y responde con honestidad). Los precios JAMÁS van en un hecho: solo en
@@ -148,264 +149,9 @@ const NOT_ALONE = new Set(["panel", "perfil", "prueba", "pruebas", "test", "exam
   "seriado", "seriada", "simple", "convencional", "automatizado", "automatizada", "urinario", "urinaria", "sanguineo", "sanguinea", "plasmatico", "plasmatica", "heces", "liquido", "liquidos", "ocasional",
   "total", "libre", "directa", "indirecta", "igg", "igm", "iga", "ige", "de", "del", "en", "la", "el", "y", "o", "sangre", "orina", "serico", "serica", "rapida", "rapido", "cuantitativo", "cualitativo", "tipo", "patogenos"]);
 
-// Nombres (y alias aprobados y sinónimos) que el catálogo conoce ENTEROS: no se cortan por su «y» («bilirrubina total y fracciones», «grupo sanguíneo y factor Rh»).
-const knownCache = new WeakMap<readonly CatalogStudy[], Set<string>>();
-function knownNamesOf(catalog: readonly CatalogStudy[]): Set<string> {
-  const cached = knownCache.get(catalog);
-  if (cached) return cached;
-  const names = new Set<string>();
-  for (const study of catalog) {
-    const bare = normalizeStudyKey(study.name.replace(/\([^)]*\)/g, " "));
-    names.add(normalizeStudyKey(study.name));
-    names.add(bare);
-    names.add(normalizeStudyKey(bare.replace(/\btipo\b/g, " "))); // «HERPES tipo 1 y 2 IgG (Elisa)» = «herpes 1 y 2 igg»
-    for (const alias of study.normalizedAliases ?? []) names.add(normalizeStudyKey(alias));
-  }
-  knownCache.set(catalog, names);
-  return names;
-}
 
-// Entre varias opciones, la que tiene TODAS las palabras que el paciente escribió («psa total» → las dos PSA TOTAL, no la LIBRE); si quedan varias que solo cambian de método, el método preferido.
-// Se mira el nombre ENTERO (también lo que va entre paréntesis: «PROTEINA C REACTIVA (PCR CUANTITATIVO)»), y una opción con una palabra de VARIANTE que el paciente no escribió no es lo que pidió:
-// «pcr cuantitativo» no es la SEMI cuantitativa (pasaba porque a ese nombre del catálogo le falta el «)»).
-const VARIANT_WORDS = new Set(["semi", "semicuantitativo", "semicuantitativa", "cualitativo", "cualitativa", "cuantitativo", "cuantitativa", "total", "libre", "igg", "igm", "iga", "ige", "ss", "ds", "neonatal", "inversa"]);
-const nameWords = (value: string): Set<string> => new Set(normalizeStudyKey(value.replace(/\([^)]*\)/g, " ")).split(" ").filter(Boolean));
-const allNameWords = (value: string): Set<string> => new Set(normalizeStudyKey(value).split(" ").filter(Boolean));
-// El estudio sin su variante ni su método: «PROTEINA C REACTIVA (PCR SEMI CUANTITATIVO» y «(PCR CUANTITATIVO) (FIA Fluorescencia)» son el mismo; «HEPATITIS B ANTIGENO…» y «HEPATITIS B ANTICORE…» no.
-const METHOD_WORDS = new Set(["eclia", "clia", "cmia", "elisa", "ifi", "fia", "fluorescencia", "inmunofluorescencia", "prueba", "rapida", "rapido", "test", "latex", "hep2"]);
-const variantBase = (value: string): string => [...allNameWords(value)].filter((word) => !VARIANT_WORDS.has(word) && !METHOD_WORDS.has(word)).sort().join(" ");
-function namedChoice(candidates: readonly CatalogStudy[], mention: string): CatalogStudy | undefined {
-  const asked = normalizeStudyKey(coreOfMention(mention)).split(" ").filter(Boolean);
-  if (asked.length < 2) return undefined;
-  const askedSet = new Set(asked);
-  // Un panel solo se elige si el paciente pidió un panel: su lista larga tiene casi cualquier palabra («vih 1 y 2» no es el PANEL INTIMA PLUS de Bs 1250 porque su lista diga «VIH» y «Herpes simple 1»).
-  const options = askedSet.has("panel") || askedSet.has("perfil") ? candidates : candidates.filter((candidate) => !isPanel(candidate));
-  // Solo entre versiones del MISMO estudio se descarta la que agrega una variante no pedida; entre estudios distintos rige la regla de siempre.
-  const sameStudy = options.length > 1 && options.every((candidate) => variantBase(candidate.name) === variantBase(options[0]!.name));
-  const withAll = options.filter((candidate) => {
-    const words = sameStudy ? allNameWords(candidate.name) : nameWords(candidate.name);
-    return asked.every((word) => words.has(word)) && (!sameStudy || [...words].every((word) => !VARIANT_WORDS.has(word) || askedSet.has(word)));
-  });
-  if (withAll.length === 1) return withAll[0];
-  if (withAll.length > 1) {
-    const byMethod = preferredByMethod(withAll);
-    return byMethod && withAll.every((candidate) => candidate === byMethod || sameWithoutMethod(candidate, byMethod)) ? byMethod : undefined;
-  }
-  return undefined;
-}
-// ¿La palabra NOMBRA a estos estudios? Está en el nombre de cada uno (palabra entera), es un alias aprobado de cada uno o es una frase de la lista de sinónimos.
-function namesWord(word: string, studies: readonly CatalogStudy[]): boolean {
-  if (studies.length === 0) return false;
-  if (isKnownStudyPhrase(word)) return true;
-  return studies.every((study) => nameWords(study.name).has(word) || normalizeStudyKey(study.name).split(" ").includes(word) || (study.normalizedAliases ?? []).includes(word));
-}
-// Dos opciones que solo se diferencian por el método entre paréntesis («PSA TOTAL (ECLIA)» y «PSA TOTAL (FIA Fluorescencia)»).
-const sameWithoutMethod = (a: CatalogStudy, b: CatalogStudy): boolean => normalizeStudyKey(a.name.replace(/\([^)]*\)/g, " ")) === normalizeStudyKey(b.name.replace(/\([^)]*\)/g, " "));
 
-// ───────────── Versiones de un MISMO estudio cuando el médico no las especifica (dueño y cotizaciones reales de la Dra, 20-nov) ─────────────
-// Se elige como la Dra, sin preguntar al paciente, solo entre versiones del mismo estudio (mismo nombre sin método, cuantificación, clase de anticuerpo ni muestra):
-//   · muestra: en SANGRE (19-nov) — «LDH» no es la «LDH de LÍQUIDOS»;
-//   · clase de anticuerpo: IgG + IgM juntas (la Dra en citomegalovirus, rubéola, toxo, clamidia, Epstein-Barr, tuberculosis, herpes 2 y hepatitis A); nunca IgA sola;
-//   · método / cuantificación / versión (simple, seriado, express): la MÁS BARATA y, si empatan en precio, la de menor tiempo de entrega (respuestas del laboratorio, 24-nov: anti-TG, vitamina D,
-//     dengue, PCR, hemocultivo, paternidad; reemplaza «ECLIA primero» del 12-nov y «PCR → cuantitativa» del 20-nov);
-//   · total / libre (T3, T4, PSA, testosterona y cualquier otro): sin decir cuál, el TOTAL directo, sin ofrecer el libre (laboratorio, 24-nov: «ofrecer muchas opciones cansa al paciente»);
-//   · si aun así empatan, o difieren en otra cosa (herpes zóster vs. tipo 2), NO se elige: se pregunta al paciente.
-const QUANT_WORDS = new Set(["semi", "semicuantitativo", "semicuantitativa", "cualitativo", "cualitativa", "cuantitativo", "cuantitativa"]);
-const IG_WORDS = new Set(["igg", "igm", "iga", "ige", "igd"]);
-const FORM_WORDS = new Set(["total", "libre", "neonatal", "inversa", "ss", "ds", "simple", "doble", "cadena"]);
-const VERSION_METHOD_WORDS = new Set([...METHOD_WORDS, "inmuno", "inmunocromatografia", "quimioluminiscencia", "electroquimioluminiscencia", "automatizado", "automatizada", "convencional", "seriado", "seriada", "x", "x2", "x3", "express"]);
-const OTHER_SAMPLE = /\b(?:orina|urin\w*|\w+uria|24|heces|liquido|liquidos|lcr|esputo|semen|saliva|hisopado|secrecion)\b/;
-const STOP_WORDS = new Set(["de", "del", "en", "y", "la", "el"]);
-const isPanel = (study: CatalogStudy): boolean => study.name.length > 90 || /^(?:panel|perfil)\b/i.test(study.name.trim());
-// Las palabras pedidas están en el nombre (las de 5+ letras por su raíz, sin las 2 últimas letras: «reumatoide» ↔ «reumatoideo», «glicosilad» ↔ «glicosilada»; pero «electrolitos» ≠ «electroforesis»).
-const hasWord = (words: ReadonlySet<string>, asked: string): boolean => {
-  if (asked.length < 5) return words.has(asked);
-  const root = asked.slice(0, Math.max(5, asked.length - 2));
-  return [...words].some((word) => word.startsWith(root));
-};
-// El nombre del estudio sin lo que va entre paréntesis (también un paréntesis sin cerrar) ni método, cuantificación, clase, forma o muestra.
-const versionBase = (name: string): Set<string> => {
-  // «SERIADO X 2» → «x2» (la versión; el número suelto no distingue otro estudio).
-  const words = normalizeStudyKey(name.replace(/\([^)]*\)/g, " ").replace(/\([^)]*$/, " ")).replace(/\bx (\d)\b/g, "x$1").split(" ");
-  // «IgG E IgM»: la «e» une dos clases (no es la hepatitis E).
-  const joinsClasses = words.filter((word) => IG_WORDS.has(word)).length > 1;
-  return new Set(words.filter((word) => word !== "" && !VERSION_METHOD_WORDS.has(word) && !QUANT_WORDS.has(word) && !IG_WORDS.has(word) && !FORM_WORDS.has(word) && !STOP_WORDS.has(word)
-    && !OTHER_SAMPLE.test(word) && !(joinsClasses && (word === "e" || word === "y"))));
-};
-const hoursOf = (text: string | null | undefined): number | undefined => {
-  const value = normalizeStudyKey(text ?? "");
-  const n = Number(value.match(/\d+/)?.[0] ?? NaN);
-  if (/minuto/.test(value)) return Number.isNaN(n) ? undefined : n / 60;
-  if (/hora/.test(value)) return Number.isNaN(n) ? undefined : n;
-  if (/en el dia|mismo dia/.test(value)) return 10;
-  if (/dia/.test(value)) return Number.isNaN(n) ? undefined : n * 24;
-  if (/semana/.test(value)) return Number.isNaN(n) ? undefined : n * 168;
-  return undefined;
-};
-// La MÁS BARATA; si empatan en precio, la de menor tiempo de entrega si es UNA. Lo que el paciente dijo (método o cuantificación) manda.
-function cheapestVersion(pool: readonly CatalogStudy[], asked: readonly string[]): CatalogStudy | undefined {
-  let candidates = [...pool];
-  const said = asked.filter((word) => VERSION_METHOD_WORDS.has(word) || QUANT_WORDS.has(word));
-  if (said.length > 0) candidates = candidates.filter((study) => said.every((word) => hasWord(allNameWords(study.name), word)));
-  if (candidates.length === 1) return candidates[0];
-  if (candidates.length === 0) return undefined;
-  const lowest = Math.min(...candidates.map((study) => study.priceBs));
-  candidates = candidates.filter((study) => study.priceBs === lowest);
-  if (candidates.length === 1) return candidates[0];
-  const hours = candidates.map((study) => hoursOf(study.turnaroundText));
-  if (hours.some((value) => value === undefined)) return undefined;
-  const best = Math.min(...(hours as number[]));
-  const fastest = candidates.filter((_, index) => hours[index] === best);
-  return fastest.length === 1 ? fastest[0] : undefined;
-}
-// La búsqueda entrega pocas opciones (tope de 4): para elegir la versión más barata hacen falta TODAS las versiones del mismo estudio («toxoplasma»: sin esto quedaba fuera «INMUNO TOXO IgG» y salía la
-// ELISA de Bs 90). Se suman las del catálogo con el mismo nombre base que alguna de las opciones.
-export function withVersionSiblings(candidates: readonly CatalogStudy[], catalog: readonly CatalogStudy[]): CatalogStudy[] {
-  const key = (study: CatalogStudy) => [...versionBase(study.name)].sort().join(" ");
-  const bases = new Set(candidates.filter((study) => !isPanel(study)).map(key));
-  const siblings = catalog.filter((study) => study.active && !isPanel(study) && bases.has(key(study)) && !candidates.some((item) => item.id === study.id));
-  return [...candidates, ...siblings];
-}
-export function chooseVersions(candidates: readonly CatalogStudy[], mention: string): CatalogStudy[] | undefined {
-  const asked = normalizeStudyKey(coreOfMention(mention)).split(" ").filter((word) => word !== "" && !STOP_WORDS.has(word));
-  if (asked.length === 0 || candidates.length < 2) return undefined;
-  // «doble cadena» = ds, «simple cadena» = ss
-  const askedForms = new Set(asked.filter((word) => FORM_WORDS.has(word)));
-  if (askedForms.has("doble")) askedForms.add("ds");
-  if (askedForms.has("simple")) askedForms.add("ss");
-  let pool = candidates.filter((study) => !isPanel(study));
-  if (!asked.some((word) => OTHER_SAMPLE.test(word))) {
-    const blood = pool.filter((study) => !OTHER_SAMPLE.test(normalizeStudyKey(study.name)));
-    if (blood.length > 0) pool = blood;
-  }
-  pool = pool.filter((study) => { const words = allNameWords(study.name); return asked.every((word) => FORM_WORDS.has(word) || hasWord(words, word)); });
-  if (pool.length === 0) return undefined;
-  // Solo las versiones «puras» (las demás agregan algo más al nombre: «CARGA VIRAL», «pneumoniae», «H.A.I.»).
-  const bases = pool.map((study) => versionBase(study.name));
-  const minimal = [...bases].sort((a, b) => a.size - b.size)[0]!;
-  if (!bases.every((base) => [...minimal].every((word) => base.has(word)))) return undefined;
-  pool = pool.filter((_, index) => bases[index]!.size === minimal.size);
-  // Forma (total/libre/neonatal/ss/ds): la que no agrega una forma no pedida; si todas agregan una, se pregunta.
-  // «simple» es una forma solo en «simple cadena» (anti-DNA); en «HEMOCULTIVO … SIMPLE» es la versión de una muestra.
-  const formsOf = (study: CatalogStudy) => { const words = allNameWords(study.name); return [...words].filter((word) => FORM_WORDS.has(word) && word !== "cadena" && (word !== "simple" || words.has("cadena"))); };
-  let plain = pool.filter((study) => formsOf(study).every((word) => askedForms.has(word)));
-  // Sin decir total ni libre: el TOTAL (laboratorio, 24-nov).
-  if (plain.length === 0 && askedForms.size === 0) plain = pool.filter((study) => formsOf(study).every((word) => word === "total"));
-  if (plain.length === 0) return undefined;
-  pool = plain;
-  if (pool.length === 1) return pool;
-  // Clase de anticuerpo: IgG + IgM (o la que pidió).
-  const igOf = (study: CatalogStudy) => [...allNameWords(study.name)].filter((word) => IG_WORDS.has(word));
-  if (pool.some((study) => igOf(study).length > 0)) {
-    const askedIg = asked.filter((word) => IG_WORDS.has(word));
-    // Una prueba que trae las dos clases juntas («DENGUE TEST RAPIDO IgG E IgM»): sin pedir una clase, compite por precio con IgG + IgM por separado (gana la más barata, laboratorio 24-nov).
-    const combined = askedIg.length === 0 ? cheapestVersion(pool.filter((study) => igOf(study).length > 1), asked) : undefined;
-    if (pool.some((study) => igOf(study).length > 1) && askedIg.length > 0) return undefined;
-    pool = pool.filter((study) => igOf(study).length <= 1);
-    const present = new Set(pool.flatMap(igOf));
-    const classes = (askedIg.length > 0 ? askedIg : ["igg", "igm"]).filter((cls) => present.has(cls));
-    const out: CatalogStudy[] = [];
-    for (const cls of classes) {
-      const pick = cheapestVersion(pool.filter((study) => { const ig = igOf(study); return ig.length === 1 && ig[0] === cls; }), asked);
-      if (!pick) {
-        out.length = 0;
-        break;
-      }
-      out.push(pick);
-    }
-    // La prueba combinada gana si cuesta lo mismo o menos que las separadas juntas: se le descuenta el precio de cada una y se mira si queda algo. Solo se compara; ningún precio sale de aquí.
-    let combinedLeft = combined?.priceBs ?? Number.POSITIVE_INFINITY;
-    for (const study of out) combinedLeft -= study.priceBs;
-    if (combined && (out.length === 0 || combinedLeft <= 0)) return [combined];
-    return out.length > 0 ? out : undefined;
-  }
-  const pick = cheapestVersion(pool, asked);
-  return pick ? [pick] : undefined;
-}
 
-// Siglas con puntos en el catálogo («H.I.V 1,2», «H.A.I. TOXO», «CELULAS L.E.»): normalizadas quedan «h i v», que nadie escribe así. Se agrega (solo en memoria, sin tocar el catálogo) el alias
-// con la sigla junta («hiv 1 2», «hai toxo»). Así la prueba rápida de HIV de Bs 50 aparece entre las opciones de «vih».
-const dottedCache = new WeakMap<readonly CatalogStudy[], readonly CatalogStudy[]>();
-export function withJoinedAcronyms(catalog: readonly CatalogStudy[]): readonly CatalogStudy[] {
-  const cached = dottedCache.get(catalog);
-  if (cached) return cached;
-  const out = catalog.map((study) => {
-    if (!/\b(?:[A-Za-z]\.){2,}/.test(study.name)) return study;
-    const joined = normalizeStudyKey(study.name.replace(/\b((?:[A-Za-z]\.){2,}[A-Za-z]?)\.?/g, (acronym) => acronym.replace(/\./g, "")));
-    const bare = normalizeStudyKey(study.name.replace(/\([^)]*\)/g, " ").replace(/\b((?:[A-Za-z]\.){2,}[A-Za-z]?)\.?/g, (acronym) => acronym.replace(/\./g, "")));
-    const extra = [joined, bare].filter((alias) => alias !== "" && alias !== study.normalizedName && !(study.normalizedAliases ?? []).includes(alias));
-    return extra.length > 0 ? { ...study, normalizedAliases: [...(study.normalizedAliases ?? []), ...new Set(extra)] } : study;
-  });
-  dottedCache.set(catalog, out);
-  return out;
-}
-
-// ───────────── Nombres de GRUPO: lo que la Dra cotiza cuando el médico escribe el nombre del perfil (capturas 4–20 nov) ─────────────
-// Si el catálogo tiene un estudio con ese nombre (un panel), manda el catálogo. «pending»: el laboratorio aún no confirmó la composición → se ofrecen como opciones (no se cotizan solos).
-// `labDefault`: lo que el LABORATORIO decidió cotizar cuando el estudio se nombra a secas (respuestas del 24-nov). Manda aunque el catálogo tenga un alias con ese nombre (p. ej. «hcg» está en las tres HCG).
-// `note`: lo que el redactor debe decir en una frase (p. ej. anti-DNA: el médico confirma cuál).
-const STUDY_GROUPS: ReadonlyArray<{ phrases: readonly string[]; components: readonly string[]; pending?: true; labDefault?: true; note?: string }> = [
-  { phrases: ["chagas", "examen de chagas", "prueba de chagas", "test de chagas"], components: ["HAI CHAGAS"], labDefault: true },
-  { phrases: ["factor reumatoide", "factor reumatoideo", "latex factor reumatoide", "latex", "fr", "factor rx", "reumatoide"], components: ["LATEX FACTOR REUMATOIDE (SEMI CUANTITATIVO)"], labDefault: true },
-  { phrases: ["hcg", "beta hcg", "bhcg", "b hcg", "prueba de embarazo", "test de embarazo", "examen de embarazo", "embarazo", "gonadotropina corionica humana"], components: ["HCG SUB UNIDAD BETA-CUALITATIVA (HCG)"], labDefault: true },
-  { phrases: ["dengue", "test de dengue", "prueba de dengue", "examen de dengue"], components: ["DENGUE TEST RAPIDO IgG E IgM"], labDefault: true },
-  { phrases: ["paternidad", "prueba de paternidad", "adn paternidad", "prueba de adn", "examen de paternidad", "test de paternidad"], components: ["ADN (Paternidad 2 muestras- padre e hijo) - Sangre con EDTA, Hisopado Bucal"], labDefault: true },
-  { phrases: ["ionograma", "electrolitos", "electrolitos en sangre"], components: ["IONOGRAMA 1 (sodio, potasio, cloro)"], labDefault: true },
-  { phrases: ["anti dna", "antidna", "anti adn", "antiadn", "anti dna igg"], components: ["ANTI-DNA ss (Simple Cadena) IgG (Elisa)", "ANTI-DNA ds (Doble Cadena) IgG (Elisa)"], labDefault: true, note: "Anti-DNA: se cotizan las dos versiones (simple y doble cadena) porque el laboratorio lo indica así; dile en una frase que su médico confirma cuál necesita." },
-  { phrases: ["transaminasas", "transaminasa", "transa"], components: ["TRANSAMINASA GOT", "TRANSAMINASA GPT"] },
-  { phrases: ["perfil lipidico", "perfil de lipidos", "lipidograma", "perfil lipidico completo"], components: ["COLESTEROL TOTAL", "COLESTEROL HDL", "COLESTEROL LDL", "TRIGLICERIDOS"] },
-  { phrases: ["perfil hepatico", "hepatograma", "pruebas hepaticas", "funcion hepatica", "hepatico", "perfil hepatico completo"], components: ["TRANSAMINASA GOT", "TRANSAMINASA GPT", "BILIRRUBINA TOTAL Y FRACCIONES", "FOSFATASA ALCALINA", "GAMA GLUTAMIL TRANSFERASA GGT"] },
-  { phrases: ["perfil renal", "funcion renal", "pruebas renales", "perfil renal completo"], components: ["CREATININA", "UREA", "EXAMEN GENERAL DE ORINA COMPLETA"] },
-  // Composición confirmada por el laboratorio (24-nov): TP + INR, TTPa y fibrinógeno.
-  { phrases: ["coagulograma", "pruebas de coagulacion", "perfil de coagulacion", "coagulacion"], components: ["TIEMPO DE PROTROMBINA + INR", "TIEMPO PARCIAL DE TROMBOPLASTINA (APTT)", "FIBRINOGENO"] }
-];
-function groupOf(mention: string, catalog: readonly CatalogStudy[]): { studies: CatalogStudy[]; pending: boolean; note?: string } | undefined {
-  const key = normalizeStudyKey(mention);
-  const group = STUDY_GROUPS.find((item) => item.phrases.includes(key));
-  if (!group) return undefined;
-  if (!group.labDefault && catalog.some((study) => normalizeStudyKey(study.name) === key || (study.normalizedAliases ?? []).includes(key))) return undefined;
-  const byName = new Map(catalog.map((study) => [normalizeStudyKey(study.name), study]));
-  const studies = group.components.map((name) => byName.get(normalizeStudyKey(name))).filter((study): study is CatalogStudy => study !== undefined);
-  // Una elección del laboratorio vale solo si están TODOS sus estudios (si el catálogo cambió un nombre, sigue la regla general).
-  if (group.labDefault && studies.length !== group.components.length) return undefined;
-  return studies.length > 0 ? { studies, pending: group.pending === true, ...(group.note ? { note: group.note } : {}) } : undefined;
-}
-
-// ───────────── La búsqueda por parecido nunca elige SOLA una variante que el paciente no escribió ─────────────
-// «hepatitis» → «HEPATITIS E» (la «e» no se escribió y hay otras hepatitis); «testosterona» → «TOTAL» (existe la LIBRE). Ni se queda con un nombre al que le falta lo escrito:
-// «hemoglobina glicosilad» → «HEMOGLOBINA» (falta «glicosilada»). En esos casos el resultado pasa a ser una duda entre las opciones que sí tienen todo lo escrito.
-const SIGNIFICANT = (word: string): boolean => word.length >= 4 && !STOP_WORDS.has(word);
-function reviewFuzzy(study: CatalogStudy, mention: string, catalog: readonly CatalogStudy[]): { keep: CatalogStudy } | { replace: CatalogStudy } | { doubt: CatalogStudy[] } {
-  const asked = normalizeStudyKey(coreOfMention(mention)).split(" ").filter((word) => word !== "");
-  const words = allNameWords(study.name);
-  if (asked.filter(SIGNIFICANT).some((word) => !hasWord(words, word))) {
-    const alternatives = catalog.filter((other) => !isPanel(other) && asked.filter(SIGNIFICANT).every((word) => hasWord(allNameWords(other.name), word)));
-    if (alternatives.length === 1) return { replace: alternatives[0]! };
-    if (alternatives.length > 1 && alternatives.length <= 8) return { doubt: alternatives };
-    return { keep: study };
-  }
-  const extra = [...words].filter((word) => !asked.includes(word) && (/^[a-e]$/.test(word) || FORM_WORDS.has(word) || IG_WORDS.has(word)));
-  if (extra.length === 0) return { keep: study };
-  const siblings = catalog.filter((other) => other.id !== study.id && !isPanel(other) && asked.every((word) => hasWord(allNameWords(other.name), word)));
-  return siblings.length === 0 ? { keep: study } : { doubt: [study, ...siblings].slice(0, 8) };
-}
-
-// El paciente nombra la muestra con «de/en + sustantivo» y el catálogo con el adjetivo: «frotis de sangre periférica» → «frotis sanguineo», «calprotectina en heces» → «calprotectina fecal», «sedimento de
-// orina» → «sedimento urinario». «Periférica» es la sangre de una vena (la de siempre): no cambia el estudio. Solo agrega una forma más para buscar; si no hay cambio, devuelve el mismo texto.
-export const sampleAsAdjective = (core: string): string =>
-  core
-    .replace(/\b(?:de|en)\s+(?:la\s+)?sangre(?:\s+(?:periferica|venosa|total))?\b/g, "sanguineo")
-    .replace(/\bsangre\s+periferica\b/g, "sanguineo")
-    .replace(/\bperiferic[oa]\b/g, "sanguineo")
-    .replace(/\b(?:de|en)\s+(?:las\s+)?(?:heces|deposiciones?)(?:\s+fecales)?\b/g, "fecal")
-    .replace(/\b(?:de|en)\s+(?:la\s+)?orina\b/g, "urinario")
-    .replace(/\b(sanguineo)(?:\s+sanguineo)+\b/g, "$1")
-    .replace(/\s+/g, " ")
-    .trim();
-
-// Palabras de relleno delante del nombre de un estudio («prueba de», «dosaje de», «examen de»).
-const FILLER = /^(?:(?:la|el|una?|unos?|las|los)\s+)?(?:pruebas?|examen(?:es)?|analisis|estudios?|dosajes?|dosificacion|test|nivel(?:es)?)(?!\s+rapid)\s+(?:de\s+(?:la\s+|el\s+|los\s+|las\s+)?|del\s+|para\s+(?:el\s+|la\s+)?)?/;
-export const coreOfMention = (text: string): string => text.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim().replace(FILLER, "").trim();
 // La cotización: usa el MISMO motor de texto de las sesiones de cotización, CON la búsqueda por parecido (erratas, nombres comunes, método preferido; el mismo umbral que la ruta de siempre). Cotiza los estudios
 // identificados con certeza; lo DUDOSO (varias opciones plausibles, o un nombre que solo se parece) no se rechaza: se ofrece debajo, con su precio y fuera del total, para que el paciente confirme. Solo lo que
 // no se parece a nada del catálogo queda como «no encontrado».
@@ -511,16 +257,8 @@ export function quoteStudiesTool(options: { loadCatalog: () => Promise<readonly 
         }
         for (const candidates of candidateGroups) {
           // Muestra por defecto EN SANGRE (decisión del dueño, 19-nov): «fósforo», «calcio», «creatinina» a secas → la versión en sangre con ese mismo nombre, si hay UNA. Nunca elige entre dos en sangre.
-          const blood = preferredBySample(candidates, text);
-          // «psa total»: entre PSA TOTAL (ECLIA), PSA TOTAL (FIA) y PSA LIBRE (ECLIA) quedan los que tienen TODAS las palabras pedidas, y entre esos el método preferido (el mismo de la ruta de siempre).
-          // Un alias que comparten TODAS las opciones («atg» en la anti-TG CLIA y ECLIA; «panel ITS» en los 4 paneles de ITS): lo escrito no distingue entre ellas, así que no se elige por las palabras
-          // del nombre (antes «panel its» elegía el único panel que dice «ITS» en el nombre). Se elige la versión como siempre o, si no son versiones del mismo estudio, se ofrecen las opciones.
-          const sharedAlias = candidates.length > 1 && candidates.every((study) => (study.normalizedAliases ?? []).includes(normalizeStudyKey(coreOfMention(text))));
-          const named = blood || sharedAlias ? undefined : namedChoice(candidates, text);
-          // Versiones del mismo estudio sin especificar: como las elige la Dra (ver chooseVersions).
-          const chosen = blood ? [blood] : named ? [named] : chooseVersions(withVersionSiblings(candidates, catalog), sharedAlias ? [...versionBase(candidates[0]!.name)].join(" ") : text);
-          // Si a lo elegido le falta algo que el paciente escribió y UN estudio lo tiene todo, es ese («hemoglobina glicosilad» no es la «HEMOGLOBINA» en sangre).
-          const fixed = chosen?.map((study) => { const review = reviewFuzzy(study, text, catalog); return "replace" in review ? review.replace : study; });
+          // Muestra en sangre, nombre completo, alias compartido y versiones del mismo estudio: la misma decisión que usa la foto de la receta (study-choice.ts).
+          const fixed = chooseAmong(candidates, text, catalog);
           if (fixed) for (const study of fixed) sure.set(study.id, study);
           else doubt(text, candidates);
         }
@@ -532,9 +270,7 @@ export function quoteStudiesTool(options: { loadCatalog: () => Promise<readonly 
         else if (nothing) {
           // Antes de dejárselo a la doctora: ¿es una errata de algo del catálogo («hgc» → HCG, «lipsaa» → LIPASA)? Y si no, ¿qué cree el modelo que quiso escribir? Las dos son solo SUGERENCIAS.
           // Errata de un nombre con elección del laboratorio («hgc» → «hcg» → la HCG cualitativa): se sugiere esa.
-          const typoPhrase = STUDY_GROUPS.filter((group) => group.labDefault).flatMap((group) => group.phrases).find((phrase) => forms.some((form) => isTypoOf(normalizeStudyKey(form), phrase)));
-          const typoDefault = typoPhrase ? groupOf(typoPhrase, catalog)?.studies.filter((study) => !sure.has(study.id)) ?? [] : [];
-          const typos = typoDefault.length > 0 ? typoDefault : forms.flatMap((form) => typoCandidates(form, catalog)).filter((study) => !sure.has(study.id));
+          const typos = typoSuggestions(forms, catalog, sure);
           const suggested = typos.length > 0 ? typos : guessedStudies(text);
           if (suggested.length > 0) {
             doubt(text, [...new Map(suggested.map((study) => [study.id, study])).values()].slice(0, SUGGESTION_LIMIT));
