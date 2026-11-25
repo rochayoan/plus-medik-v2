@@ -1,6 +1,7 @@
 import type { AnalysisResult } from "./analyze.js";
 import type { CatalogStudy } from "./types.js";
 import { emojiFor, formatBs, turnaroundSuffix } from "./whatsapp-quote.js";
+import { askGroupFor, askGroupsAmong } from "./study-choice.js";
 
 // Estudios POSIBLES (dudosos): lo que el motor no pudo confirmar con certeza pero que el catálogo sí tiene. En vez de rechazarlos, se muestran con su precio del catálogo, NUMERADOS y FUERA del total, para que
 // el paciente confirme cuál quiso (decisión del dueño, 19-nov: «que mi agente no sea tan rechazador»). Lo usan la cotización por texto del agente y la de fotos. Nunca se suman ni se cotizan solos.
@@ -11,13 +12,20 @@ const MAX_OPTION_NAME = 90;
 const shortName = (name: string): string => (name.length > MAX_OPTION_NAME ? `${name.slice(0, MAX_OPTION_NAME - 1).trimEnd()}…` : name);
 const priced = (study: CatalogStudy): boolean => study.active && Number.isFinite(study.priceBs) && study.priceBs > 0;
 
-export function formatDoubtfulOptions(studies: readonly CatalogStudy[], afterQuote: boolean): string | undefined {
-  const valid = studies.filter(priced).slice(0, DOUBTFUL_LIMIT);
-  if (valid.length === 0) return undefined;
+// `asks`: estudios que dependen de un dato del paciente (dueño, 25-nov: cultivo de secreción, microalbuminuria, biopsia): se le pide ese dato debajo de la lista. Los de `hideOptions`
+// (biopsia) no se listan: el precio lo confirma la doctora con el tamaño de la muestra.
+export function formatDoubtfulOptions(studies: readonly CatalogStudy[], afterQuote: boolean, catalog: readonly CatalogStudy[] = []): string | undefined {
+  const asks = askGroupsAmong(studies.map((study) => study.id), catalog);
+  const hidden = new Set(asks.filter((group) => group.hideOptions).flatMap((group) => group.studies.map((study) => study.id)));
+  const valid = studies.filter((study) => priced(study) && !hidden.has(study.id)).slice(0, DOUBTFUL_LIMIT);
+  const askLines = asks.map((group) => `👉 ${group.ask}`);
+  if (valid.length === 0 && askLines.length === 0) return undefined;
+  if (valid.length === 0) return [afterQuote ? "🔎 *Para completar tu cotización:*" : "🩺 *PlusMedik*", "", ...askLines].join("\n");
   const lines = valid.map((study, index) => `${index + 1}. ${emojiFor(study.name)} ${shortName(study.name)} — ${formatBs(study.priceBs)}${study.turnaroundText ? turnaroundSuffix(study.turnaroundText) : ""}`);
+  const asked = askLines.length > 0 ? ["", ...askLines] : [];
   return afterQuote
-    ? ["🔎 *Posiblemente también pediste alguno de estos* (no están sumados en el total):", "", ...lines, "", "¿Quieres que agregue alguno a tu cotización? Responde con el número o el nombre. 😊"].join("\n")
-    : ["🩺 *PlusMedik* · Opciones que encontré", "", ...lines, "", "Dime cuál (o cuáles) te interesa y te armo la cotización. 😊"].join("\n");
+    ? ["🔎 *Posiblemente también pediste alguno de estos* (no están sumados en el total):", "", ...lines, ...asked, "", "¿Quieres que agregue alguno a tu cotización? Responde con el número o el nombre. 😊"].join("\n")
+    : ["🩺 *PlusMedik* · Opciones que encontré", "", ...lines, ...asked, "", "Dime cuál (o cuáles) te interesa y te armo la cotización. 😊"].join("\n");
 }
 
 // Las opciones AGRUPADAS por lo que pidió el paciente (cotización por texto del agente, 20-nov): «Para «pcr»: 1… 2… 3…», con la numeración seguida para que responda con el número. Sin el tope
@@ -80,7 +88,9 @@ export function possibleStudiesFromAnalysis(analysis: AnalysisResult, catalog: r
   const quoted = new Set((internal.quoted?.lines ?? []).map((line) => line.id));
   const found = new Map<string, CatalogStudy>();
   for (const item of internal.pending) {
-    if (item.kind !== "STUDY" || !Array.isArray(item.candidates) || item.candidates.length === 0 || item.candidates.length > MAX_CANDIDATES_PER_LINE) continue;
+    if (item.kind !== "STUDY" || !Array.isArray(item.candidates) || item.candidates.length === 0) continue;
+    // Más de 4 opciones solo si son las de UN estudio que depende de un dato del paciente (cultivo de secreción: 6 zonas; biopsia: 6 tamaños).
+    if (item.candidates.length > MAX_CANDIDATES_PER_LINE && !askGroupFor(item.text ?? "", item.candidates.map((candidate) => candidate.id), catalog)) continue;
     if (!Array.isArray(item.uncertainty) || item.uncertainty.length === 0 || item.uncertainty.some((kind) => kind !== "READING" && kind !== "IDENTITY")) continue;
     for (const candidate of item.candidates) {
       const study = byId.get(candidate.id);
