@@ -190,3 +190,38 @@ describe("foto de receta: se le pide el dato al paciente", () => {
     expect(message).toContain("la doctora te confirma el precio");
   });
 });
+
+describe("herpes y hepatitis B (dueño, 25-nov)", () => {
+  const extra = [
+    study("HERPES tipo 1 y 2 IgG (Elisa)", 150),
+    study("HERPES tipo 1 y 2 IgM (Elisa)", 150),
+    study("HERPES tipo 2 IgG (Elisa)", 130),
+    study("HERPES ZOSTER IgG", 155),
+    study("HEPATITIS B ANTIGENO DE SUP. (PRUEBA RAPIDA)", 70),
+    study("HEPATITIS B ANTICUERPO DE SUP. PRUEBA RAPIDA", 60),
+    study("HEPATITIS B ANTICUERPO DE SUP. (ELISA)", 200)
+  ];
+  const all = [...CATALOG, ...extra];
+  const tool2 = quoteStudiesTool({ loadCatalog: async () => all });
+  const names = async (text: string) => {
+    const refs = ((await tool2.run({ studies: [text] }, { now: new Date(), patientText: text } as never)) as Result).facts?.find((fact) => fact.text.startsWith("Estudios identificados"))?.refs ?? [];
+    return refs.map((ref) => all.find((item) => `study:${item.id}` === ref)!.name).sort();
+  };
+  it.each([
+    ["herpes", ["HERPES tipo 1 y 2 IgG (Elisa)", "HERPES tipo 1 y 2 IgM (Elisa)"]],
+    ["herpes igg", ["HERPES tipo 1 y 2 IgG (Elisa)"]],
+    ["herpes tipo 2 igg", ["HERPES tipo 2 IgG (Elisa)"]],
+    ["herpes zoster igg", ["HERPES ZOSTER IgG"]],
+    ["antigeno de superficie", ["HEPATITIS B ANTIGENO DE SUP. (PRUEBA RAPIDA)"]],
+    ["hbsag", ["HEPATITIS B ANTIGENO DE SUP. (PRUEBA RAPIDA)"]],
+    ["hbsag eclia", ["HEPATITIS B ANTIGENO DE SUP. (ECLIA)"]],
+    ["anti hbs", ["HEPATITIS B ANTICUERPO DE SUP. PRUEBA RAPIDA"]]
+  ])("«%s» → %j", async (text, expected) => {
+    expect(await names(text)).toEqual(expected);
+  });
+
+  it("foto: «HERPES IgG» con zóster, tipo 2 y tipo 1 y 2 entre las opciones → tipo 1 y 2", () => {
+    const options = ["HERPES ZOSTER IgG", "HERPES tipo 2 IgG (Elisa)", "HERPES tipo 1 y 2 IgG (Elisa)"].map((name) => all.find((item) => item.name === name)!.id);
+    expect(decideFromReading("HERPES IgG", options, all)?.studies.map((s) => s.name)).toEqual(["HERPES tipo 1 y 2 IgG (Elisa)"]);
+  });
+});
