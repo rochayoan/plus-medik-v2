@@ -1,5 +1,6 @@
 import { readImageWithGemini, readImageWithOpenAI, type SimpleReading } from "./ai.js";
 import { ExactAliasCatalogResolver, uniqueMatchedStudies } from "./catalog.js";
+import { askGroupFor, decideFromReading, mentionsOtherSample, typoSuggestions } from "./study-choice.js";
 import { buildSimpleConsensus, isTruncationOf, normalizeStudyKey, normalizeVisibleKey, sameVisibleText, type SimpleConsensus, type SimpleStudy } from "./consensus.js";
 import { collapseExplicitPackages, droppedLineItemDetails, inheritAnalyteFromLine, heldPackageGroups, lineServiceGap, lineIsotopeReadersDisagree, reliableLineText, withoutSelectionX } from "./line-groups.js";
 import { activeCatalog, GENERIC_PROFILE_WORDS, identityTokens, isPackageComponent, qualifiersOf, shadowMatch, type Outcome, type ShadowBatch, type Support } from "./catalog-shadow.js";
@@ -84,7 +85,8 @@ export interface StudyMatch {
 
 // Contraste entre el resolvedor semántico principal (GPT + verificador, catálogo completo) y el matcher exacto/alias.
 // SEMANTIC_COMPOSITE: el texto nombra explícitamente varios estudios y cada componente quedó verificado (candidato, sin autorizar).
-export type SemanticContrast = "CONFIRMS_EXACT" | "SEMANTIC_ONLY" | "SEMANTIC_COMPOSITE" | "CONTRADICTS_EXACT" | "NO_SEMANTIC_MATCH" | "UNAVAILABLE";
+// LAB_RULE: el texto se leyó con certeza y el catálogo tiene varias versiones (o es un nombre de grupo); se eligió con las reglas del laboratorio (study-choice.ts), las mismas de la cotización por texto.
+export type SemanticContrast = "CONFIRMS_EXACT" | "SEMANTIC_ONLY" | "SEMANTIC_COMPOSITE" | "LAB_RULE" | "CONTRADICTS_EXACT" | "NO_SEMANTIC_MATCH" | "UNAVAILABLE";
 
 // Un compuesto explícito se descompone en estudios individuales solo si son pocos y el texto no es un perfil/panel genérico.
 export const MAX_COMPOSITE_COMPONENTS = 4;
@@ -138,7 +140,7 @@ export type AnalysisReason =
   | "document_context_unverified";
 
 // Por qué una línea entró en la cotización (solo con la integración semántica principal): auditoría, no afecta al cobro.
-export type QuoteBasis = "EXACT_CONFIRMED" | "SEMANTIC" | "COMPOSITE_COMPONENT";
+export type QuoteBasis = "EXACT_CONFIRMED" | "SEMANTIC" | "COMPOSITE_COMPONENT" | "LAB_RULE";
 
 export interface AnalysisQuote {
   lines: CatalogCandidate[];
@@ -369,6 +371,43 @@ function contrastWithExact(
   return { info: { ...base, studyIds: ids, contrast: reasons.includes("semantic_contradicts_exact") ? "CONTRADICTS_EXACT" : "NO_SEMANTIC_MATCH", reason: reasonText }, reasons };
 }
 
+// Reglas del laboratorio sobre una lectura que el contraste dejó SIN estudio por ser ambigua (varias versiones) o por no tener un estudio con ese nombre (un grupo como «coagulograma»).
+// Solo si las dos pasadas del modelo coinciden y no hay ninguna contradicción ni otro problema: lo demás (lectura dudosa, documento incompleto, transcripción parcial) se sigue rigiendo por los
+// bloqueos de siempre, por estudio. Elige lo mismo que la cotización por texto (study-choice.ts).
+const LAB_RULE_REPLACEABLE = new Set<AnalysisReason>(["semantic_ambiguous", "semantic_no_match"]);
+// La muestra en sangre por defecto solo si el documento no declara otra muestra ni tiene declaraciones contradictorias (un «MUESTRA: ORINA» manda sobre la regla).
+function bloodDefaultAllowed(document: DocumentGate | undefined): boolean {
+  const context = document?.context;
+  if (!context) return true;
+  if (context.conflicts.length > 0) return false;
+  if (context.muestra && normalizeStudyKey(context.muestra) !== "sangre") return false;
+  return !context.lines.some((line) => mentionsOtherSample(line));
+}
+function labRuleFor(match: StudyMatch, judged: { info: SemanticPrimaryMatch; reasons: AnalysisReason[] }, catalog: readonly CatalogStudy[], semanticAuto: boolean, bloodDefault: boolean): { info: SemanticPrimaryMatch; reasons: AnalysisReason[] } {
+  const { info, reasons } = judged;
+  if (info.contrast !== "NO_SEMANTIC_MATCH" || !info.agreement || reasons.length === 0 || !reasons.every((reason) => LAB_RULE_REPLACEABLE.has(reason))) return judged;
+  const candidateIds = [...(match.candidates ?? []).map((candidate) => candidate.id), ...info.studyIds];
+  const choice = decideFromReading(match.matchedText, candidateIds, catalog, { bloodDefault });
+  if (!choice) {
+    // Un estudio cuyas opciones dependen de un dato del paciente (cultivo de secreción: la zona; microalbuminuria: 24 h u ocasional; biopsia: el tamaño): se OFRECEN todas sus opciones y el mensaje
+    // le pide ese dato (quote-options.ts). Nunca se cobra: el contraste sigue sin estudio.
+    const ask = askGroupFor(match.matchedText, candidateIds, catalog);
+    if (ask) return { info: { ...info, studyIds: ask.studies.map((study) => study.id), reason: `${info.reason ? `${info.reason}; ` : ""}se le pide el dato al paciente` }, reasons };
+    // Sin estudio ni regla: si el texto se parece por una errata a un estudio («hgc» → HCG), ese estudio se OFRECE como opción (nunca se cobra: el contraste sigue sin estudio).
+    if (candidateIds.length > 0 || !reasons.every((reason) => reason === "semantic_no_match")) return judged;
+    const guesses = typoSuggestions([match.matchedText], catalog, new Set(), 3);
+    return guesses.length > 0 ? { info: { ...info, studyIds: guesses.map((study) => study.id), reason: `${info.reason ? `${info.reason}; ` : ""}parecido por errata` }, reasons } : judged;
+  }
+  const why = choice.rule === "LAB_GROUP" ? "nombre de grupo con elección del laboratorio"
+    : choice.rule === "EXACT_NAME" ? "la línea es exactamente el nombre de una de las opciones"
+    : choice.rule === "SAME_EXAM" ? "mismo examen con otro nombre en el catálogo (el más barato)"
+    : "versión elegida por la regla del laboratorio (sin método indicado: la más barata; total por defecto; IgG + IgM)";
+  return {
+    info: { ...info, contrast: "LAB_RULE", studyIds: choice.studies.map((study) => study.id), reason: `${why}; antes: ${info.kind}${info.reason ? ` (${info.reason})` : ""}` },
+    reasons: semanticAuto ? [] : ["semantic_auto_not_enabled"]
+  };
+}
+
 // Líneas que el contraste semántico respalda: coincidencias confirmadas por el exacto, MATCH semánticos y componentes de compuestos
 // explícitos verificados. Un estudio, una línea, un cobro (UUID), con el precio siempre del catálogo de Supabase.
 function semanticBillableLines(matches: StudyMatch[], catalogById: Map<string, CatalogStudy>): { lines: CatalogCandidate[]; audit: NonNullable<AnalysisQuote["audit"]>; invalidPrice: boolean; overlap: boolean; packageGroup: boolean } {
@@ -379,9 +418,9 @@ function semanticBillableLines(matches: StudyMatch[], catalogById: Map<string, C
   for (const match of matches) {
     const info = match.semanticPrimary;
     if (!info) continue;
-    const basis: QuoteBasis | undefined = info.contrast === "CONFIRMS_EXACT" ? "EXACT_CONFIRMED" : info.contrast === "SEMANTIC_ONLY" ? "SEMANTIC" : info.contrast === "SEMANTIC_COMPOSITE" ? "COMPOSITE_COMPONENT" : undefined;
+    const basis: QuoteBasis | undefined = info.contrast === "CONFIRMS_EXACT" ? "EXACT_CONFIRMED" : info.contrast === "SEMANTIC_ONLY" ? "SEMANTIC" : info.contrast === "SEMANTIC_COMPOSITE" ? "COMPOSITE_COMPONENT" : info.contrast === "LAB_RULE" ? "LAB_RULE" : undefined;
     if (!basis) continue;
-    const ids = info.contrast === "SEMANTIC_COMPOSITE" ? info.studyIds : info.studyIds.slice(0, 1);
+    const ids = info.contrast === "SEMANTIC_COMPOSITE" || info.contrast === "LAB_RULE" ? info.studyIds : info.studyIds.slice(0, 1);
     for (const id of ids) {
       const study = catalogById.get(id);
       if (!study) continue;
@@ -571,11 +610,16 @@ export function assembleAnalysis(args: {
         match.semanticPrimary = { kind: "NO_MATCH", agreement: true, studyIds: [], contrast: "NO_SEMANTIC_MATCH", reading: "", reason: `transcripción parcial de «${match.partialTranscriptionOf}»` };
         continue;
       }
-      const judged = contrastWithExact(match, resultByText.get(match.matchedText), catalogById, semanticAuto);
+      const judged = labRuleFor(match, contrastWithExact(match, resultByText.get(match.matchedText), catalogById, semanticAuto), catalog, semanticAuto, bloodDefaultAllowed(document));
       match.semanticPrimary = judged.info;
       semanticReasons.push(...judged.reasons);
       matchSemanticReasons[matchIndex] = judged.reasons;
-      if (judged.info.contrast === "SEMANTIC_ONLY") {
+      if (judged.info.contrast === "LAB_RULE") {
+        match.status = "SEMANTIC_CANDIDATE";
+        const chosen = judged.info.studyIds.map((id) => catalogById.get(id)!);
+        if (chosen.length === 1) match.study = toCandidate(chosen[0]!);
+        else match.components = chosen.map((study) => ({ ...toCandidate(study), fragment: match.matchedText }));
+      } else if (judged.info.contrast === "SEMANTIC_ONLY") {
         match.status = "SEMANTIC_CANDIDATE";
         match.study = toCandidate(catalogById.get(judged.info.studyIds[0]!)!);
       } else if (judged.info.contrast === "SEMANTIC_COMPOSITE") {

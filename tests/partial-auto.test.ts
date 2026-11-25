@@ -179,15 +179,23 @@ describe("matching semántico por estudio (GPT)", () => {
   });
   const ambiguousBun: Outcome = { kind: "AMBIGUOUS", studyIds: ["uuid-372", "uuid-423"], reason: "BUN o urea" };
 
-  it("con el AUTO semántico: el MATCH verificado se cotiza y la ambigüedad BUN/Urea queda pendiente con sus candidatos", () => {
+  it("con el AUTO semántico: el MATCH verificado se cotiza y la duda BUN/Urea se resuelve como UREA (el mismo examen: dueño, 25-nov)", () => {
     const result = run({ a: texts, primary: primary(ambiguousBun), semanticAuto: true });
+    expect(result.outcome).toBe("AUTO_COMPLETE");
+    expect(result.publicQuote?.studies.map((s) => [s.name, s.priceBs])).toEqual([["HEMOGRAMA COMPLETO AUTOMATIZADO", 45], ["PARASITOLOGICO SERIADO", 40], ["UREA", 30]]);
+    expect(result.publicQuote?.totalBs).toBe(115);
+    expect(result.internal?.pending).toEqual([]);
+  });
+
+  it("con el AUTO semántico: una duda entre estudios DISTINTOS (creatinina o urea) queda pendiente con sus candidatos", () => {
+    const distinct: Outcome = { kind: "AMBIGUOUS", studyIds: ["uuid-384", "uuid-423"], reason: "creatinina o urea" };
+    const result = run({ a: texts, primary: primary(distinct), semanticAuto: true });
     expect(result.outcome).toBe("AUTO_PARTIAL");
-    expect(result.publicQuote?.studies.map((s) => [s.name, s.priceBs])).toEqual([["HEMOGRAMA COMPLETO AUTOMATIZADO", 45], ["PARASITOLOGICO SERIADO", 40]]);
     expect(result.publicQuote?.totalBs).toBe(85);
     const pending = result.internal?.pending[0];
     expect(pending).toMatchObject({ kind: "STUDY", text: "Nitrogeno ureico/urea/nus", blockers: ["semantic_ambiguous"] });
-    expect(pending?.candidates?.map((c) => c.id).sort()).toEqual(["uuid-372", "uuid-423"]);
-    expect(JSON.stringify(result.publicQuote)).not.toMatch(/BUN|UREA|372|423/);
+    expect(pending?.candidates?.map((c) => c.id).sort()).toEqual(["uuid-384", "uuid-423"]);
+    expect(JSON.stringify(result.publicQuote)).not.toMatch(/CREATININA|UREA|384|423/);
   });
 
   it("sin el AUTO semántico, los MATCH solo semánticos no se cotizan (solo lo confirmado por el exacto)", () => {

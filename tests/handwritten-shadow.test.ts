@@ -152,7 +152,8 @@ describe("modo sombra: ante cualquier duda, HUMAN_REVIEW simulado", () => {
   it("matching no verificado: ambiguo, sin coincidencia, pasadas en desacuerdo, rechazado o composición sin política", () => {
     const { consensus } = nueva05();
     const cases: Outcome[] = [
-      { kind: "AMBIGUOUS", studyIds: ["uuid-288", "uuid-289"], reason: "seriado o simple" },
+      // Ambigüedad entre estudios DISTINTOS (las versiones de un mismo estudio, «seriado o simple», las decide la regla del laboratorio: ver tests/reglas-fotos.test.ts).
+      { kind: "AMBIGUOUS", studyIds: ["uuid-423", "uuid-372"], reason: "urea o BUN" },
       { kind: "NO_MATCH", reason: "ausente" },
       { kind: "REJECTED", studyIds: ["uuid-288"], reason: "variante" }
     ];
