@@ -99,10 +99,15 @@ describe("assembleAnalysis con la integración semántica principal", () => {
     }
   });
 
-  it("GPT AMBIGUOUS que incluye el estudio exacto no es contradicción, pero sigue en revisión", () => {
-    const result = assemble(["FSH"], { batch: batchOf(shadow("FSH", { kind: "AMBIGUOUS", studyIds: ["uuid-fsh", "uuid-lh"], reason: "variantes" })) });
-    expect(result.reasons).toEqual(["semantic_ambiguous"]);
-    expect(result.decision).toBe("HUMAN_REVIEW");
+  it("GPT AMBIGUOUS que incluye el estudio exacto no es contradicción: si la línea ES ese nombre, se elige (25-nov); si no, sigue en revisión", () => {
+    const exact = assemble(["FSH"], { batch: batchOf(shadow("FSH", { kind: "AMBIGUOUS", studyIds: ["uuid-fsh", "uuid-lh"], reason: "variantes" })) });
+    expect(exact.matches[0]!.semanticPrimary).toMatchObject({ contrast: "LAB_RULE", studyIds: ["uuid-fsh"] });
+    // Sin el AUTO semántico (este armado), lo elegido no se cobra solo.
+    expect(exact.reasons).toEqual(["semantic_auto_not_enabled"]);
+    expect(exact.decision).toBe("HUMAN_REVIEW");
+    const both = assemble(["FSH / LH"], { batch: batchOf(shadow("FSH / LH", { kind: "AMBIGUOUS", studyIds: ["uuid-fsh", "uuid-lh"], reason: "dos hormonas" })) });
+    expect(both.reasons).toEqual(["semantic_ambiguous"]);
+    expect(both.decision).toBe("HUMAN_REVIEW");
   });
 
   it("el exacto es ambiguo y GPT elige uno: no se autoriza (contradice la ambigüedad del exacto)", () => {
@@ -122,7 +127,7 @@ describe("assembleAnalysis con la integración semántica principal", () => {
 
   it("ambiguo, sin coincidencia, compuesto, rechazado por el verificador o pasadas en desacuerdo -> cada uno con su motivo y revisión", () => {
     const cases: Array<[Outcome, boolean, string]> = [
-      [{ kind: "AMBIGUOUS", studyIds: ["uuid-urea", "uuid-bun"], reason: "sinónimos" }, true, "semantic_ambiguous"],
+      [{ kind: "AMBIGUOUS", studyIds: ["uuid-fsh", "uuid-lh"], reason: "dos hormonas" }, true, "semantic_ambiguous"],
       [{ kind: "NO_MATCH", reason: "ausente" }, true, "semantic_no_match"],
       [{ kind: "COMPOSITE", components: [{ studyId: "uuid-urea", fragment: "urea", support: "EXACT" }, { studyId: "uuid-cre", fragment: "creatinina", support: "EXACT" }], reason: "lista" }, true, "semantic_composite_requires_policy"],
       [{ kind: "REJECTED", studyIds: ["uuid-urea"], reason: "variante" }, true, "semantic_rejected_by_verifier"],

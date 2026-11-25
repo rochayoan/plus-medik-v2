@@ -226,9 +226,12 @@ export function quoteStudiesTool(options: { loadCatalog: () => Promise<readonly 
         // Nombre de un perfil («transaminasas», «perfil lipídico»): sus estudios, como los cotiza la Dra.
         const group = groupOf(coreOfMention(text), catalog);
         if (group) {
-          if (group.pending) doubt(text, group.studies.filter((study) => !sure.has(study.id)));
-          else for (const study of group.studies) sure.set(study.id, study);
+          if (group.pending) {
+            if (!group.hideOptions) doubt(text, group.studies.filter((study) => !sure.has(study.id)));
+          } else for (const study of group.studies) sure.set(study.id, study);
           if (group.note) groupNotes.add(group.note);
+          // Depende de un dato que solo tiene el paciente (dueño, 25-nov): se le pide; ninguna opción se cotiza sola.
+          if (group.ask) groupNotes.add(`«${text}»: no elijas ni cotices ninguna opción; pídele al paciente este dato con tus palabras, en una o dos frases: ${group.ask}`);
           continue;
         }
         const { matched, groups, unresolved, forms, fuzzy } = resolve(text);

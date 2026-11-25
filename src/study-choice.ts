@@ -191,7 +191,10 @@ export function withJoinedAcronyms(catalog: readonly CatalogStudy[]): readonly C
 // Si el catálogo tiene un estudio con ese nombre (un panel), manda el catálogo. «pending»: el laboratorio aún no confirmó la composición → se ofrecen como opciones (no se cotizan solos).
 // `labDefault`: lo que el LABORATORIO decidió cotizar cuando el estudio se nombra a secas (respuestas del 24-nov). Manda aunque el catálogo tenga un alias con ese nombre (p. ej. «hcg» está en las tres HCG).
 // `note`: lo que el redactor debe decir en una frase (p. ej. anti-DNA: el médico confirma cuál).
-export const STUDY_GROUPS: ReadonlyArray<{ phrases: readonly string[]; components: readonly string[]; pending?: true; labDefault?: true; note?: string }> = [
+// `ask` (dueño, 25-nov): estudios con muchas opciones que dependen de un dato que solo tiene el paciente (zona de la muestra, tamaño): NO se elige; se le pide ese dato con este texto ({precio}: el
+// precio si todas cuestan lo mismo; {desde}: el más bajo). `hideOptions`: no se listan las opciones (biopsias: el precio lo confirma la doctora con el tamaño de la muestra).
+export type StudyGroup = { phrases: readonly string[]; components: readonly string[]; pending?: true; labDefault?: true; note?: string; ask?: string; hideOptions?: true };
+export const STUDY_GROUPS: ReadonlyArray<StudyGroup> = [
   { phrases: ["chagas", "examen de chagas", "prueba de chagas", "test de chagas"], components: ["HAI CHAGAS"], labDefault: true },
   { phrases: ["factor reumatoide", "factor reumatoideo", "latex factor reumatoide", "latex", "fr", "factor rx", "reumatoide"], components: ["LATEX FACTOR REUMATOIDE (SEMI CUANTITATIVO)"], labDefault: true },
   { phrases: ["hcg", "beta hcg", "bhcg", "b hcg", "prueba de embarazo", "test de embarazo", "examen de embarazo", "embarazo", "gonadotropina corionica humana"], components: ["HCG SUB UNIDAD BETA-CUALITATIVA (HCG)"], labDefault: true },
@@ -199,6 +202,27 @@ export const STUDY_GROUPS: ReadonlyArray<{ phrases: readonly string[]; component
   { phrases: ["paternidad", "prueba de paternidad", "adn paternidad", "prueba de adn", "examen de paternidad", "test de paternidad"], components: ["ADN (Paternidad 2 muestras- padre e hijo) - Sangre con EDTA, Hisopado Bucal"], labDefault: true },
   { phrases: ["ionograma", "electrolitos", "electrolitos en sangre"], components: ["IONOGRAMA 1 (sodio, potasio, cloro)"], labDefault: true },
   { phrases: ["anti dna", "antidna", "anti adn", "antiadn", "anti dna igg"], components: ["ANTI-DNA ss (Simple Cadena) IgG (Elisa)", "ANTI-DNA ds (Doble Cadena) IgG (Elisa)"], labDefault: true, note: "Anti-DNA: se cotizan las dos versiones (simple y doble cadena) porque el laboratorio lo indica así; dile en una frase que su médico confirma cuál necesita." },
+  // Respuestas del dueño (25-nov), con la regla «sin especificar = la más barata»:
+  //   · anticore sin clase → el TOTAL (Bs 150: mide IgG e IgM en una sola prueba; IgG + IgM por separado costaban Bs 400). «anti HBc» cotizaba solo la IgG;
+  //   · vitamina D → 25 (OH) por FIA; colesterol → total; micológico → el directo (KOH); panel respiratorio → el de 20 patógenos; galactomanano → el antígeno por ELISA (no el IgG de Bs 600).
+  { phrases: ["anticore", "anti core", "anti hbc", "antihbc", "anti hbc total", "anticore total", "hepatitis b anticore", "anticore hepatitis b", "anticore de hepatitis b", "anticore hepatitis", "hbcab", "anticuerpo anticore", "anticuerpos anticore"], components: ["HEPATITIS B ANTICORE TOTAL"], labDefault: true },
+  { phrases: ["vitamina d", "vit d", "vitamina d 25", "vitamina d 25 oh", "vitamina d 25oh", "25 oh vitamina d", "25 oh vit d", "25 hidroxi vitamina d", "25 hidroxivitamina d", "vitamina d total"], components: ["VITAMINA D 25 (OH) (FIA Fluorescencia)"], labDefault: true },
+  { phrases: ["colesterol", "colesterol serico", "colesterolemia"], components: ["COLESTEROL TOTAL"], labDefault: true },
+  { phrases: ["micologico", "examen micologico", "estudio micologico", "micologico directo", "koh", "examen directo koh", "hongos koh"], components: ["MICOLÓGICO DIRECTO - MICROSCOPIA KOH 10 %"], labDefault: true },
+  { phrases: ["panel respiratorio", "panel respiratorio mixto", "panel respiratorio qpcr", "panel respiratorio mixto qpcr", "panel viral respiratorio", "panel de virus respiratorios"], components: ["PANEL RESPIRATORIO MIXTO qPCR (20 PATOGENOS) VIRUS: Sincitial A/B, Influenza B, Influenza A, SARS-CoV-2, Adenovirus humano, Rinovirus Humano, Coronavirus humano 229E/OC43, Coronavirus humano NL63/HKU1, Parainfluenza Humana 1/2, Parainfluenza humana 3/4, Bocavirus, Metapneumovirus, Enterovirus. BACTERIAS: Streptococcus pyogenes, Haemophilus influenzae, Bordetella pertussis, Streptococcus neumoniae, Mycoplasma pneumoniae, Legionella pneumophila."], labDefault: true },
+  { phrases: ["galactomanano", "galactomanano antigeno", "antigeno galactomanano", "antigeno de galactomanano", "galactomanano aspergilosis", "aspergilosis", "aspergillus galactomanano"], components: ["GALACTOMANANO Antigeno (ASPERGILOSIS) CUANTITATIVO (Elisa)"], labDefault: true },
+  // Herpes sin tipo → «tipo 1 y 2» (cubre lo pedido; el «tipo 2» solo es más barato pero no cubre el 1 y el zóster es otro virus). Dueño, 25-nov, hasta que responda el laboratorio.
+  { phrases: ["herpes", "herpes simple", "herpes simplex", "herpes 1 y 2", "herpes tipo 1 y 2", "herpes igg igm", "herpes igg e igm", "herpes igg y igm", "hsv", "hsv 1 y 2", "herpes 1 2"], components: ["HERPES tipo 1 y 2 IgG (Elisa)", "HERPES tipo 1 y 2 IgM (Elisa)"], labDefault: true },
+  { phrases: ["herpes igg", "herpes simple igg", "hsv igg", "herpes 1 y 2 igg"], components: ["HERPES tipo 1 y 2 IgG (Elisa)"], labDefault: true },
+  { phrases: ["herpes igm", "herpes simple igm", "hsv igm", "herpes 1 y 2 igm"], components: ["HERPES tipo 1 y 2 IgM (Elisa)"], labDefault: true },
+  // Hepatitis B: el médico dice el marcador; sin método, la más barata (dueño, 25-nov). Los nombres del catálogo dicen «SUP.», nadie lo escribe así: sin estas frases quedaban en duda.
+  { phrases: ["antigeno de superficie", "antigeno superficie", "hepatitis b antigeno de superficie", "hepatitis b antigeno superficie", "antigeno de superficie hepatitis b", "antigeno de superficie de hepatitis b", "antigeno de superficie para hepatitis b", "hbsag", "hepatitis b hbsag", "hbsag hepatitis b", "ag hbs", "aghbs", "hbs ag", "antigeno australiano", "hepatitis b antigeno de sup", "antigeno de sup"], components: ["HEPATITIS B ANTIGENO DE SUP. (PRUEBA RAPIDA)"], labDefault: true },
+  { phrases: ["hbsag eclia", "antigeno de superficie eclia", "hepatitis b antigeno de superficie eclia", "antigeno de superficie por eclia", "hbsag por eclia"], components: ["HEPATITIS B ANTIGENO DE SUP. (ECLIA)"], labDefault: true },
+  { phrases: ["anticuerpo de superficie", "anticuerpos de superficie", "hepatitis b anticuerpo de superficie", "anticuerpo de superficie hepatitis b", "anticuerpo de superficie de hepatitis b", "anti hbs", "antihbs", "anti hbsag", "hepatitis b anticuerpo de sup", "anticuerpo de sup"], components: ["HEPATITIS B ANTICUERPO DE SUP. PRUEBA RAPIDA"], labDefault: true },
+  // Se le PIDE el dato al paciente (dueño, 25-nov): muchas opciones que dependen de la muestra.
+  { phrases: ["cultivo de secrecion", "cultivo secrecion", "cultivo de secreciones", "cultivo de secrecion convencional", "cultivo y antibiograma de secrecion"], components: ["CULTIVO DE SECRECION FARINGEA - CONVENCIONAL", "CULTIVO DE SECRECION NASAL - CONVENCIONAL", "CULTIVO DE SECRECION URETRAL - CONVENCIONAL", "CULTIVO DE SECRECION VAGINAL - CONVENCIONAL", "CULTIVO DE SECRECIÓN BRONQUIAL - CONVENCIONAL", "CULTIVO DE SECRECIÓN OCULAR - CONVENCIONAL"], pending: true, ask: "Para el *cultivo de secreción* necesito saber de qué zona es la muestra (faríngea, nasal, uretral, vaginal, bronquial u ocular). Todas cuestan {precio}: dime cuál te indicó tu médico y te lo cotizo." },
+  { phrases: ["microalbuminuria", "microalbumina", "micro albuminuria", "microalbumina en orina", "microalbuminuria en orina"], components: ["MICROALBUMINURIA 24 HORAS (FIA Inmunofluorescencia)", "MICROALBUMINURIA OCASIONAL (FIA Inmunofluorescencia)"], pending: true, ask: "La *microalbuminuria* puede ser en orina de 24 horas u ocasional, y las dos cuestan {precio}. Dime cuál te indicó tu médico y te la cotizo." },
+  { phrases: ["biopsia", "biopsias", "estudio de biopsia", "anatomia patologica", "histopatologia", "histopatologico", "estudio histopatologico", "pieza quirurgica", "pieza operatoria"], components: ["BIOPSIAS PEQUEÑAS (ENDOSCOPICAS O PUNCION)", "MUESTRA PEQUEÑA (1 FRASCO 100 ML)", "MUESTRA MEDIANA (1 FRASCO 500 ML)", "MUESTRA GRANDE (1 FRASCO 1000 ML)", "MUESTRA FRASCO (1 LITRO A 5 LITROS)", "MUESTRA FRASCO (MAYOR A 5 LITROS)"], pending: true, hideOptions: true, ask: "El estudio de *biopsia* cuesta desde {desde}, según el tamaño o la cantidad de la muestra. Indícame ese dato (por ejemplo, en qué frasco o de qué tamaño es) y la doctora te confirma el precio por este chat." },
   { phrases: ["transaminasas", "transaminasa", "transa"], components: ["TRANSAMINASA GOT", "TRANSAMINASA GPT"] },
   { phrases: ["perfil lipidico", "perfil de lipidos", "lipidograma", "perfil lipidico completo"], components: ["COLESTEROL TOTAL", "COLESTEROL HDL", "COLESTEROL LDL", "TRIGLICERIDOS"] },
   { phrases: ["perfil hepatico", "hepatograma", "pruebas hepaticas", "funcion hepatica", "hepatico", "perfil hepatico completo"], components: ["TRANSAMINASA GOT", "TRANSAMINASA GPT", "BILIRRUBINA TOTAL Y FRACCIONES", "FOSFATASA ALCALINA", "GAMA GLUTAMIL TRANSFERASA GGT"] },
@@ -206,16 +230,78 @@ export const STUDY_GROUPS: ReadonlyArray<{ phrases: readonly string[]; component
   // Composición confirmada por el laboratorio (24-nov): TP + INR, TTPa y fibrinógeno.
   { phrases: ["coagulograma", "pruebas de coagulacion", "perfil de coagulacion", "coagulacion"], components: ["TIEMPO DE PROTROMBINA + INR", "TIEMPO PARCIAL DE TROMBOPLASTINA (APTT)", "FIBRINOGENO"] }
 ];
-export function groupOf(mention: string, catalog: readonly CatalogStudy[]): { studies: CatalogStudy[]; pending: boolean; note?: string } | undefined {
+export type GroupFound = { studies: CatalogStudy[]; pending: boolean; note?: string; ask?: string; hideOptions?: true };
+export function groupOf(mention: string, catalog: readonly CatalogStudy[]): GroupFound | undefined {
   const key = normalizeStudyKey(mention);
   const group = STUDY_GROUPS.find((item) => item.phrases.includes(key));
   if (!group) return undefined;
   if (!group.labDefault && catalog.some((study) => normalizeStudyKey(study.name) === key || (study.normalizedAliases ?? []).includes(key))) return undefined;
-  const byName = new Map(catalog.map((study) => [normalizeStudyKey(study.name), study]));
+  return foundGroup(group, catalog);
+}
+function foundGroup(group: StudyGroup, catalog: readonly CatalogStudy[]): GroupFound | undefined {
+  const byName = new Map(catalog.filter((study) => study.active).map((study) => [normalizeStudyKey(study.name), study]));
   const studies = group.components.map((name) => byName.get(normalizeStudyKey(name))).filter((study): study is CatalogStudy => study !== undefined);
   // Una elección del laboratorio vale solo si están TODOS sus estudios (si el catálogo cambió un nombre, sigue la regla general).
   if (group.labDefault && studies.length !== group.components.length) return undefined;
-  return studies.length > 0 ? { studies, pending: group.pending === true, ...(group.note ? { note: group.note } : {}) } : undefined;
+  if (studies.length === 0) return undefined;
+  const ask = group.ask ? askText(group.ask, studies) : undefined;
+  return { studies, pending: group.pending === true, ...(group.note ? { note: group.note } : {}), ...(ask ? { ask } : {}), ...(group.hideOptions ? { hideOptions: true as const } : {}) };
+}
+// {precio}: el precio común (si todas cuestan lo mismo); {desde}: el más bajo. Sin precio común, «{precio}» pasa a «desde …». Los precios salen del catálogo, nunca del texto.
+function askText(template: string, studies: readonly CatalogStudy[]): string {
+  const prices = studies.map((study) => study.priceBs).filter((price) => Number.isFinite(price) && price > 0);
+  if (prices.length === 0) return template.replace(/\s*Todas cuestan \{precio\}:?/i, "").replace(/,? y las dos cuestan \{precio\}/i, "").replace(/ desde \{desde\}/, "");
+  const lowest = Math.min(...prices);
+  const same = prices.every((price) => price === lowest);
+  return template.replace("{precio}", same ? `Bs ${lowest}` : `desde Bs ${lowest}`).replace("{desde}", `Bs ${lowest}`);
+}
+// Grupos «se le pide el dato al paciente» cuyas opciones aparecen (al menos dos) entre estos estudios: para la receta, donde no hay frase del paciente sino las opciones del modelo.
+export function askGroupsAmong(ids: Iterable<string>, catalog: readonly CatalogStudy[]): GroupFound[] {
+  const present = new Set(ids);
+  const out: GroupFound[] = [];
+  for (const group of STUDY_GROUPS) {
+    if (!group.ask) continue;
+    const found = foundGroup(group, catalog);
+    if (found && found.studies.filter((study) => present.has(study.id)).length >= 2) out.push(found);
+  }
+  return out;
+}
+// Una línea de la receta que es uno de esos estudios: por su frase («cultivo de secreción») o porque TODAS las opciones del modelo son de UN solo grupo así.
+export function askGroupFor(text: string, candidateIds: readonly string[], catalog: readonly CatalogStudy[]): GroupFound | undefined {
+  for (const key of new Set([normalizeStudyKey(text), normalizeStudyKey(coreOfMention(text))])) {
+    const group = STUDY_GROUPS.find((item) => item.ask && item.phrases.includes(key));
+    const found = group ? foundGroup(group, catalog) : undefined;
+    if (found) return found;
+  }
+  const ids = new Set(candidateIds);
+  const groups = askGroupsAmong(ids, catalog);
+  if (groups.length !== 1) return undefined;
+  const members = new Set(groups[0]!.studies.map((study) => study.id));
+  return [...ids].every((id) => members.has(id)) ? groups[0] : undefined;
+}
+
+// ───────────── El MISMO examen con nombres distintos en el catálogo (dueño, 25-nov: «urea y BUN son lo mismo»; sin método = el más barato) ─────────────
+// Los nombres no comparten la base (por eso la regla de versiones no los veía como versiones): «ANA (ANTICUERPOS ANTINUCLEARES) Elisa» y «ANA / FAN HEP2 IFI». Si la duda es solo entre estos: el
+// que nombra lo escrito; si no, el más barato que respete el método escrito; si empatan en precio, el primero de la lista.
+export const SAME_EXAM: ReadonlyArray<readonly string[]> = [
+  ["UREA", "BUN DE UREA"],
+  ["ANA (ANTICUERPOS ANTINUCLEARES) Elisa", "ANA / FAN HEP2 IFI"],
+  ["GIARDIA (AG. EN HECES prueba rapida)", "Giardiasis Elisa"],
+  ["ANTI-CCP (FIA Fluorescencia)", "ANTI-CCP3 (3ra. Generación) Elisa"],
+  ["GALACTOMANANO Antigeno (ASPERGILOSIS) CUANTITATIVO (Elisa)", "GALACTOMANANO antigeno (ASPERGILOSIS) Inmunocromatografia"]
+];
+export function sameExamChoice(candidates: readonly CatalogStudy[], text: string): CatalogStudy | undefined {
+  if (candidates.length < 2) return undefined;
+  const set = SAME_EXAM.find((names) => candidates.every((study) => names.some((name) => normalizeStudyKey(name) === normalizeStudyKey(study.name))));
+  if (!set) return undefined;
+  const order = (study: CatalogStudy) => set.findIndex((name) => normalizeStudyKey(name) === normalizeStudyKey(study.name));
+  const key = normalizeStudyKey(coreOfMention(text));
+  const exact = candidates.filter((study) => normalizeStudyKey(study.name) === key || (study.normalizedAliases ?? []).includes(key));
+  if (exact.length === 1) return exact[0];
+  const asked = key.split(" ").filter((word) => VERSION_METHOD_WORDS.has(word));
+  const pool = asked.length > 0 ? candidates.filter((study) => asked.every((word) => hasWord(allNameWords(study.name), word))) : [...candidates];
+  if (pool.length === 0) return undefined;
+  return [...pool].sort((a, b) => a.priceBs - b.priceBs || order(a) - order(b))[0];
 }
 
 // ¿El texto nombra una muestra que no es sangre (orina, heces, líquido, hisopado…)?
@@ -225,8 +311,12 @@ export const mentionsOtherSample = (text: string): boolean => normalizeStudyKey(
 // Lo que el laboratorio decidió para el texto vale igual para la receta (dueño, 24-nov: «es información que debe ayudar a decidir también en las fotos»):
 //   · un nombre de grupo/elección fija («chagas», «coagulograma», «perfil lipídico») → sus estudios, solo si el catálogo los tiene TODOS;
 //   · varias versiones del MISMO estudio sin decir cuál → la regla de versiones (sangre, TOTAL, IgG + IgM, la más barata; empate → la más rápida).
-// Nunca elige entre estudios distintos (hepatitis B antígeno vs. anticore): ahí sigue la duda con opciones, como hasta ahora.
-export type ReadingChoice = { studies: CatalogStudy[]; rule: "LAB_GROUP" | "VERSION"; note?: string };
+// Nunca elige entre estudios distintos (hepatitis B antígeno vs. anticore): ahí sigue la duda con opciones (el médico lo especifica; la lectura debe captarlo).
+//   · (25-nov) la línea es EXACTAMENTE el nombre (o un alias) de UNA de las opciones («GLUCOSA», «AMONIO») → esa; la carga viral solo si la receta la nombra; el mismo examen con otro nombre → SAME_EXAM.
+export type ReadingChoice = { studies: CatalogStudy[]; rule: "LAB_GROUP" | "VERSION" | "EXACT_NAME" | "SAME_EXAM"; note?: string };
+// Pruebas moleculares (carga viral, detección por PCR): nunca por defecto; solo si la línea las nombra («CMV» → IgG + IgM, no la carga viral de Bs 600).
+const MOLECULAR_NAME = /\b(?:carga viral|deteccion|biologia molecular)\b|\bqpcr\b/;
+const MOLECULAR_ASKED = /\b(?:carga|viral|deteccion|pcr|qpcr|adn|arn|genotipo|genotipificacion|molecular)\b/;
 export function decideFromReading(text: string, candidateIds: readonly string[], catalog: readonly CatalogStudy[], options: { bloodDefault?: boolean } = {}): ReadingChoice | undefined {
   const keys = [...new Set([normalizeStudyKey(text), normalizeStudyKey(coreOfMention(text))])].filter((key) => key !== "");
   for (const key of keys) {
@@ -238,10 +328,22 @@ export function decideFromReading(text: string, candidateIds: readonly string[],
     }
   }
   const byId = new Map(catalog.map((study) => [study.id, study]));
-  const candidates = [...new Set(candidateIds)].map((id) => byId.get(id)).filter((study): study is CatalogStudy => Boolean(study && study.active));
-  if (candidates.length < 2) return undefined;
+  const offered = [...new Set(candidateIds)].map((id) => byId.get(id)).filter((study): study is CatalogStudy => Boolean(study && study.active));
+  if (offered.length < 2) return undefined;
+  // La línea ES el nombre (o un alias aprobado) de UNA de las opciones: esa. Salvo que el documento declare otra muestra y alguna opción sea de otra muestra («SODIO» con «MUESTRA: ORINA»).
+  const exact = offered.filter((study) => keys.some((key) => normalizeStudyKey(study.name) === key || (study.normalizedAliases ?? []).includes(key)));
+  const otherSampleOption = offered.some((study) => OTHER_SAMPLE.test(normalizeStudyKey(study.name)));
+  if (exact.length === 1 && !(options.bloodDefault === false && otherSampleOption)) return { studies: exact, rule: "EXACT_NAME" };
+  // Sin nombrar una prueba molecular, la carga viral / detección no es una opción.
+  const molecularAsked = keys.some((key) => MOLECULAR_ASKED.test(key));
+  const candidates = molecularAsked ? offered : offered.filter((study) => !MOLECULAR_NAME.test(normalizeStudyKey(study.name)));
+  if (candidates.length === 0) return undefined;
+  // Queda una sola (la otra era la carga viral): sigue la regla de versiones con sus hermanas del catálogo («CMV» con IgG y carga viral → IgG + IgM).
+  if (candidates.length === 1 && isPanel(candidates[0]!)) return undefined;
+  const same = sameExamChoice(candidates, text);
+  if (same) return { studies: [same], rule: "SAME_EXAM" };
   // Solo si la duda del modelo es ENTRE VERSIONES DE UN MISMO ESTUDIO (todas sus opciones tienen el mismo nombre base: «TSH (ECLIA)» y «TSH (FIA)», «TOXO IgG» e «INMUNO TOXO IgM»).
-  // Si duda entre estudios distintos («UREA» y «BUN DE UREA», «FSH» y «LH», «GOT» y «GPT»), eso no lo decide ninguna regla de versiones: sigue la duda.
+  // Si duda entre estudios distintos («FSH» y «LH», «GOT» y «GPT», «HAI CHAGAS» y «HAI TOXO»), eso no lo decide ninguna regla de versiones: sigue la duda (es de lectura).
   const key = (study: CatalogStudy) => [...versionBase(study.name)].sort().join(" ");
   const bases = new Set(candidates.map(key));
   // Muestra por defecto EN SANGRE (dueño, 19-nov): «ÁCIDO ÚRICO» entre el de sangre y el «EN ORINA 24 HORAS» es el de sangre si la receta no dice orina. Vale solo si las versiones en sangre son de un
@@ -362,6 +464,8 @@ export const sampleAsAdjective = (core: string): string =>
 // Versiones del mismo estudio sin especificar: como las elige la Dra (ver chooseVersions).
 // Si a lo elegido le falta algo que el paciente escribió y UN estudio lo tiene todo, es ese («hemoglobina glicosilad» no es la «HEMOGLOBINA» en sangre).
 export function chooseAmong(candidates: readonly CatalogStudy[], text: string, catalog: readonly CatalogStudy[]): CatalogStudy[] | undefined {
+  const same = sameExamChoice(candidates, text);
+  if (same) return [same];
   const blood = preferredBySample(candidates, text);
   const sharedAlias = candidates.length > 1 && candidates.every((study) => (study.normalizedAliases ?? []).includes(normalizeStudyKey(coreOfMention(text))));
   const named = blood || sharedAlias ? undefined : namedChoice(candidates, text);

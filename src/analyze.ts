@@ -1,6 +1,6 @@
 import { readImageWithGemini, readImageWithOpenAI, type SimpleReading } from "./ai.js";
 import { ExactAliasCatalogResolver, uniqueMatchedStudies } from "./catalog.js";
-import { decideFromReading, mentionsOtherSample, typoSuggestions } from "./study-choice.js";
+import { askGroupFor, decideFromReading, mentionsOtherSample, typoSuggestions } from "./study-choice.js";
 import { buildSimpleConsensus, isTruncationOf, normalizeStudyKey, normalizeVisibleKey, sameVisibleText, type SimpleConsensus, type SimpleStudy } from "./consensus.js";
 import { collapseExplicitPackages, droppedLineItemDetails, inheritAnalyteFromLine, heldPackageGroups, lineServiceGap, lineIsotopeReadersDisagree, reliableLineText, withoutSelectionX } from "./line-groups.js";
 import { activeCatalog, GENERIC_PROFILE_WORDS, identityTokens, isPackageComponent, qualifiersOf, shadowMatch, type Outcome, type ShadowBatch, type Support } from "./catalog-shadow.js";
@@ -389,12 +389,19 @@ function labRuleFor(match: StudyMatch, judged: { info: SemanticPrimaryMatch; rea
   const candidateIds = [...(match.candidates ?? []).map((candidate) => candidate.id), ...info.studyIds];
   const choice = decideFromReading(match.matchedText, candidateIds, catalog, { bloodDefault });
   if (!choice) {
+    // Un estudio cuyas opciones dependen de un dato del paciente (cultivo de secreción: la zona; microalbuminuria: 24 h u ocasional; biopsia: el tamaño): se OFRECEN todas sus opciones y el mensaje
+    // le pide ese dato (quote-options.ts). Nunca se cobra: el contraste sigue sin estudio.
+    const ask = askGroupFor(match.matchedText, candidateIds, catalog);
+    if (ask) return { info: { ...info, studyIds: ask.studies.map((study) => study.id), reason: `${info.reason ? `${info.reason}; ` : ""}se le pide el dato al paciente` }, reasons };
     // Sin estudio ni regla: si el texto se parece por una errata a un estudio («hgc» → HCG), ese estudio se OFRECE como opción (nunca se cobra: el contraste sigue sin estudio).
     if (candidateIds.length > 0 || !reasons.every((reason) => reason === "semantic_no_match")) return judged;
     const guesses = typoSuggestions([match.matchedText], catalog, new Set(), 3);
     return guesses.length > 0 ? { info: { ...info, studyIds: guesses.map((study) => study.id), reason: `${info.reason ? `${info.reason}; ` : ""}parecido por errata` }, reasons } : judged;
   }
-  const why = choice.rule === "LAB_GROUP" ? "nombre de grupo con elección del laboratorio" : "versión elegida por la regla del laboratorio (sin método indicado: la más barata; total por defecto; IgG + IgM)";
+  const why = choice.rule === "LAB_GROUP" ? "nombre de grupo con elección del laboratorio"
+    : choice.rule === "EXACT_NAME" ? "la línea es exactamente el nombre de una de las opciones"
+    : choice.rule === "SAME_EXAM" ? "mismo examen con otro nombre en el catálogo (el más barato)"
+    : "versión elegida por la regla del laboratorio (sin método indicado: la más barata; total por defecto; IgG + IgM)";
   return {
     info: { ...info, contrast: "LAB_RULE", studyIds: choice.studies.map((study) => study.id), reason: `${why}; antes: ${info.kind}${info.reason ? ` (${info.reason})` : ""}` },
     reasons: semanticAuto ? [] : ["semantic_auto_not_enabled"]
