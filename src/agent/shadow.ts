@@ -7,7 +7,7 @@ import { fold, plain } from "../text-normalize.js";
 import { asksForPrice, classifyText } from "../text-handler.js";
 import type { CatalogStudy } from "../types.js";
 import type { AgentDecision, Capabilities, RecentEntry, ToolDef, Utterance } from "./contracts.js";
-import { conversationStateTool, createToolRegistry, findStudiesTool, labInfoTool, quoteStudiesTool } from "./tools.js";
+import { conversationStateTool, createToolRegistry, findStudiesTool, labInfoTool, quoteStudiesTool, studyPreparationTool } from "./tools.js";
 
 // Preparación del turno del agente conversacional: los mensajes de texto del lote, los mensajes recientes del historial y las herramientas. Un fallo del historial no detiene la decisión: se decide con lo que haya.
 // El texto del paciente solo viaja al modelo y NUNCA se registra (el registro lleva contadores y códigos).
@@ -79,6 +79,7 @@ export function buildAgentTools(options: AgentContextOptions, contactKey: string
   if (options.answer) tools.push(labInfoTool({ answer: options.answer }));
   tools.push(findStudiesTool({ loadCatalog: options.loadCatalog }));
   if (capabilities.quote) tools.push(quoteStudiesTool({ loadCatalog: options.loadCatalog }));
+  tools.push(studyPreparationTool({ loadCatalog: options.loadCatalog }));
   if (options.reader && contactKey) tools.push(conversationStateTool({ reader: options.reader, contactKey, loadCatalog: options.loadCatalog }));
   return createToolRegistry(tools);
 }

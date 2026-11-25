@@ -67,11 +67,12 @@ describe("prepareAgentTurn", () => {
   it("las herramientas dependen de lo configurado: sin conocimiento no hay lab_info; sin cotización no hay quote_studies; con memoria y contacto hay conversation_state", () => {
     const names = (options: Partial<Parameters<typeof buildAgentTools>[0]>, contactKey: string | null = KEY) => buildAgentTools({ ...base, ...options }, contactKey ?? undefined).list().map((tool) => tool.name);
     const answer = async (): Promise<KnowledgeAnswer | undefined> => undefined;
-    expect(names({})).toEqual(["find_studies", "quote_studies"]);
-    expect(names({ answer })).toEqual(["lab_info", "find_studies", "quote_studies"]);
-    expect(names({ answer, capabilities: { handoff: false, quote: false } })).toEqual(["lab_info", "find_studies"]);
-    expect(names({ answer, reader: createConversationReader({ store: emptyStore }) })).toEqual(["lab_info", "find_studies", "quote_studies", "conversation_state"]);
-    expect(names({ answer, reader: createConversationReader({ store: emptyStore }) }, null)).toEqual(["lab_info", "find_studies", "quote_studies"]);
+    // study_preparation siempre está: la preparación sale de la lista del laboratorio (catálogo), no del conocimiento.
+    expect(names({})).toEqual(["find_studies", "quote_studies", "study_preparation"]);
+    expect(names({ answer })).toEqual(["lab_info", "find_studies", "quote_studies", "study_preparation"]);
+    expect(names({ answer, capabilities: { handoff: false, quote: false } })).toEqual(["lab_info", "find_studies", "study_preparation"]);
+    expect(names({ answer, reader: createConversationReader({ store: emptyStore }) })).toEqual(["lab_info", "find_studies", "quote_studies", "study_preparation", "conversation_state"]);
+    expect(names({ answer, reader: createConversationReader({ store: emptyStore }) }, null)).toEqual(["lab_info", "find_studies", "quote_studies", "study_preparation"]);
   });
 });
 

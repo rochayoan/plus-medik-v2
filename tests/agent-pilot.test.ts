@@ -129,12 +129,12 @@ describe("la decisión", () => {
   });
 
   it("una cotización PARCIAL (un estudio dudoso junto a uno seguro) se envía con los precios del seguro y deja lo dudoso a la vista (calidad UNRESOLVED)", async () => {
-    const { pilot } = make({}, { calls: [{ tool: "quote_studies", input: { studies: ["hemograma", "psa"] } }], text: "Te dejo abajo el hemograma; para el PSA, ¿lo quieres total o libre?" });
-    const reply = await pilot.produce({ from: PHONE, turns: [turn("w1", "cuanto cuesta un hemograma y un psa?")] });
+    const { pilot } = make({}, { calls: [{ tool: "quote_studies", input: { studies: ["hemograma", "hepatitis"] } }], text: "Te dejo abajo el hemograma; para la hepatitis, ¿cuál necesitas?" });
+    const reply = await pilot.produce({ from: PHONE, turns: [turn("w1", "cuanto cuesta un hemograma y hepatitis?")] });
     expect(reply).toMatchObject({ result: "quoted", quality: "UNRESOLVED" });
     expect(reply!.body).toMatch(/HEMOGRAMA COMPLETO[\s\S]*45/);
-    expect(reply!.body).toMatch(/total o libre/);
-    expect(reply!.body).toMatch(/Posiblemente también[\s\S]*PSA TOTAL — Bs 70/);
+    expect(reply!.body).toMatch(/cuál necesitas/);
+    expect(reply!.body).toMatch(/Posiblemente también[\s\S]*HEPATITIS B ANTIGENO DE SUPERFICIE — Bs 60/);
     expect(reply!.quotedStudyIds).toEqual(["00000000-0000-4000-8000-000000000001"]);
   });
 

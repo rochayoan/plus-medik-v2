@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { parseTurnaround } from "./quote-turnaround.js";
+import { parsePreparation, parseTurnaround } from "./quote-turnaround.js";
 import type { CatalogStudy } from "./types.js";
 
 // Repositorio de catálogo en SOLO LECTURA (PostgREST). Solo emite GET; nunca escribe en Supabase.
@@ -82,7 +82,8 @@ export async function loadActiveCatalog(options: SupabaseCatalogOptions = {}): P
       active: true,
       category: row.category ?? null,
       sampleType: row.sample_type ?? null,
-      turnaroundText: parseTurnaround(row.notes)
+      turnaroundText: parseTurnaround(row.notes),
+      preparationText: parsePreparation(row.notes)
     });
   }
 

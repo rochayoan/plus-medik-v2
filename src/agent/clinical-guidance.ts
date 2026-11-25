@@ -18,11 +18,14 @@ const OWN_RESULT = /\b(mi|mis|me salio|salio|salieron|me dio|tengo|tiene|tenia|r
 // Síntomas o medicamentos: tampoco (orientación médica).
 const MEDICAL = /\b(medicamento\w*|medicina\w*|pastilla\w*|insulina|tratamiento\w*|antibiotic\w*|anticoagulant\w*|dolor\w*|fiebre|sintoma\w*|sangrado|mareo\w*|embarazad\w*|tomo|estoy tomando|toma (un|una|el|la)|me recetaron)\b/;
 
+// ¿Pregunta por la preparación? (para buscar la del laboratorio antes de redactar).
+export const asksPreparation = (patientText: string): boolean => { const text = plain(patientText.slice(0, 2000)); return PREPARATION.test(text) && !MEDICAL.test(text); };
+
 export function guidanceFor(patientText: string, facts: readonly Fact[]): GuidanceKind[] {
   const text = plain(patientText.slice(0, 2000));
   if (!text || MEDICAL.test(text)) return [];
   const out: GuidanceKind[] = [];
-  const approvedPreparation = facts.some((fact) => fact.source === "LAB_INFO" && fact.refs.some((ref) => /^(STUDY_PREPARATION|SAMPLE):/.test(ref)));
+  const approvedPreparation = facts.some((fact) => (fact.source === "LAB_INFO" && fact.refs.some((ref) => /^(STUDY_PREPARATION|SAMPLE):/.test(ref))) || fact.refs.some((ref) => ref.startsWith("preparation:")));
   if (PREPARATION.test(text) && !approvedPreparation) out.push("PREPARATION");
   const approvedRange = facts.some((fact) => fact.source === "REFERENCE_RANGE");
   if (REFERENCE.test(text) && !OWN_RESULT.test(text) && !approvedRange) out.push("REFERENCE");
@@ -44,4 +47,5 @@ export const withPreparationNote = (text: string): string => (text.includes(PREP
 
 // Cifras que la orientación de preparación puede dar sin que estén en los datos: una cantidad con su unidad de tiempo o volumen («8 a 12 horas», «3 días», «20 ml»). Dinero, teléfonos, horarios y enlaces siguen
 // exigiendo procedencia.
-export const GUIDANCE_FIGURES = /\b\d{1,3}(?:\s*(?:a|-|–|y|o)\s*\d{1,3})?\s*(?:horas?|hrs?|h|dias?|minutos?|min|ml|cc|semanas?)\b/g;
+// También la hora de la toma que se calcula con el paciente según su última comida («ven entre las 5 y las 8 de la mañana», «a las 7 am»).
+export const GUIDANCE_FIGURES = /\b\d{1,3}(?:\s*(?:a|-|–|y|o)\s*\d{1,3})?\s*(?:horas?|hrs?|h|dias?|minutos?|min|ml|cc|semanas?)\b|\b(?:las |la )?\d{1,2}(?::\d{2})?(?:\s*(?:a|-|–|y)\s*(?:las )?\d{1,2}(?::\d{2})?)?\s*(?:am|pm|a\.?\s?m\.?|p\.?\s?m\.?|de la (?:manana|tarde|noche)|hrs?)\b/g;

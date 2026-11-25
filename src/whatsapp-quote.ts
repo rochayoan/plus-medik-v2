@@ -304,7 +304,7 @@ export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProduc
           }
           // Lo que la receta pide y no se pudo confirmar, pero el catálogo tiene: debajo, con su precio y fuera del total, para que el paciente confirme (no se rechaza en silencio).
           const possible = possibleStudiesFromAnalysis(analysis, catalog);
-          const options = formatDoubtfulOptions(possible, true);
+          const options = formatDoubtfulOptions(possible, true, catalog);
           if (options) {
             reply = `${reply}\n\n${options}`;
             deps.log("quote_possible_studies", { messageId: image.messageId, count: Math.min(possible.length, DOUBTFUL_LIMIT) });
@@ -318,7 +318,7 @@ export function imageProducer(image: IncomingImage, deps: QuoteDeps): TurnProduc
           const looksLikeRequest = docType === "TEXT_EXPLICIT_REQUEST" || docType === "MARK_DEPENDENT_FORM" || docType === "HANDWRITTEN_REQUEST";
           // Una receta sin ningún estudio seguro pero con estudios POSIBLES del catálogo: se le ofrecen con su precio para que elija, en vez de «no pude identificar».
           const possible = looksLikeRequest && !analysis.reasons.includes("not_a_request") ? possibleStudiesFromAnalysis(analysis, catalog) : [];
-          const options = formatDoubtfulOptions(possible, false);
+          const options = formatDoubtfulOptions(possible, false, catalog);
           reply = options ?? (analysis.reasons.includes("not_a_request")
             ? NOT_RECIPE_MESSAGE
             : analysis.reasons.some((reason) => reason.startsWith("catalog_") || reason.startsWith("semantic_") || reason === "package_alternative_unresolved")

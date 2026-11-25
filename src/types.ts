@@ -81,6 +81,9 @@ export interface CatalogStudy {
   sampleType?: string | null;
   // «Tiempo de entrega» tal como lo escribió el laboratorio en lab_tests.notes («2 horas», «3 dias», «En el dia»). Solo informativo: nunca interviene en el matching ni en los precios.
   turnaroundText?: string | null;
+  // «Preparacion: …» de lab_tests.notes: las condiciones de toma de muestra de la lista del laboratorio («Se requiere ayuno de 8 a 12 horas.», «No requiere de condiciones especiales.»). Texto del
+  // laboratorio tal cual; con él se responde la preparación de cada estudio (herramienta study_preparation).
+  preparationText?: string | null;
 }
 
 export type CatalogResolution =

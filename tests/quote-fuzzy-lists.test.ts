@@ -168,11 +168,12 @@ describe("sin método especificado se asume el más rápido (ECLIA, luego CLIA) 
   const M = [TSH_E, TSH_F, TSH_N, VIT_E, VIT_F, VIT_1, FER_C, FER_P, ANTI_S, ANTI_D];
   const ids = (text: string) => (extractStudyRequests(text, M, { fuzzy: true })?.matched ?? []).map((s) => s.id);
 
-  it("TSH, vitamina D y ferritina sin método van a la versión ECLIA/CLIA y se le dice al paciente", () => {
-    expect(ids("tsh")).toEqual([TSH_E.id]);
-    expect(ids("vitamina D")).toEqual([VIT_E.id]);
+  // Regla del laboratorio del 24-nov (reemplaza «ECLIA primero» del 12-nov): sin método, el MÁS BARATO entre las versiones del mismo estudio.
+  it("TSH, vitamina D y ferritina sin método van a la versión más barata y se le dice al paciente", () => {
+    expect(ids("tsh")).toEqual([TSH_F.id]);
+    expect(ids("vitamina D")).toEqual([VIT_F.id]);
     expect(ids("ferritina")).toEqual([FER_C.id]);
-    expect(extractWithNotes("tsh", M, { fuzzy: true }).notes.interpreted).toEqual([{ mention: "tsh", studyName: "TSH (ECLIA)" }]);
+    expect(extractWithNotes("tsh", M, { fuzzy: true }).notes.interpreted).toEqual([{ mention: "tsh", studyName: "TSH (FIA Fluorescencia)" }]);
   });
   it("si el paciente dice el método o la variante, se respeta", () => {
     expect(ids("tsh neonatal")).toEqual([TSH_N.id]);
@@ -186,12 +187,14 @@ describe("sin método especificado se asume el más rápido (ECLIA, luego CLIA) 
   it("sin la búsqueda por parecido (por defecto) nada cambia: «tsh» sigue siendo una duda", () => {
     expect(extractStudyRequests("tsh", M)!.result.ambiguous).toHaveLength(1);
   });
-  it("preferredByMethod: uno solo con el mejor método; dos con ECLIA no se eligen; sin ECLIA ni CLIA no hay preferida", () => {
-    expect(preferredByMethod([TSH_E, TSH_F])).toBe(TSH_E);
+  it("preferredByMethod: el más barato entre versiones del mismo estudio; uno solo con método entre estudios distintos; estudios distintos o empate de precio, ninguno", () => {
+    expect(preferredByMethod([TSH_E, TSH_F])).toBe(TSH_F);
+    expect(preferredByMethod([TSH_E, TSH_F, TSH_N])).toBe(TSH_F);
     expect(preferredByMethod([FER_C, FER_P])).toBe(FER_C);
     expect(preferredByMethod([TSH_E, VIT_E])).toBeUndefined();
     expect(preferredByMethod([ANTI_S, ANTI_D])).toBeUndefined();
-    expect(preferredByMethod([study(71, "X (ECLIA)", [], 1), study(72, "Y (CLIA)", [], 1)])).toMatchObject({ name: "X (ECLIA)" });
+    expect(preferredByMethod([study(71, "X (ECLIA)", [], 1), study(72, "Y (CLIA)", [], 1)])).toBeUndefined();
+    expect(preferredByMethod([study(73, "Z (ECLIA)", [], 5), study(74, "Z (CLIA)", [], 5)])).toBeUndefined();
   });
 });
 

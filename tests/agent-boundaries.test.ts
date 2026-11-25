@@ -64,7 +64,7 @@ describe("el núcleo conversacional no puede actuar sobre el paciente ni sobre l
   it("toda herramienta es de solo lectura y no existe ninguna que envíe, cotice con precios propios o derive", () => {
     const tools = code(join(root, "src/agent/tools.ts"));
     const definitions = [...tools.matchAll(/name: "([a-z_]+)"/g)].map((match) => match[1]);
-    expect(definitions.sort()).toEqual(["conversation_state", "find_studies", "lab_info", "quote_studies"]);
+    expect(definitions.sort()).toEqual(["conversation_state", "find_studies", "lab_info", "quote_studies", "study_preparation"]);
     expect((tools.match(/readOnly: true/g) ?? []).length).toBe(definitions.length);
     expect(tools).not.toMatch(/handoff|derivar|sendText|insert|update|delete/i);
     // los precios solo salen del motor de cotización existente, nunca se calculan aquí
