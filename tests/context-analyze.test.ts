@@ -58,7 +58,7 @@ describe("el contexto del documento llega al resolvedor semántico", () => {
     expect(result.document).toMatchObject({ completeDocumentVisible: true, verifiedEdges: ["superior"], context: { muestra: "sangre", lines: ["SOLICITUD DE EXAMEN DE SANGRE"] } });
   });
 
-  it("sin contexto en la señal no se envía ninguno (las variantes siguen ambiguas)", async () => {
+  it("sin contexto en la señal no se envía ninguno; la duda sangre/orina la resuelve la muestra por defecto EN SANGRE (regla del laboratorio, 24-nov)", async () => {
     const shadowMatch = vi.fn(async (_args: ShadowArgs) =>
       batchOf(
         shadow("Sodio", { kind: "AMBIGUOUS", studyIds: ["uuid-415", "uuid-525"], reason: "muestra no indicada" }),
@@ -67,8 +67,9 @@ describe("el contexto del documento llega al resolvedor semántico", () => {
     );
     const result = await analyzeImage({ imageBase64: "x", mimeType: "image/png", catalog, semanticPrimary: true, semanticAuto: true }, makeDeps(signal(), shadowMatch as unknown as AnalyzeDeps["shadowMatch"]));
     expect(shadowMatch.mock.calls[0]![0].context).toBeUndefined();
-    expect(result.decision).toBe("HUMAN_REVIEW");
-    expect(result.reasons).toEqual(["semantic_ambiguous"]);
+    expect(result.decision).toBe("AUTO_SAFE");
+    expect(result.matches[0]!.semanticPrimary).toMatchObject({ contrast: "LAB_RULE", studyIds: ["uuid-415"] });
+    expect(result.quote?.lines.map((line) => line.id).sort()).toEqual(["uuid-415", "uuid-416"]);
   });
 
   it("un contexto con conflicto entrega las líneas pero ninguna declaración, y la ambigüedad se mantiene", async () => {

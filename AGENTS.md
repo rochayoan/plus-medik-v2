@@ -14,3 +14,15 @@
   los controles técnicos vigentes; no modificar datos médicos sin verificar.
 - La información sobre esta política está en
   `docs/configuracion/repositorio-sin-aprobacion.md`.
+
+## Fotos de recetas: lectura y reglas en paralelo
+
+Si vas a trabajar en la **lectura de fotos de recetas** o en `src/analyze.ts`, lee primero
+`docs/coordinacion/fotos-de-recetas.md`. Ahí está:
+
+- quién toca qué;
+- qué decide ya la foto con las reglas del laboratorio (`src/study-choice.ts`);
+- las notas sobre casos de lectura pendientes;
+- cómo reportar un error de foto.
+
+`src/analyze.ts` es compartido: quien lo vaya a cambiar avisa antes.

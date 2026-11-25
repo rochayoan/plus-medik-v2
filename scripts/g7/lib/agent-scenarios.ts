@@ -25,9 +25,12 @@ export const FIXTURE_CATALOG: CatalogStudy[] = [
   study(4, "CREATININA EN ORINA", ["creatinina", "creatinina urinaria"], 42),
   study(5, "TSH", ["tsh"], 80),
   study(6, "VITAMINA B12", ["vitamina b12", "b12"], 120),
-  // Dos versiones EN SANGRE de un mismo nombre: siguen siendo ambiguas (la regla «a secas = en sangre» no elige entre ellas).
+  // Total y libre de un mismo nombre: «psa» a secas se cotiza TOTAL directo (laboratorio, 24-nov); «psa libre», el libre.
   study(7, "PSA TOTAL", ["psa"], 70),
-  study(8, "PSA LIBRE", ["psa"], 75)
+  study(8, "PSA LIBRE", ["psa"], 75),
+  // «hepatitis» a secas: el laboratorio pide preguntar cuál (24-nov). Es el caso ambiguo de los escenarios («psa» ya se cotiza TOTAL directo).
+  study(9, "HEPATITIS B ANTIGENO DE SUPERFICIE", [], 60),
+  study(10, "HEPATITIS C TOTAL", [], 75)
 ];
 
 // Conocimiento ficticio: solo hay horarios. Todo lo demás (plazos, direcciones) es «sin datos», como pasa hoy con lo no confirmado.
@@ -114,12 +117,12 @@ export const AGENT_SCENARIOS: AgentScenario[] = [
   {
     id: "estudio-ambiguo",
     title: "Un nombre que coincide con dos estudios: pregunta cuál y el sistema agrega las opciones con su precio (sin total ni cotización)",
-    turns: ["necesito cotizar psa"],
+    turns: ["necesito cotizar hepatitis"],
     // El texto del modelo no trae precios; el bloque de opciones con precio lo agrega el sistema debajo.
-    expect: { quoteBlock: true, tools: ["quote_studies"], replyMatch: [/total/i, /libre/i, /Opciones que encontré/] },
+    expect: { quoteBlock: true, tools: ["quote_studies"], replyMatch: [/hepatitis/i, /Opciones que encontré/] },
     good: [
-      { calls: [q("psa")], text: "Tenemos dos opciones de PSA: PSA TOTAL y PSA LIBRE. ¿Cuál necesitas?" },
-      { calls: [q("psa")], text: "Para el PSA hay dos opciones, total o libre. ¿Cuál te cotizo?" }
+      { calls: [q("hepatitis")], text: "Tenemos varias pruebas de hepatitis. ¿Cuál necesitas?" },
+      { calls: [q("hepatitis")], text: "Para la hepatitis hay varias opciones. ¿Cuál te cotizo?" }
     ]
   },
   {

@@ -6,7 +6,9 @@ import type { ProviderErrorInfo } from "../provider-error.js";
 
 // ───────────────────────────── hechos (lo único que el agente puede afirmar) ─────────────────────────────
 
-export type FactSource = "LAB_INFO" | "CATALOG" | "CONVERSATION_STATE" | "QUOTE_ENGINE";
+// GENERAL_GUIDANCE: instrucción del sistema para dar orientación general (preparación, valores de referencia) cuando el laboratorio no tiene el dato cargado (src/agent/clinical-guidance.ts).
+// REFERENCE_RANGE: valores de referencia del propio laboratorio (cuando se carguen).
+export type FactSource = "LAB_INFO" | "CATALOG" | "CONVERSATION_STATE" | "QUOTE_ENGINE" | "GENERAL_GUIDANCE" | "REFERENCE_RANGE";
 
 export interface Fact {
   // Único dentro del turno (lo asigna la herramienta): `${tool}:${n}`. Solo para el registro técnico.
@@ -138,6 +140,8 @@ export interface AgentDecision {
   // Código de por qué la salida del plan no se pudo leer (se respondió sin herramientas).
   planFallback?: string;
   usage?: ModelUsage;
+  // Orientación general que se usó en la respuesta (preparación, valores de referencia): para que la Dra revise esas respuestas.
+  guidance?: Array<"PREPARATION" | "REFERENCE">;
   // 1 si hizo falta un segundo intento tras un rechazo (con o sin éxito), y qué rechazó el primero.
   repairs?: number;
   firstViolations?: Violation[];

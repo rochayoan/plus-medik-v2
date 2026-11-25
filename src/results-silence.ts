@@ -1,4 +1,5 @@
 import { fold, plain } from "./text-normalize.js";
+import { mentionsQuoting } from "./typo.js";
 
 // Recibos, accesos e interpretación de resultados corresponden al personal.
 // La decisión se toma ANTES de cualquier modelo. Los pedidos de cotización,
@@ -45,7 +46,7 @@ export function routeResultsMessage(text: string): ResultsRouting {
   // «¿Puede recoger otra persona mis resultados?»: es del camino de resultados (no un pedido de hablar con una persona).
   if (asksOtherPersonPickup(message)) return "READY_CHECK";
   // «ya me tomaron la muestra», «dejé una muestra anoche»: la muestra YA se entregó (no es una pregunta sobre cómo tomarla).
-  if (OTHER_INTENT.test(message.replace(SAMPLE_DONE, " "))) return "NORMAL";
+  if (OTHER_INTENT.test(message.replace(SAMPLE_DONE, " ")) || mentionsQuoting(message)) return "NORMAL";
   if (OFFICE_HOURS.test(message) && !RESULTS_HOURS.test(message)) return "OFFICE_HOURS";
   // Interpretación de un resultado («¿es normal?», «salió alto»): silencio, lo ve la Dra. Una URGENCIA no: se piden los datos como en cualquier consulta de resultados (decisión del dueño, 21-nov).
   if (INTERPRET.test(message)) return "SILENT";
@@ -78,7 +79,8 @@ export function boliviaGreeting(date: Date): string {
 // Ya no depende de que el caso quede registrado en el CRM (antes, sin CRM, la opción 2 no respondía nada).
 
 export type ResultsStage = "ASKED" | "NAME_ASKED" | "THANKED";
-export type ResultsAction = "ASK" | "NAME_ASK" | "THANKS" | "PICKUP_INFO" | "SILENT";
+// SWITCH_OFFER: mientras se esperan los datos llegó solo un número del menú («3»): se pregunta si quiere cambiar a esa opción (el texto lo arma src/greeting-menu.ts, menuSwitchOffer).
+export type ResultsAction = "ASK" | "NAME_ASK" | "THANKS" | "PICKUP_INFO" | "SWITCH_OFFER" | "SILENT";
 export type PatientData = "COMPLETE" | "PARTIAL" | "NONE";
 
 export function resultsAskMessage(date: Date): string {
@@ -89,24 +91,31 @@ export const RESULTS_NAME_ASK = "¿Me pasas el nombre completo del paciente (nom
 export const RESULTS_THANKS = "¡Gracias por compartirnos tus datos! 😊 Enseguida la doctora revisa tu resultado y te responde por aquí 🙏";
 // Lo que dijo la Dra (6-nov), confirmado por el dueño (21-nov).
 export const RESULTS_PICKUP_INFO = "Sí, otra persona puede recoger el resultado presentando el comprobante de pago 🧾";
-export const RESULTS_SIGNATURES: Record<Exclude<ResultsAction, "SILENT">, string> = { ASK: "RESULTS_READY_CHECK", NAME_ASK: "RESULTS_NAME_ASK", THANKS: "RESULTS_DATA_THANKS", PICKUP_INFO: "RESULTS_PICKUP_INFO" };
+// Cierre del texto que ofrece cambiar de opción (revisión del 23-nov): deja claro cómo seguir con el resultado si el número fue un error. También marca el paso (ver STAGE_MARKERS).
+export const RESULTS_SWITCH_TAIL = "Si no es así y quieres consultar tu resultado, pásame el nombre completo del paciente (nombre y apellidos) 🙏";
+export const RESULTS_SIGNATURES: Record<Exclude<ResultsAction, "SILENT">, string> = { ASK: "RESULTS_READY_CHECK", NAME_ASK: "RESULTS_NAME_ASK", THANKS: "RESULTS_DATA_THANKS", PICKUP_INFO: "RESULTS_PICKUP_INFO", SWITCH_OFFER: "RESULTS_SWITCH_OFFER" };
 
-export function resultsReplyBody(action: Exclude<ResultsAction, "SILENT">, date: Date): string {
+export function resultsReplyBody(action: Exclude<ResultsAction, "SILENT" | "SWITCH_OFFER">, date: Date): string {
   return action === "ASK" ? resultsAskMessage(date) : action === "NAME_ASK" ? RESULTS_NAME_ASK : action === "THANKS" ? RESULTS_THANKS : RESULTS_PICKUP_INFO;
 }
 
 // En qué paso está el contacto, según los mensajes recientes (24 h) que le envió el asistente: el más reciente de los textos de este camino manda. Si la Dra escribió DESPUÉS de uno de ellos, ella ya lo atiende
 // (cuenta como agradecido: silencio). Se lee el texto (no una marca aparte) para que funcione igual si el paciente respondió con una foto.
+// Pedir los datos (ASKED / NAME_ASKED) solo sigue vigente si fue lo ÚLTIMO que dijo el asistente: si después respondió otra cosa (la ubicación, una cotización), el paciente cambió de tema y ese pedido se
+// cerró (caso real 23-nov: tras responder la ubicación, «Si» quedó sin respuesta y «Cotozame hcg, hiv y Sífilis» recibió «Enseguida la doctora revisa tu resultado»). El agradecimiento (THANKED) no se cierra:
+// el resultado ya está en manos de la Dra.
 const STAGE_MARKERS: ReadonlyArray<readonly [ResultsStage, string]> = [
   ["THANKED", plain("Enseguida la doctora revisa tu resultado")],
   ["THANKED", plain("ya tengo tus datos. La doctora verifica tu resultado")], // texto anterior (hasta el 21-nov)
   ["NAME_ASKED", plain("¿Me pasas el nombre completo del paciente (nombre y apellidos)")],
+  ["ASKED", plain("Si no es así y quieres consultar tu resultado")],
   ["ASKED", plain("Para verificar tu resultado, pásame por favor")],
   ["ASKED", plain("Ve pasándome el nombre completo del paciente")] // texto anterior (hasta el 21-nov)
 ];
 const STAFF_ON_RESULTS = /\b(ya esta listo su resultado|ya esta (en sistema|su resultado|el resultado)|verifico|en proceso|resultado previo|se le avisara|le avisare|le aviso|(este|ese|esos|estos) (es|son) sus? resultados?|nombre (completo )?del paciente|comprobante|comprovante)\b/;
 export function resultsStageOf(recent: ReadonlyArray<{ readonly from: string; readonly text: string }>): ResultsStage | undefined {
   let staffSpoke = false;
+  let answeredOther = false;
   for (let index = recent.length - 1; index >= 0; index--) {
     const entry = recent[index]!;
     if (entry.from === "STAFF") {
@@ -117,7 +126,12 @@ export function resultsStageOf(recent: ReadonlyArray<{ readonly from: string; re
     if (entry.from !== "ASSISTANT") continue;
     const text = plain(entry.text);
     const hit = STAGE_MARKERS.find(([, marker]) => text.includes(marker));
-    if (hit) return staffSpoke ? "THANKED" : hit[0];
+    if (!hit) {
+      answeredOther = true;
+      continue;
+    }
+    if (staffSpoke || hit[0] === "THANKED") return "THANKED";
+    return answeredOther ? undefined : hit[0];
   }
   return undefined;
 }
@@ -173,9 +187,12 @@ export const asksOtherPersonPickup = (text: string): boolean => {
 };
 
 // Qué hacer con el lote. `query`: es una consulta de resultados (READY_CHECK). Sin paso previo y sin consulta, no es de este camino (undefined: sigue el flujo normal).
-export function decideResultsAction(input: { stage?: ResultsStage; query: boolean; data: PatientData; courtesy: boolean; pickup?: boolean }): ResultsAction | undefined {
-  const { stage, query, data, courtesy, pickup } = input;
+// `menuNumber`: el lote es SOLO un número del 1 al 5 (como los del menú). Mientras se esperan los datos no se toma como un dato del paciente: se le pregunta si quiere cambiar a esa opción (el 2 es la misma
+// opción de resultados: se le pide el nombre). Caso real 23-nov: «2» → pedido de datos → «3» → «¿Me pasas el nombre completo del paciente…?».
+export function decideResultsAction(input: { stage?: ResultsStage; query: boolean; data: PatientData; courtesy: boolean; pickup?: boolean; menuNumber?: number }): ResultsAction | undefined {
+  const { stage, query, data, courtesy, pickup, menuNumber } = input;
   if (stage === "THANKED") return "SILENT";
+  if (stage && menuNumber !== undefined && menuNumber >= 1 && menuNumber <= 5) return menuNumber === 2 ? "NAME_ASK" : "SWITCH_OFFER";
   if (pickup && data !== "COMPLETE") return "PICKUP_INFO";
   if (!stage) return query ? (data === "COMPLETE" ? "THANKS" : data === "PARTIAL" ? "NAME_ASK" : "ASK") : undefined;
   if (data === "COMPLETE") return "THANKS";
@@ -184,13 +201,14 @@ export function decideResultsAction(input: { stage?: ResultsStage; query: boolea
 }
 
 // Un mensaje que parece el dato pedido (nombre del paciente, número de orden, comprobante): sin preguntas ni pedidos propios (cotizar, precio, hablar con una persona, ubicación, horario).
+// «Cotizar» se reconoce aunque venga mal escrito («cotozame», «cotisame»: src/typo.ts). Nombrar estudios SIN pedir cotizar sí puede ser el dato: el pedido de datos pregunta «qué estudio te hiciste y qué día».
 // Corto (hasta 8 palabras), o más largo si se PRESENTA con un nombre completo explícito: «Mi nombre es Ronald Sosa Céspedes y este número dejé como referencia» (21-nov: con 11 palabras no se reconocía,
 // el modelo improvisaba el agradecimiento y nunca salía el texto fijo).
 const OWN_REQUEST = /\b(cotiz\w*|cotic\w*|precio\w*|cuesta\w*|costo\w*|cuanto\w*|persona|asesor\w*|humano|ubicacion|direccion|horario\w*|abren|atienden|resultado\w*|domicilio)\b/;
 const EXPLICIT_NAME = /\b(me llamo|mi nombre (completo )?es|el nombre (completo )?(del paciente )?es|nombre (completo )?del paciente|a nombre de|con el nombre de)\b/;
 export function looksLikeIdentification(text: string): boolean {
   const message = plain(text.slice(0, 500));
-  if (!message || text.includes("?") || text.includes("¿") || OWN_REQUEST.test(message)) return false;
+  if (!message || text.includes("?") || text.includes("¿") || OWN_REQUEST.test(message) || mentionsQuoting(message)) return false;
   if (message.split(/\s+/).length <= 8) return true;
   return message.split(/\s+/).length <= 30 && EXPLICIT_NAME.test(message) && patientDataIn([text], false) === "COMPLETE";
 }

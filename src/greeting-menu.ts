@@ -1,4 +1,4 @@
-import { boliviaGreeting } from "./results-silence.js";
+import { boliviaGreeting, RESULTS_SWITCH_TAIL } from "./results-silence.js";
 import { fold } from "./text-normalize.js";
 
 // MENÚ DE INTENCIÓN del saludo. Cuando el paciente SOLO saluda y no hay conversación en las últimas 24 h, el sistema (no el modelo) responde con este texto fijo: sale al instante, siempre igual y se puede
@@ -11,14 +11,16 @@ export interface MenuOption {
   readonly code: "QUOTE" | "RESULTS" | "LOCATION" | "HOME_VISIT" | "HUMAN";
   // Lo que «quiso decir» el paciente al elegir el número: frase que las reglas y el agente ya entienden.
   readonly canonical: string;
+  // La pregunta con la que se le ofrece cambiar a esta opción cuando escribe su número en medio de otro camino (ver menuSwitchOffer).
+  readonly offer: string;
 }
 
 export const MENU_OPTIONS: readonly MenuOption[] = [
-  { number: 1, label: "Cotizar estudios", code: "QUOTE", canonical: "Quiero cotizar estudios" },
-  { number: 2, label: "Consultar resultados", code: "RESULTS", canonical: "Quiero consultar mis resultados" },
-  { number: 3, label: "Ubicación y horarios", code: "LOCATION", canonical: "¿Dónde están ubicados y cuál es su horario de atención?" },
-  { number: 4, label: "Estudios a domicilio", code: "HOME_VISIT", canonical: "Quiero un estudio a domicilio" },
-  { number: 5, label: "Hablar con una persona", code: "HUMAN", canonical: "Quiero hablar con una persona" }
+  { number: 1, label: "Cotizar estudios", code: "QUOTE", canonical: "Quiero cotizar estudios", offer: "¿Quieres *cotizar estudios*" },
+  { number: 2, label: "Consultar resultados", code: "RESULTS", canonical: "Quiero consultar mis resultados", offer: "¿Quieres *consultar tus resultados*" },
+  { number: 3, label: "Ubicación y horarios", code: "LOCATION", canonical: "¿Dónde están ubicados y cuál es su horario de atención?", offer: "¿Quieres que te pase nuestra *ubicación y horarios*" },
+  { number: 4, label: "Estudios a domicilio", code: "HOME_VISIT", canonical: "Quiero un estudio a domicilio", offer: "¿Quieres pedir un *estudio a domicilio*" },
+  { number: 5, label: "Hablar con una persona", code: "HUMAN", canonical: "Quiero hablar con una persona", offer: "¿Quieres *hablar con una persona* del laboratorio" }
 ];
 
 // Formas mínimas (estructurales) de los mensajes: este módulo no depende del núcleo conversacional.
@@ -51,8 +53,25 @@ export function menuNumberOf(text: string): number | undefined {
   return match ? Number(match[1]) : undefined;
 }
 
-// Barato y sin red: ¿vale la pena leer el historial para ver si este mensaje responde al menú?
-export const mightBeMenuChoice = (text: string): boolean => menuNumberOf(text) !== undefined;
+// CAMBIO DE OPCIÓN (revisión del 23-nov): el paciente estaba en otro camino (p. ej. se le pidieron los datos de su resultado) y escribe solo un número del menú. No se toma como dato: se le pregunta si
+// quiere cambiar a esa opción, y si no, cómo seguir con lo que estaba. Un «sí» (o el mismo número) a esta pregunta es elegir esa opción (ver menuChoiceOf).
+export function menuSwitchOffer(number: number): string | undefined {
+  const option = MENU_OPTIONS.find((candidate) => candidate.number === number);
+  if (!option) return undefined;
+  return [`Me escribiste «${number}» 😊 ${option.offer} (opción ${KEYCAP[number - 1]})? Respóndeme «sí» y te ayudo con eso.`, RESULTS_SWITCH_TAIL].join("\n");
+}
+const SWITCH_OFFER = /\(opcion ([1-5])\)\? respondeme «si»/;
+// ¿Este mensaje del asistente ofrecía cambiar a una opción? Devuelve cuál.
+export function switchOfferOf(text: string): number | undefined {
+  const match = SWITCH_OFFER.exec(fold(text.replace(/️/g, "").replace(/[1-5]⃣/g, (key) => key[0]!)));
+  return match ? Number(match[1]) : undefined;
+}
+// «sí», «si por favor», «dale», «ok», «claro», «sí, eso»: aceptar la opción ofrecida.
+const YES = /^(si+|sip|sii+|dale|ok|okey|okis|claro|bueno|ya|eso|exacto|correcto|por favor|porfa|si (por favor|porfa|porfavor|gracias|eso|claro|dale|quiero|esa|ese|esa opcion|por fa)|claro que si|si quiero|si si)$/;
+const isYes = (text: string): boolean => YES.test(fold(text).replace(/[^a-z0-9ñ]+/g, " ").trim());
+
+// Barato y sin red: ¿vale la pena leer el historial para ver si este mensaje responde al menú (o acepta cambiar de opción)?
+export const mightBeMenuChoice = (text: string): boolean => menuNumberOf(text) !== undefined || (text.length <= 30 && isYes(text));
 
 // El último mensaje del asistente (el más reciente) de los mensajes recientes, si es que el asistente habló después del último mensaje de la recepción.
 export function lastAssistantMessage(recent: readonly RecentEntry[]): string | undefined {
@@ -75,11 +94,16 @@ function seenBefore(recent: readonly RecentEntry[], sentAtMs: number | undefined
 
 // La opción elegida: SOLO si el último mensaje del asistente QUE EL PACIENTE VEÍA al escribir fue el menú y el número existe. Un número tras una lista de estudios (u otra cosa) no es del menú.
 // Con la hora del mensaje se resuelve el cruce: el paciente responde «1» al menú justo cuando sale otra respuesta del asistente (ver menuChoiceDecision).
+// Tras la pregunta de cambio de opción (menuSwitchOffer), un «sí» o el mismo número eligen la opción ofrecida; otro número no (lo atiende quien llama, que vuelve a preguntar).
 export function menuChoiceOf(text: string, recent: readonly RecentEntry[], sentAtMs?: number): MenuOption | undefined {
   const number = menuNumberOf(text);
-  if (number === undefined) return undefined;
+  const yes = number === undefined && isYes(text);
+  if (number === undefined && !yes) return undefined;
   const last = lastAssistantMessage(seenBefore(recent, sentAtMs));
-  if (!last || !isMenuMessage(last)) return undefined;
+  if (!last) return undefined;
+  const offered = switchOfferOf(last);
+  if (offered !== undefined) return yes || number === offered ? MENU_OPTIONS.find((option) => option.number === offered) : undefined;
+  if (yes || !isMenuMessage(last)) return undefined;
   return MENU_OPTIONS.find((option) => option.number === number);
 }
 

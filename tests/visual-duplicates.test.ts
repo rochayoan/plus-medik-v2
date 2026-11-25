@@ -54,7 +54,7 @@ const makeDeps = (a: SimpleReading, b: SimpleReading, judge: AnalyzeDeps["judge"
 const ambiguousShadow = () => vi.fn(async (args: ShadowArgs) => batchOf(...args.queries.map((q) => ambiguousBunUrea(q.literalText)))) as unknown as AnalyzeDeps["shadowMatch"];
 
 describe("una selección visual, un estudio (analyzeImage)", () => {
-  it("marcada4: UREA/NUS y UREANUS son la misma selección: un estudio, sin juez, y sigue en revisión por BUN vs Urea", async () => {
+  it("marcada4: UREA/NUS y UREANUS son la misma selección: un estudio, sin juez; BUN vs Urea se resuelve como UREA (el mismo examen, 25-nov)", async () => {
     const judge = vi.fn(async () => noJudgement);
     const shadowMatch = ambiguousShadow();
     const deps = makeDeps(reading("NITROGENO UREICO/UREA/NUS"), reading("NITROGENO UREICO/UREANUS"), judge, shadowMatch);
@@ -62,8 +62,10 @@ describe("una selección visual, un estudio (analyzeImage)", () => {
     expect(judge).not.toHaveBeenCalled();
     expect(result.finalVisualStudies.map((s) => s.literalText)).toEqual(["NITROGENO UREICO/UREA/NUS"]);
     expect(vi.mocked(shadowMatch).mock.calls[0]![0].queries).toEqual([{ literalText: "NITROGENO UREICO/UREA/NUS" }]);
+    expect(result.matches[0]!.semanticPrimary).toMatchObject({ contrast: "LAB_RULE", studyIds: ["uuid-urea"] });
+    // Sin el AUTO semántico (este armado) lo elegido no se cobra solo: sigue en revisión.
     expect(result.decision).toBe("HUMAN_REVIEW");
-    expect(result.reasons).toEqual(["semantic_ambiguous"]);
+    expect(result.reasons).toEqual(["semantic_auto_not_enabled"]);
     expect(result.quote).toBeUndefined();
   });
 

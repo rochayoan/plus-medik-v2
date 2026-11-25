@@ -15,6 +15,14 @@ export function parseTurnaround(notes: string | null | undefined): string | null
   return shown.charAt(0).toUpperCase() + shown.slice(1);
 }
 
+// «Preparacion: Se requiere ayuno de 8 a 12 horas.» dentro de las notas del catálogo (hasta el siguiente «|» o «Tiempo de entrega»). Texto del laboratorio tal cual.
+export function parsePreparation(notes: string | null | undefined): string | null {
+  if (!notes) return null;
+  const match = /preparaci[oó]n\s*:\s*([\s\S]*?)(?:\|\s*tiempo de entrega|\|\s*$|$)/i.exec(notes);
+  const raw = match?.[1]?.split("|")[0]?.trim().replace(/\s+/g, " ");
+  return raw ? raw.slice(0, 700) : null;
+}
+
 export function appendQuoteTurnaround(quote: string, studyIds: readonly string[], catalog: readonly CatalogStudy[]): string {
   const groups = new Map<string, string[]>();
   for (const id of new Set(studyIds)) {

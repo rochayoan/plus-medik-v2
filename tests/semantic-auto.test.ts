@@ -127,11 +127,17 @@ describe("AUTO semántico habilitado: lo que sigue bloqueado", () => {
     expect(result.quote).toBeUndefined();
   };
 
-  it("ambigüedad clínica (BUN vs Urea), sin coincidencia, rechazo del verificador y pasadas en desacuerdo", () => {
-    blocked(assemble(["NITROGENO UREICO/UREA/NUS"], ok("NITROGENO UREICO/UREA/NUS", { kind: "AMBIGUOUS", studyIds: ["uuid-bun", "uuid-urea"], reason: "BUN o urea" }), { auto: true }), "semantic_ambiguous");
+  it("ambigüedad entre estudios distintos (FSH vs LH), sin coincidencia, rechazo del verificador y pasadas en desacuerdo", () => {
+    blocked(assemble(["FSH/LH"], ok("FSH/LH", { kind: "AMBIGUOUS", studyIds: ["uuid-fsh", "uuid-lh"], reason: "FSH o LH" }), { auto: true }), "semantic_ambiguous");
     blocked(assemble(["AMILASA PANCREATICA"], ok("AMILASA PANCREATICA", { kind: "NO_MATCH", reason: "ausente" }), { auto: true }), "semantic_no_match");
     blocked(assemble(["Examen X"], ok("Examen X", { kind: "REJECTED", studyIds: ["uuid-fsh"], reason: "variante" }), { auto: true }), "semantic_rejected_by_verifier");
     blocked(assemble(["CREATININA SERICA"], ok("CREATININA SERICA", match("uuid-cre"), false), { auto: true }), "semantic_passes_disagree");
+  });
+
+  it("BUN vs Urea ya no bloquea: son el mismo examen (dueño, 25-nov) y se cotiza UREA", () => {
+    const result = assemble(["NITROGENO UREICO/UREA/NUS"], ok("NITROGENO UREICO/UREA/NUS", { kind: "AMBIGUOUS", studyIds: ["uuid-bun", "uuid-urea"], reason: "BUN o urea" }), { auto: true });
+    expect(result.decision).toBe("AUTO_SAFE");
+    expect(result.quote?.lines.map((line) => [line.id, line.priceBs])).toEqual([["uuid-urea", 30]]);
   });
 
   it("perfiles genéricos y compuestos con demasiados componentes", () => {

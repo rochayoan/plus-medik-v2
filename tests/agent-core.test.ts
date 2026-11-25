@@ -156,13 +156,12 @@ describe("herramientas: solo lectura, acotadas, que nunca lanzan, y «sin datos�
       expect(result.facts.some((f) => /PARCIAL/.test(f.text))).toBe(false);
     });
 
-    it("ambiguo (PSA total o libre, ambos en sangre): no es una cotización, pero el sistema sugiere las opciones con su precio; los hechos nombran las opciones, sin precios", async () => {
+    it("«psa» a secas: el TOTAL directo, sin ofrecer el libre (laboratorio, 24-nov); «psa libre» cotiza el libre", async () => {
       const result = (await quote.run({ studies: ["psa"] }, ctx)) as { facts: Array<{ text: string }>; blocks?: string[] };
       expect(result.blocks).toHaveLength(1);
-      expect(result.blocks![0]).toContain("Opciones que encontré");
-      expect(result.blocks![0]).toMatch(/PSA TOTAL.*Bs 70/);
-      expect(result.blocks![0]).not.toContain("Total de");
-      expect(result.facts.map((f) => f.text).join(" ")).toMatch(/PSA TOTAL.*PSA LIBRE|PSA LIBRE.*PSA TOTAL/);
+      expect(result.blocks![0]).toMatch(/PSA TOTAL — Bs 70[\s\S]*Total de los estudios cotizados: Bs 70/);
+      expect(result.blocks![0]).not.toContain("PSA LIBRE");
+      expect(((await quote.run({ studies: ["psa libre"] }, ctx)) as { blocks: string[] }).blocks[0]).toMatch(/PSA LIBRE — Bs 75/);
       noPrices(result);
     });
 
@@ -172,15 +171,17 @@ describe("herramientas: solo lectura, acotadas, que nunca lanzan, y «sin datos�
     });
 
     it("un estudio seguro junto a uno dudoso: se cotiza el seguro (PARCIAL) y el dudoso va DEBAJO como posible, con precio y fuera del total", async () => {
-      const result = (await quote.run({ studies: ["hemograma", "psa"] }, ctx)) as { facts: Array<{ text: string }>; blocks: string[] };
+      // «hepatitis» a secas: el laboratorio pide preguntar (24-nov).
+      const withHepatitis = quoteStudiesTool({ loadCatalog: async () => [...CATALOG, study(8, "HEPATITIS B ANTIGENO DE SUPERFICIE", [], 60), study(9, "HEPATITIS C TOTAL", [], 75)] });
+      const result = (await withHepatitis.run({ studies: ["hemograma", "hepatitis"] }, ctx)) as { facts: Array<{ text: string }>; blocks: string[] };
       expect(result.blocks).toHaveLength(2);
       expect(result.blocks[0]).toContain("HEMOGRAMA COMPLETO");
-      expect(result.blocks[0]).not.toMatch(/PSA/);
+      expect(result.blocks[0]).not.toMatch(/HEPATITIS/);
       expect(result.blocks[0]).toMatch(/Total de los estudios cotizados: Bs 45/);
       expect(result.blocks[1]).toMatch(/Posiblemente también/);
       expect(result.blocks[1]).toMatch(/no están sumados en el total/);
-      expect(result.blocks[1]).toMatch(/PSA TOTAL — Bs 70/);
-      expect(result.blocks[1]).toMatch(/PSA LIBRE — Bs 75/);
+      expect(result.blocks[1]).toMatch(/HEPATITIS B ANTIGENO DE SUPERFICIE — Bs 60/);
+      expect(result.blocks[1]).toMatch(/HEPATITIS C TOTAL — Bs 75/);
       expect(result.facts.some((f) => /PARCIAL/.test(f.text))).toBe(true);
       noPrices(result);
     });
