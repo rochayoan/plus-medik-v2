@@ -6,6 +6,7 @@ import { identityTokens, type ShadowContext } from "./catalog-shadow.js";
 import { normalizeStudyKey } from "./consensus.js";
 import { derivationCues, FUNCTION_DEFINITIONS, FUNCTION_KINDS, functionCheckSchema, functionInstructions, fuseFunction, fuseKinds, type DocumentFunctionInfo, type FunctionKind, type FunctionRequest } from "./document-function.js";
 import type { DocumentType } from "./types.js";
+import { fusePhotoCondition, PHOTO_LEGIBILITY, PHOTO_LIGHTING, PHOTO_ORIENTATIONS, type PhotoCondition, type RawPhotoCondition } from "./photo-quality.js";
 
 // Señal de TIPO e INTEGRIDAD del documento. Conserva el enum DocumentType, el campo completeDocumentVisible y las reglas de
 // src/safety.ts (manuscrito, no es solicitud, tipo incierto, documento incompleto), y el criterio de dos lecturas independientes
@@ -48,15 +49,26 @@ const signalSchema = z.object({
   // Para QUÉ sirve el documento (función), no cómo se escribe (formato). Ver FUNCTION_DEFINITIONS.
   documentFunction: z.enum(FUNCTION_KINDS),
   functionEvidence: z.array(z.string()),
+  // Condiciones de la FOTO (no del papel): orientación del texto, legibilidad de la zona de estudios, desenfoque e iluminación. Ver photo-quality.ts.
+  photoCondition: z.object({
+    orientation: z.enum(PHOTO_ORIENTATIONS),
+    legibility: z.enum(PHOTO_LEGIBILITY),
+    blurry: z.boolean(),
+    lighting: z.enum(PHOTO_LIGHTING),
+    notes: z.string()
+  }),
   reason: z.string()
 });
 // Esquema y prompt ANTERIORES a documentFunction. Solo para repetir sin gasto lecturas ya guardadas con ese contrato (la clave de caché incluye prompt y
 // esquema): `compat: "legacy"`. En producción nunca se usa.
-const legacySignalSchema = signalSchema.omit({ documentFunction: true, functionEvidence: true });
+const legacySignalSchema = signalSchema.omit({ documentFunction: true, functionEvidence: true, photoCondition: true });
+// Al modelo se le EXIGE photoCondition (esquema estricto), pero al leer su respuesta se acepta que falte: la foto queda "sin evaluar", que es el camino
+// conservador (no relaja nada), y una respuesta sin el campo no hace fallar el análisis.
+const signalReadSchema = signalSchema.extend({ photoCondition: signalSchema.shape.photoCondition.optional() });
 type ModelSignal = z.infer<typeof signalSchema>;
-// documentFunction y functionEvidence son obligatorios en lo que devuelve el modelo, pero opcionales en el tipo: las lecturas guardadas antes de existir
-// el campo y las simulaciones de prueba no los traen, y en ese caso se usa la comprobación por señales (derivationCues).
-export type RawSignal = Omit<ModelSignal, "documentFunction" | "functionEvidence"> & { documentFunction?: FunctionKind; functionEvidence?: string[] };
+// documentFunction, functionEvidence y photoCondition son obligatorios en lo que devuelve el modelo, pero opcionales en el tipo: las lecturas guardadas antes
+// de existir el campo y las simulaciones de prueba no los traen (sin photoCondition, la foto queda "sin evaluar" y nada se relaja por ella).
+export type RawSignal = Omit<ModelSignal, "documentFunction" | "functionEvidence" | "photoCondition"> & { documentFunction?: FunctionKind; functionEvidence?: string[]; photoCondition?: RawPhotoCondition };
 
 // La zona de estudios no puede acercarse al borde de la imagen sin verificación: 15/1000 = 1.5 %.
 export const EDGE_MARGIN = 15;
@@ -77,6 +89,14 @@ export function documentInstructions(variant: "A" | "B", options: { legacy?: boo
 ${(variant === "A" ? FUNCTION_DEFINITIONS : [...FUNCTION_DEFINITIONS].reverse()).join("\n")}
 - Una palabra suelta como 'derivación' no basta: decide por lo que el documento ES. Una muestra física visible (tubo, jeringa, frasco) junto al papel, o un texto que dice que la muestra ya se tomó y se envía a otro laboratorio, indican derivación de muestra. Una firma y sello de un médico que ordena estudios para un paciente indican solicitud médica.
 - functionEvidence: hasta 5 textos literales u objetos visibles que justifican tu clasificación.
+photoCondition: cómo se ve la FOTO (no el papel), mirando la zona relevante:
+- orientation: UPRIGHT si el texto se lee derecho; ROTATED_90 / ROTATED_180 / ROTATED_270 si hay que girar la foto en sentido horario esos grados
+  para leerlo derecho; UNCLEAR si no puedes saberlo.
+- legibility: GOOD si todas las letras, números y marcas de la zona se distinguen con seguridad; REDUCED si se leen pero con esfuerzo en algunas partes;
+  POOR si alguna parte de la zona no se puede leer con seguridad (borrosa, oscura, quemada por un reflejo, demasiado pequeña). Ante la duda, la peor.
+- blurry: true si la foto está desenfocada o movida en la zona relevante.
+- lighting: GOOD, DIM (poca luz u oscura), GLARE (reflejos o brillo que tapan texto) o UNEVEN (sombras o luz desigual).
+- notes: en una frase, qué parte se ve mal y por qué (vacío si todo se ve bien).
 `;
   const order = variant === "A" ? [...DOCUMENT_TYPES] : [...DOCUMENT_TYPES].reverse();
   return `
@@ -130,6 +150,10 @@ export function touchedEdges(region: Region): Edge[] {
 // Problemas que NUNCA se relajan: lo que el modelo no confirma, lo que enumera como cortado/oculto/ilegible y una caja inválida.
 // Única excepción: lo oculto por objetos que la verificación enfocada (dos lecturas) confirmó que solo tapa un guion, viñeta, margen o espacio
 // vacío. En ese caso la duda del modelo sobre la zona (studyRegionComplete=false) solo se perdona si él mismo la explicó con esos objetos.
+// La FOTO no deja leer con seguridad la zona de estudios (legibility POOR): se trata igual que escritura ilegible. Nunca se relaja.
+const photoIllegible = (raw: RawSignal): boolean => raw.photoCondition?.legibility === "POOR";
+const illegible = (raw: RawSignal): boolean => raw.erasedOrIllegible || photoIllegible(raw);
+
 export function hardProblems(raw: RawSignal, hiddenVerified = false): string[] {
   const problems: string[] = [];
   const explainedByHidden = hiddenVerified && raw.rowsHiddenByObjects.length > 0;
@@ -137,6 +161,7 @@ export function hardProblems(raw: RawSignal, hiddenVerified = false): string[] {
   for (const row of raw.rowsCutByImageEdge) problems.push(`cortado por el borde: ${row}`);
   if (!hiddenVerified) for (const row of raw.rowsHiddenByObjects) problems.push(`oculto por un objeto: ${row}`);
   if (raw.erasedOrIllegible) problems.push("hay trazos borrados o escritura ilegible en la zona de estudios");
+  if (photoIllegible(raw)) problems.push(`la foto no deja leer con seguridad la zona de estudios${raw.photoCondition!.notes.trim() ? ` (${raw.photoCondition!.notes.trim()})` : ""}`);
   if (!validRegion(raw.studyRegion)) problems.push("la caja de la zona de estudios es inválida");
   return problems;
 }
@@ -152,9 +177,9 @@ export function integrityKinds(raw: RawSignal, verifiedEdges: ReadonlySet<Edge> 
   if (raw.rowsCutByImageEdge.length > 0) kinds.push("CUT_EDGE");
   if (!hiddenVerified && raw.rowsHiddenByObjects.length > 0) kinds.push("HIDDEN");
   if (touchedEdges(raw.studyRegion).some((edge) => !verifiedEdges.has(edge))) kinds.push("EDGE_UNVERIFIED");
-  if (raw.erasedOrIllegible) kinds.push("ERASED");
+  if (illegible(raw)) kinds.push("ERASED");
   if (!validRegion(raw.studyRegion)) kinds.push("INVALID_BOX");
-  const explained = raw.rowsCutByImageEdge.length > 0 || raw.rowsHiddenByObjects.length > 0 || raw.erasedOrIllegible;
+  const explained = raw.rowsCutByImageEdge.length > 0 || raw.rowsHiddenByObjects.length > 0 || illegible(raw);
   if (!raw.studyRegionComplete && !explained) kinds.push("UNEXPLAINED_DOUBT");
   return kinds;
 }
@@ -378,6 +403,8 @@ export interface DocumentSignal {
   context?: DocumentContext;
   // Función del documento (solicitud médica, derivación de muestra...). Ausente si nada la puso en duda.
   function?: DocumentFunctionInfo;
+  // Cómo se ve la foto según las dos pasadas (orientación, legibilidad, desenfoque, luz). Ausente si alguna lectura no lo trae (sin evaluar).
+  photo?: PhotoCondition;
 }
 
 const union = (a: Region, b: Region): Region => ({ left: Math.min(a.left, b.left), top: Math.min(a.top, b.top), right: Math.max(a.right, b.right), bottom: Math.max(a.bottom, b.bottom) });
@@ -401,7 +428,8 @@ export function fuseSignals(a: RawSignal, b: RawSignal, verifiedEdges: ReadonlyS
       kinds: [...new Set([...integrityKinds(a, verifiedEdges, hiddenVerified), ...integrityKinds(b, verifiedEdges, hiddenVerified)])]
     },
     reasons: [a.reason, b.reason],
-    context: fuseContext(a.printedContext, b.printedContext)
+    context: fuseContext(a.printedContext, b.printedContext),
+    ...((photo) => (photo ? { photo } : {}))(fusePhotoCondition(a.photoCondition, b.photoCondition))
   };
 }
 
@@ -491,12 +519,12 @@ export async function readDocumentSignal(args: { imageBase64: string; mimeType: 
       model: resolved.model,
       imageBase64: args.imageBase64,
       config: { prompt: instructions, mimeType: args.mimeType, params: signalParams(resolved.model, resolved.reasoning, legacy) },
-      parse: (raw) => (legacy ? legacySignalSchema : signalSchema).parse(raw) as RawSignal,
+      parse: (raw) => (legacy ? legacySignalSchema : signalReadSchema).parse(raw) as RawSignal,
       call: async () => {
         called = true;
         const response = await resolved.complete({ instructions, variant, imageBase64: args.imageBase64, mimeType: args.mimeType, legacy });
         if (response.usage) usage.push(response.usage);
-        return { value: (legacy ? legacySignalSchema : signalSchema).parse(response.value) as RawSignal, usage: response.usage };
+        return { value: (legacy ? legacySignalSchema : signalReadSchema).parse(response.value) as RawSignal, usage: response.usage };
       }
     });
     if (called) calls++;
@@ -573,7 +601,7 @@ export async function readDocumentSignal(args: { imageBase64: string; mimeType: 
   // borrados ni caja inválida) y la duda de cada lectura sobre la zona está explicada por esos objetos. Cualquier fallo o duda mantiene el bloqueo.
   const hiddenList = [...new Map([...a.rowsHiddenByObjects, ...b.rowsHiddenByObjects].map((item) => [normalizeStudyKey(item), item])).values()];
   const explainable = (raw: RawSignal) =>
-    raw.rowsCutByImageEdge.length === 0 && !raw.erasedOrIllegible && validRegion(raw.studyRegion) && (raw.studyRegionComplete || raw.rowsHiddenByObjects.length > 0);
+    raw.rowsCutByImageEdge.length === 0 && !illegible(raw) && validRegion(raw.studyRegion) && (raw.studyRegionComplete || raw.rowsHiddenByObjects.length > 0);
   let hiddenVerified = false;
   const hiddenNotes: string[] = [];
   if (hiddenList.length > 0 && relevantType && explainable(a) && explainable(b) && resolved.verifyHidden) {

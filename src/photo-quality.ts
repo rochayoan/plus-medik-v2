@@ -120,6 +120,62 @@ export function readingHints(quality: PhotoQuality): string[] {
   return hints;
 }
 
+// ───────────────────────────── condiciones VISTAS en la imagen (señal del documento) ─────────────────────────────
+// Las dos pasadas de document-signal.ts (que ya miran la foto) informan cómo se ve: orientación del texto, legibilidad de la zona de estudios, desenfoque e
+// iluminación. Se fusionan de forma conservadora (lo peor de las dos) y sirven para: (1) avisar al juez, (2) no relajar dudas de certeza si la foto no se ve
+// bien y (3) con legibilidad POOR, tratar la zona como ilegible (revisión), igual que erasedOrIllegible.
+export const PHOTO_ORIENTATIONS = ["UPRIGHT", "ROTATED_90", "ROTATED_180", "ROTATED_270", "UNCLEAR"] as const;
+export const PHOTO_LEGIBILITY = ["GOOD", "REDUCED", "POOR"] as const;
+export const PHOTO_LIGHTING = ["GOOD", "DIM", "GLARE", "UNEVEN"] as const;
+
+export interface RawPhotoCondition {
+  orientation: (typeof PHOTO_ORIENTATIONS)[number];
+  legibility: (typeof PHOTO_LEGIBILITY)[number];
+  blurry: boolean;
+  lighting: (typeof PHOTO_LIGHTING)[number];
+  notes: string;
+}
+
+export interface PhotoCondition {
+  // Coinciden las dos pasadas; si no, UNCLEAR (salvo que ambas digan derecha).
+  orientation: RawPhotoCondition["orientation"];
+  // La peor de las dos.
+  legibility: RawPhotoCondition["legibility"];
+  blurry: boolean;
+  // Lo que informó cualquiera de las dos (vacío si las dos dicen buena luz).
+  lighting: Array<Exclude<RawPhotoCondition["lighting"], "GOOD">>;
+  // true solo si las DOS pasadas informaron y la foto se ve bien: derecha, legible, nítida y con buena luz.
+  clear: boolean;
+  notes: string[];
+}
+
+// Fusión conservadora. Si alguna pasada no trae la condición (lecturas anteriores al campo), la foto queda sin evaluar: undefined.
+export function fusePhotoCondition(a?: RawPhotoCondition, b?: RawPhotoCondition): PhotoCondition | undefined {
+  if (!a || !b) return undefined;
+  const rank = { GOOD: 0, REDUCED: 1, POOR: 2 } as const;
+  const legibility = rank[a.legibility] >= rank[b.legibility] ? a.legibility : b.legibility;
+  const orientation = a.orientation === b.orientation ? a.orientation : "UNCLEAR";
+  const lighting = [...new Set([a.lighting, b.lighting].filter((value): value is Exclude<RawPhotoCondition["lighting"], "GOOD"> => value !== "GOOD"))];
+  const blurry = a.blurry || b.blurry;
+  return {
+    orientation, legibility, blurry, lighting,
+    clear: orientation === "UPRIGHT" && legibility === "GOOD" && !blurry && lighting.length === 0,
+    notes: [a.notes, b.notes].map((note) => note.trim()).filter(Boolean)
+  };
+}
+
+// Avisos generales para el juez a partir de lo que se VIO en la foto. Vacío si se ve bien o no se evaluó.
+export function photoConditionHints(condition?: PhotoCondition): string[] {
+  if (!condition || condition.clear) return [];
+  const hints: string[] = [];
+  const degrees = { ROTATED_90: 90, ROTATED_180: 180, ROTATED_270: 270 } as Record<string, number>;
+  if (degrees[condition.orientation]) hints.push(`El texto de la foto se ve girado ${degrees[condition.orientation]}°: léelo en su orientación correcta y no omitas ni reordenes filas por la rotación.`);
+  else if (condition.orientation === "UNCLEAR") hints.push("La orientación del texto no es clara: revisa cada fila en su orientación correcta antes de decidir.");
+  if (condition.legibility !== "GOOD" || condition.blurry) hints.push("Partes de la foto se ven borrosas o poco legibles: si una letra, número o marca no se distingue con seguridad, no la completes ni la confirmes.");
+  if (condition.lighting.length > 0) hints.push("La iluminación no es buena (poca luz, reflejos o luz desigual): no confundas sombras o reflejos con marcas o letras.");
+  return hints;
+}
+
 // El bloque de avisos que se agrega al final de un prompt (vacío si no hay avisos).
 export function hintsBlock(hints: readonly string[]): string {
   return hints.length === 0 ? "" : `\nCondiciones de esta foto (detectadas en el archivo, sin cambiar la imagen):\n${hints.map((hint) => `- ${hint}`).join("\n")}\n`;

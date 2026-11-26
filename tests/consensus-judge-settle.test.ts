@@ -91,7 +91,7 @@ describe("analyzeImage: el juez no se llama si la única duda era de certeza con
       readGemini: vi.fn(async () => reading([{ literalText: "Prolactina", lineText: "Prolactina" }])),
       readOpenAI: vi.fn(async () => reading([{ literalText: "Prolactina", lineText: "Prolactina", confidence: "medium" }])),
       judge,
-      readDocument: vi.fn(async () => ({ signal: { documentType: "TEXT_EXPLICIT_REQUEST" as const, completeDocumentVisible: true, agreement: true, integrity: { problems: [], irrelevantCrops: [] }, reasons: ["", ""] as [string, string] } })) as AnalyzeDeps["readDocument"],
+      readDocument: vi.fn(async () => ({ signal: { documentType: "TEXT_EXPLICIT_REQUEST" as const, completeDocumentVisible: true, agreement: true, integrity: { problems: [], irrelevantCrops: [] }, reasons: ["", ""] as [string, string], photo: { orientation: "UPRIGHT" as const, legibility: "GOOD" as const, blurry: false, lighting: [], clear: true, notes: [] } } })) as AnalyzeDeps["readDocument"],
       resolveSemantic: vi.fn(async () => ({ items: [], model: "m", reasoning: "r", calledModel: false, cacheHit: true, usage: [], candidatesSentToModel: 0 })) as unknown as AnalyzeDeps["resolveSemantic"],
       shadowMatch: vi.fn()
     };

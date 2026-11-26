@@ -5,7 +5,7 @@ import { buildSimpleConsensus, isTruncationOf, normalizeStudyKey, normalizeVisib
 import { collapseExplicitPackages, droppedLineItemDetails, inheritAnalyteFromLine, heldPackageGroups, lineKeyOf, lineServiceGap, lineIsotopeReadersDisagree, reliableLineText, splitGroupedStudies, withoutSelectionX } from "./line-groups.js";
 import { activeCatalog, GENERIC_PROFILE_WORDS, identityTokens, isPackageComponent, qualifiersOf, shadowMatch, type Outcome, type ShadowBatch, type ShadowQuery, type Support } from "./catalog-shadow.js";
 import type { AiUsage } from "./cache.js";
-import { photoQualityOf, readingHints, type PhotoQuality } from "./photo-quality.js";
+import { photoConditionHints, photoQualityOf, readingHints, type PhotoCondition, type PhotoQuality } from "./photo-quality.js";
 import { readDocumentSignal, type DocumentSignal } from "./document-signal.js";
 import type { DocumentFunctionInfo } from "./document-function.js";
 import { judgeDisputesWithOpenAI, type ResolvedStudy, type SimpleJudgement } from "./judge.js";
@@ -172,6 +172,8 @@ export interface DocumentGate {
   function?: DocumentFunctionInfo;
   // Contexto impreso que se entregó al resolvedor semántico (solo lo que ambas lecturas coincidieron en ver).
   context?: { lines: string[]; muestra?: string; tiempo?: string; conflicts: string[] };
+  // Cómo se ve la foto según la señal del documento (orientación, legibilidad, desenfoque, luz). Ausente: sin evaluar.
+  photo?: PhotoCondition;
 }
 
 export interface AnalysisResult {
@@ -932,13 +934,18 @@ export async function analyzeImage(
     edgeNotes: signal.integrity.edgeNotes,
     hiddenVerified: signal.integrity.hiddenVerified,
     hiddenNotes: signal.integrity.hiddenNotes,
-    context: signal.context && { lines: signal.context.lines, muestra: signal.context.muestra, tiempo: signal.context.tiempo, conflicts: signal.context.conflicts }
+    context: signal.context && { lines: signal.context.lines, muestra: signal.context.muestra, tiempo: signal.context.tiempo, conflicts: signal.context.conflicts },
+    ...(signal.photo ? { photo: signal.photo } : {})
   };
 
-  // Las disputas de pura certeza con el mismo texto en la misma línea se dan por acordadas antes de llamar al juez (settleCertaintyDisputes).
-  const consensus = settleCertaintyDisputes(buildSimpleConsensus(gemini, openai));
+  // Las disputas de pura certeza con el mismo texto en la misma línea se dan por acordadas antes de llamar al juez (settleCertaintyDisputes), pero SOLO si la
+  // señal del documento vio la foto clara (derecha, legible, nítida, buena luz). Con una foto difícil o sin evaluar, esas dudas las sigue mirando el juez.
+  const built = buildSimpleConsensus(gemini, openai);
+  const consensus = signal.photo?.clear ? settleCertaintyDisputes(built) : built;
+  // El juez recibe los avisos de los metadatos y los de lo que la señal VIO en la foto (sin repetir).
+  const judgeHints = [...new Set([...hints, ...photoConditionHints(signal.photo)])];
   const judgement: SimpleJudgement = consensus.hasDisputes
-    ? await deps.judge({ imageBase64, mimeType, gemini, openai, disputes: consensus.disputes, ...(hints.length > 0 ? { hints } : {}) })
+    ? await deps.judge({ imageBase64, mimeType, gemini, openai, disputes: consensus.disputes, ...(judgeHints.length > 0 ? { hints: judgeHints } : {}) })
     : { resolvedStudies: [], unresolvedDisputes: [] };
 
   // Ensamblado final. Con el AUTO parcial, si hay zonas que no se ven y estudios que dependen de comprobar que no los afectan, se verifica el
