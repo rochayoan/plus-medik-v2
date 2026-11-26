@@ -96,6 +96,10 @@ describe("explicitStudyList: cuándo un texto con separadores es una lista de es
     const sodioOrina = study("na-o", "SODIO EN ORINA", [], "URIANALISIS");
     expect(explicitStudyList("Sodio/FSH", [...catalog, sodio, sodioOrina])).toBeUndefined();
   });
+  it("si un paquete del catálogo cubre los estudios listados, no se decide aquí (paquete o suma: lo decide el laboratorio)", () => {
+    const pkg = study("fsh-lh", "PERFIL GONADOTROFINAS (FSH, LH)", [], "HORMONAS");
+    expect(explicitStudyList("FSH/LH", [...catalog, pkg])).toBeUndefined();
+  });
   it("un estudio inactivo no cuenta", () => {
     expect(explicitStudyList("FSH/LH vieja", catalog)).toBeUndefined();
   });

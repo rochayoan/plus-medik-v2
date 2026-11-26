@@ -626,6 +626,9 @@ export function explicitStudyList(text: string, fullCatalog: CatalogStudy[], con
     listed.push({ study, fragment });
   }
   for (let i = 0; i < listed.length; i++) for (let j = i + 1; j < listed.length; j++) if (mayBeSameExam(listed[i]!, listed[j]!)) return undefined;
+  // 6. Ningún paquete del catálogo cubre esos estudios: la lista podría ser ese paquete escrito por partes, y el precio (paquete o suma) lo decide el
+  //    laboratorio (unresolvedPackageGroups). Entonces no se decide aquí: la decisión del modelo sigue su curso y las protecciones de siempre la retienen.
+  if (unresolvedPackageGroups(listed.map((entry) => entry.study), fullCatalog).length > 0) return undefined;
   return listed;
 }
 
