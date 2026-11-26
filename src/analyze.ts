@@ -2,8 +2,8 @@ import { readImageWithGemini, readImageWithOpenAI, type SimpleReading } from "./
 import { ExactAliasCatalogResolver, uniqueMatchedStudies } from "./catalog.js";
 import { askGroupFor, decideFromReading, mentionsOtherSample, typoSuggestions } from "./study-choice.js";
 import { buildSimpleConsensus, isTruncationOf, normalizeStudyKey, normalizeVisibleKey, sameVisibleText, type SimpleConsensus, type SimpleStudy } from "./consensus.js";
-import { collapseExplicitPackages, droppedLineItemDetails, inheritAnalyteFromLine, heldPackageGroups, lineServiceGap, lineIsotopeReadersDisagree, reliableLineText, withoutSelectionX } from "./line-groups.js";
-import { activeCatalog, GENERIC_PROFILE_WORDS, identityTokens, isPackageComponent, qualifiersOf, shadowMatch, type Outcome, type ShadowBatch, type Support } from "./catalog-shadow.js";
+import { collapseExplicitPackages, droppedLineItemDetails, inheritAnalyteFromLine, heldPackageGroups, lineKeyOf, lineServiceGap, lineIsotopeReadersDisagree, reliableLineText, withoutSelectionX } from "./line-groups.js";
+import { activeCatalog, GENERIC_PROFILE_WORDS, identityTokens, isPackageComponent, qualifiersOf, shadowMatch, type Outcome, type ShadowBatch, type ShadowQuery, type Support } from "./catalog-shadow.js";
 import type { AiUsage } from "./cache.js";
 import { readDocumentSignal, type DocumentSignal } from "./document-signal.js";
 import type { DocumentFunctionInfo } from "./document-function.js";
@@ -480,6 +480,30 @@ export function judgeResolvedConfidence(resolved: ResolvedStudy, consensus: Simp
 }
 
 export function finalVisualStudiesOf(consensus: SimpleConsensus, judgement: SimpleJudgement, catalog?: CatalogStudy[]): FinalVisualStudy[] {
+  const all = visualCandidatesOf(consensus, judgement);
+  // Una selección visual, un estudio: el mismo texto (ignorando espaciado y puntuación) no se cuenta dos veces.
+  const kept: FinalVisualStudy[] = [];
+  for (const study of catalog ? inheritAnalyteFromLine(all) : all) if (!kept.some((other) => sameVisibleText(other.literalText, study.literalText))) kept.push(study);
+  // Con el catálogo, las líneas que son un paquete aprobado se reconstruyen (o quedan pendientes si no se puede sin ambigüedad).
+  return catalog ? collapseExplicitPackages(kept, catalog) : kept;
+}
+
+// Las consultas al resolvedor semántico: un texto por estudio final (como siempre) y, como CONTEXTO, su línea de la receta solo si es inequívoca.
+// Un mismo texto puede leerse en varias líneas («HAI» en «HAI Chagas» y en «HAI Toxo») y la lista final conserva uno solo: la línea se envía
+// únicamente si TODAS las apariciones de ese texto (antes de quitar duplicados) traen línea fiable y es la MISMA. Si no, va sin línea, como antes.
+export function semanticQueriesOf(finals: FinalVisualStudy[], candidates: FinalVisualStudy[]): ShadowQuery[] {
+  const queries: ShadowQuery[] = [];
+  for (const literalText of new Set(finals.map((visual) => visual.literalText))) {
+    const appearances = [...finals, ...candidates].filter((visual) => sameVisibleText(visual.literalText, literalText));
+    const lines = new Set(appearances.map((visual) => (visual.lineText ? lineKeyOf(visual.lineText) : "")));
+    const line = lines.size === 1 && !lines.has("") ? appearances[0]!.lineText : undefined;
+    queries.push(line ? { literalText, lineText: line } : { literalText });
+  }
+  return queries;
+}
+
+// Los estudios visuales antes de reconstruir y quitar duplicados: acordados (con sus dos lecturas) y confirmados por el juez.
+export function visualCandidatesOf(consensus: SimpleConsensus, judgement: SimpleJudgement): FinalVisualStudy[] {
   const pairOf = (study: SimpleStudy) => consensus.agreedPairs?.find((candidate) => candidate.a === study);
   const withLine = <T extends SimpleStudy>(study: T, a?: SimpleStudy, b?: SimpleStudy): T & { lineText?: string; lineVariantMismatch?: boolean } => {
     const lineText = reliableLineText(a, b);
@@ -491,7 +515,7 @@ export function finalVisualStudiesOf(consensus: SimpleConsensus, judgement: Simp
       ...(lineVariantMismatch ? { lineVariantMismatch: true } : {})
     } as T & { lineText?: string; lineVariantMismatch?: boolean };
   };
-  const all = [
+  return [
     ...consensus.agreedStudies.map((study) => {
       const pair = pairOf(study);
       return { ...withLine(study, pair?.a, pair?.b), ...(pair ? { readerPairs: [{ a: pair.a.literalText, b: pair.b.literalText }] } : {}), source: "agreed" as const };
@@ -504,11 +528,6 @@ export function finalVisualStudiesOf(consensus: SimpleConsensus, judgement: Simp
         return { ...withLine(resolved.study, dispute?.readerA.requested, dispute?.readerB.requested), ...seenBy, ...judgeResolvedConfidence(resolved, consensus), source: "judge_confirmed" as const };
       })
   ];
-  // Una selección visual, un estudio: el mismo texto (ignorando espaciado y puntuación) no se cuenta dos veces.
-  const kept: FinalVisualStudy[] = [];
-  for (const study of catalog ? inheritAnalyteFromLine(all) : all) if (!kept.some((other) => sameVisibleText(other.literalText, study.literalText))) kept.push(study);
-  // Con el catálogo, las líneas que son un paquete aprobado se reconstruyen (o quedan pendientes si no se puede sin ambigüedad).
-  return catalog ? collapseExplicitPackages(kept, catalog) : kept;
 }
 
 // Estudios finales cuyo texto es un comienzo truncado de OTRO estudio final ("NITROGENO UREICO" frente a "NITROGENO UREICO/UREA/NUS").
@@ -902,11 +921,12 @@ export async function analyzeImage(
   if (primaryEnabled) {
     // Capa semántica principal: TODOS los estudios visuales finales pasan por GPT (catálogo activo completo, dos pasadas, verificador).
     // Cualquier fallo no autoriza AUTO: el resultado queda con semantic_unavailable y HUMAN_REVIEW.
-    const literalTexts = [...new Set(finalVisualStudiesOf(consensus, judgement, catalog).map((visual) => visual.literalText))];
+    // Cada texto lleva su línea de la receta como contexto solo si es inequívoca (semanticQueriesOf); el resultado se sigue buscando por el texto.
+    const queries = semanticQueriesOf(finalVisualStudiesOf(consensus, judgement, catalog), visualCandidatesOf(consensus, judgement));
     let primary: SemanticPrimaryInput;
     try {
       if (activeCatalog(catalog).length === 0) throw new Error("el catálogo activo está vacío");
-      const batch = await deps.shadowMatch({ queries: literalTexts.map((literalText) => ({ literalText })), catalog, context: signal.context });
+      const batch = await deps.shadowMatch({ queries, catalog, context: signal.context });
       primary = { batch };
     } catch (error) {
       primary = { error: error instanceof Error ? error.message : String(error) };
