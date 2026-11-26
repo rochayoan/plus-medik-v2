@@ -138,10 +138,10 @@ const subset = (a: Set<string>, b: Set<string>) => [...a].every((value) => b.has
 const intersects = (a: Set<string>, b: Set<string>) => [...a].some((value) => b.has(value));
 
 // Contenido del nombre sin conectores y con plural simplificado; incluye calificadores.
-const contentTokens = (text: string): string[] => identityTokens(text).filter((token) => !CONNECTORS.has(token)).map(stem);
+export const contentTokens = (text: string): string[] => identityTokens(text).filter((token) => !CONNECTORS.has(token)).map(stem);
 
 // Las listas de componentes entre paréntesis ("(HIERRO, FERRITINA, ...)", "(sodio, potasio, cloro)") no son el analito del estudio.
-const withoutComponentLists = (name: string) => name.replace(/\([^()]*[,/][^()]*\)/g, " ");
+export const withoutComponentLists = (name: string) => name.replace(/\([^()]*[,/][^()]*\)/g, " ");
 
 // Un rival de familia debe ser un estudio simple: no un perfil, panel, combo, curva ni una lista larga de analitos.
 function isSingleAnalyte(study: CatalogStudy): boolean {

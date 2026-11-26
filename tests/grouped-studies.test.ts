@@ -64,18 +64,30 @@ describe("splitGroupedStudies: cuándo se separa un texto con varios estudios", 
     expect(split("Glucosa y insulina post prandial").map((row) => row.literalText)).toEqual(["Glucosa", "insulina post prandial"]);
     expect(split("Glucosa y insulina postpandrial")[0]!.lineProblem).toBeDefined();
   });
-  it("si cada parte lleva su indicación, nada queda dudoso", () => {
-    const rows = split("Glucosa post carga e insulina postprandial");
-    expect(rows.map((row) => row.literalText)).toEqual(["Glucosa post carga", "insulina postprandial"]);
-    expect(rows.some((row) => row.lineProblem)).toBe(false);
+  it("si cada parte lleva su propia indicación no hay nada dudoso: no se separa (el compuesto del catálogo lo resuelve, como antes)", () => {
+    expect(split("Glucosa post carga e insulina postprandial")).toHaveLength(1);
   });
   it("una parte con una indicación que el catálogo no tiene («Glucosa basal»): ante la duda, no se separa", () => {
     expect(split("Glucosa basal e insulina postprandial")).toHaveLength(1);
   });
-  it("una parte sin versión con esa indicación no queda dudosa («TSH e insulina postprandial»)", () => {
-    const rows = split("TSH e insulina postprandial");
-    expect(rows.map((row) => row.literalText)).toEqual(["TSH", "insulina postprandial"]);
-    expect(rows.some((row) => row.lineProblem)).toBe(false);
+  it("una parte sin versión con esa indicación no queda dudosa ni se separa («TSH e insulina postprandial»)", () => {
+    expect(split("TSH e insulina postprandial")).toHaveLength(1);
+  });
+  it("sin lista fija: una indicación nueva del catálogo se reconoce sola («Cortisol y ACTH matutino»)", () => {
+    const extra = [study("cort", "CORTISOL", "HORMONAS"), study("cort-am", "CORTISOL MATUTINO", "HORMONAS"), study("acth", "ACTH", "HORMONAS"), study("acth-am", "ACTH MATUTINO", "HORMONAS")];
+    const rows = splitGroupedStudies([visual("Cortisol y ACTH matutino")], [...catalog, ...extra]);
+    expect(rows.map((row) => row.literalText)).toEqual(["Cortisol", "ACTH matutino"]);
+    expect(rows[0]!.lineProblem).toContain("matutino");
+  });
+  it("la errata del catálogo se reconoce por parecido, no por una regla escrita para ella", () => {
+    const typoCatalog = [study("x", "CREATININA"), study("x-pp", "CREATININA NOCTRUNA"), study("y", "UREA"), study("y-pp", "UREA NOCTURNA")];
+    const rows = splitGroupedStudies([visual("Creatinina y urea nocturna")], typoCatalog);
+    expect(rows.map((row) => row.literalText)).toEqual(["Creatinina", "urea nocturna"]);
+    expect(rows[0]!.lineProblem).toContain("nocturna");
+  });
+  it("componentes entre paréntesis de un perfil no cuentan como versión («Sodio y potasio» con IONOGRAMA (SODIO, POTASIO, CLORO))", () => {
+    const withPanel = [...catalog, study("iono", "IONOGRAMA 1 (SODIO, POTASIO, CLORO)")];
+    expect(splitGroupedStudies([visual("Sodio y potasio")], withPanel)).toHaveLength(1);
   });
   it("una muestra al final tampoco se extiende: «Sodio y potasio en orina» deja el sodio pendiente", () => {
     const rows = split("Sodio y potasio en orina");
