@@ -179,6 +179,8 @@ export interface AnalysisResult {
   document?: DocumentGate;
   finalVisualStudies: FinalVisualStudy[];
   disputes: Array<{ key: string; reason: string }>;
+  // Disputas de pura certeza que se acordaron sin juez (mismo texto, misma línea): auditoría.
+  certaintySettled?: Array<{ key: string; note: string }>;
   judgeResolved: Array<{ key: string; verdict: "confirmed" | "rejected"; reason: string }>;
   unresolvedDisputes: Array<{ key: string; reason: string }>;
   matches: StudyMatch[];
@@ -468,17 +470,45 @@ export function judgeResolvedConfidence(resolved: ResolvedStudy, consensus: Simp
   const a = dispute.readerA.requested;
   const b = dispute.readerB.requested;
   if (!a || !b) return {};
-  const rank = { low: 1, medium: 2, high: 3 } as const;
-  const weakest = rank[a.confidence] <= rank[b.confidence] ? a.confidence : b.confidence;
-  const unrelated = dispute.readerA.uncertain.length === 0 && dispute.readerB.uncertain.length === 0 && sameVariants(a.literalText, b.literalText);
-  // Una duda de certeza sobre un estudio cuyo texto lleva una variante clínicamente decisiva (isotipo IgG/IgM, libre/total, cuali/cuantitativo,
-  // población) puede ser justamente esa variante: el juez no la resuelve por certeza, queda la lectura más débil. Tampoco si los dos textos
-  // no son la MISMA transcripción visible.
-  const decisive = Object.entries(qualifiersOf(identityTokens(`${a.literalText} ${b.literalText}`))).some(([dim, values]) => (["isotipo", "libreTotal", "cuantificacion", "poblacion"] as string[]).includes(dim) && values.size > 0);
-  if (unrelated && !decisive && sameVisibleText(a.literalText, b.literalText) && weakest !== "low" && (a.confidence === "high" || b.confidence === "high")) {
+  if (certaintyOnlyDoubt(dispute)) {
     return { confidence: "high", confidenceNote: `certeza ${a.confidence}/${b.confidence} de los lectores resuelta por el juez (confirmado viendo la imagen)` };
   }
-  return { confidence: weakest };
+  const rank = { low: 1, medium: 2, high: 3 } as const;
+  return { confidence: rank[a.confidence] <= rank[b.confidence] ? a.confidence : b.confidence };
+}
+
+// ¿La disputa es SOLO de certeza autodeclarada? Los dos lectores transcribieron el mismo texto visible, sin incertidumbres relacionadas, con las mismas
+// variantes, ninguno con certeza baja y al menos uno con certeza alta. Una duda sobre un texto con una variante clínicamente decisiva (isotipo IgG/IgM,
+// libre/total, cuali/cuantitativo, población) puede ser justamente esa variante: nunca es «solo de certeza».
+function certaintyOnlyDoubt(dispute: SimpleConsensus["disputes"][number]): boolean {
+  const a = dispute.readerA.requested;
+  const b = dispute.readerB.requested;
+  if (dispute.reason !== "not_high_confidence_in_both" || !a || !b) return false;
+  const unrelated = dispute.readerA.uncertain.length === 0 && dispute.readerB.uncertain.length === 0 && sameVariants(a.literalText, b.literalText);
+  const decisive = Object.entries(qualifiersOf(identityTokens(`${a.literalText} ${b.literalText}`))).some(([dim, values]) => (["isotipo", "libreTotal", "cuantificacion", "poblacion"] as string[]).includes(dim) && values.size > 0);
+  return unrelated && !decisive && sameVisibleText(a.literalText, b.literalText) && a.confidence !== "low" && b.confidence !== "low" && (a.confidence === "high" || b.confidence === "high");
+}
+
+// Disputas de pura certeza (certaintyOnlyDoubt) que se dan por acordadas SIN juez cuando, además, las dos lecturas ubican el estudio en la MISMA línea
+// (lineText fiable: ambas la dan y coincide). Es la misma condición con la que el juez ya las resolvía, más la línea como segunda comprobación independiente;
+// ahorra la llamada y la duda. Cualquier otra disputa sigue al juez. El estudio entra con el texto del lector A y certeza alta, y queda registrado en `settled`.
+// Las dos lecturas originales (con su certeza) quedan en agreedPairs: los controles que exigen certeza alta en AMBOS lectores (manuscrito en sombra) siguen viéndolas.
+export function settleCertaintyDisputes(consensus: SimpleConsensus): SimpleConsensus {
+  const settled: Array<{ key: string; note: string }> = [];
+  const agreedStudies = [...consensus.agreedStudies];
+  const agreedPairs = [...(consensus.agreedPairs ?? [])];
+  const disputes = consensus.disputes.filter((dispute) => {
+    const a = dispute.readerA.requested;
+    const b = dispute.readerB.requested;
+    if (!a || !b || !certaintyOnlyDoubt(dispute) || !reliableLineText(a, b)) return true;
+    const study = { ...a, confidence: "high" as const };
+    agreedStudies.push(study);
+    agreedPairs.push({ a: study, b });
+    settled.push({ key: dispute.key, note: `certeza ${a.confidence}/${b.confidence}: los dos lectores leyeron el mismo texto en la misma línea («${a.lineText}»); acordado sin juez` });
+    return false;
+  });
+  if (settled.length === 0) return consensus;
+  return { ...consensus, agreedStudies, agreedPairs, disputes, hasDisputes: disputes.length > 0, settled: [...(consensus.settled ?? []), ...settled] };
 }
 
 export function finalVisualStudiesOf(consensus: SimpleConsensus, judgement: SimpleJudgement, catalog?: CatalogStudy[]): FinalVisualStudy[] {
@@ -802,6 +832,7 @@ export function assembleAnalysis(args: {
     reasons,
     finalVisualStudies,
     disputes: consensus.disputes.map((dispute) => ({ key: dispute.key, reason: dispute.reason })),
+    ...(consensus.settled?.length ? { certaintySettled: consensus.settled } : {}),
     judgeResolved: judgement.resolvedStudies.map((resolved) => ({
       key: resolved.key,
       verdict: resolved.verdict,
@@ -897,7 +928,8 @@ export async function analyzeImage(
     context: signal.context && { lines: signal.context.lines, muestra: signal.context.muestra, tiempo: signal.context.tiempo, conflicts: signal.context.conflicts }
   };
 
-  const consensus = buildSimpleConsensus(gemini, openai);
+  // Las disputas de pura certeza con el mismo texto en la misma línea se dan por acordadas antes de llamar al juez (settleCertaintyDisputes).
+  const consensus = settleCertaintyDisputes(buildSimpleConsensus(gemini, openai));
   const judgement: SimpleJudgement = consensus.hasDisputes
     ? await deps.judge({ imageBase64, mimeType, gemini, openai, disputes: consensus.disputes })
     : { resolvedStudies: [], unresolvedDisputes: [] };
