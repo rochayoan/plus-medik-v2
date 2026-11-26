@@ -2,7 +2,7 @@ import { readImageWithGemini, readImageWithOpenAI, type SimpleReading } from "./
 import { ExactAliasCatalogResolver, uniqueMatchedStudies } from "./catalog.js";
 import { askGroupFor, decideFromReading, mentionsOtherSample, typoSuggestions } from "./study-choice.js";
 import { buildSimpleConsensus, isTruncationOf, normalizeStudyKey, normalizeVisibleKey, sameVisibleText, type SimpleConsensus, type SimpleStudy } from "./consensus.js";
-import { collapseExplicitPackages, droppedLineItemDetails, inheritAnalyteFromLine, heldPackageGroups, lineKeyOf, lineServiceGap, lineIsotopeReadersDisagree, reliableLineText, withoutSelectionX } from "./line-groups.js";
+import { collapseExplicitPackages, droppedLineItemDetails, inheritAnalyteFromLine, heldPackageGroups, lineKeyOf, lineServiceGap, lineIsotopeReadersDisagree, reliableLineText, splitGroupedStudies, withoutSelectionX } from "./line-groups.js";
 import { activeCatalog, GENERIC_PROFILE_WORDS, identityTokens, isPackageComponent, qualifiersOf, shadowMatch, type Outcome, type ShadowBatch, type ShadowQuery, type Support } from "./catalog-shadow.js";
 import type { AiUsage } from "./cache.js";
 import { readDocumentSignal, type DocumentSignal } from "./document-signal.js";
@@ -35,6 +35,8 @@ export interface FinalVisualStudy extends SimpleStudy {
   collapsedFrom?: string[];
   // Si el texto era solo una variante ("IgG") y heredó el analito de otra fila de su misma línea: el texto original.
   inheritedFrom?: string;
+  // Si el lector devolvió varios estudios en un solo texto («Glucosa e insulina postprandial») y se separaron (line-groups.ts): el texto original.
+  splitFrom?: string;
   // Las lecturas ORIGINALES de los dos lectores (texto literal de cada uno) de cada fila que aporta este estudio: una pareja si es una fila, varias si
   // varias filas se reunieron en un paquete. Sobrevive a la reconstrucción (herencia de analito, paquete) para comprobar siempre lo que cada modelo leyó.
   readerPairs?: Array<{ a: string; b: string }>;
@@ -483,7 +485,7 @@ export function finalVisualStudiesOf(consensus: SimpleConsensus, judgement: Simp
   const all = visualCandidatesOf(consensus, judgement);
   // Una selección visual, un estudio: el mismo texto (ignorando espaciado y puntuación) no se cuenta dos veces.
   const kept: FinalVisualStudy[] = [];
-  for (const study of catalog ? inheritAnalyteFromLine(all) : all) if (!kept.some((other) => sameVisibleText(other.literalText, study.literalText))) kept.push(study);
+  for (const study of catalog ? splitGroupedStudies(inheritAnalyteFromLine(all), catalog) : all) if (!kept.some((other) => sameVisibleText(other.literalText, study.literalText))) kept.push(study);
   // Con el catálogo, las líneas que son un paquete aprobado se reconstruyen (o quedan pendientes si no se puede sin ambigüedad).
   return catalog ? collapseExplicitPackages(kept, catalog) : kept;
 }

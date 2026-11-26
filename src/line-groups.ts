@@ -178,6 +178,56 @@ export function collapseExplicitPackages(studies: FinalVisualStudy[], catalog: C
   });
 }
 
+// ───────────────────────────── estudios agrupados en un mismo texto («Glucosa e insulina postprandial») ─────────────────────────────
+// Un lector puede devolver como UN estudio un texto que nombra VARIOS unidos por "y", "e" o comas. Se separa en un estudio por parte, con el texto
+// EXACTO de cada parte (nada se completa ni se agrega), solo si TODO esto se cumple; si no, el estudio queda como estaba:
+//  1. Hay al menos dos partes y cada una nombra algo por sí misma: tiene una palabra de 3 o más letras que no es una variante (IgG, total, orina...),
+//     ni un servicio (ATB). «Herpes 1 y 2», «IgG e IgM», «Urocultivo y ATB» o «Electrolitos (Na, K y Cl)» no se separan.
+//  2. El texto completo no es el nombre o alias aprobado de un estudio, ni hay un estudio activo que nombre todas sus palabras: «Proteínas totales y
+//     fraccionadas» o «Bilirrubina total y directa» son UN estudio.
+//  3. Cada parte nombra algún estudio activo del catálogo (todas sus palabras están en su nombre o en un alias aprobado).
+//  4. La última parte lleva una indicación o un calificador que alguna parte anterior no lleva (si no, el compuesto del catálogo ya basta).
+// INDICACIONES (postprandial, post carga, basal, ayunas) y calificadores (muestra, tiempo, isotipo...): quedan en la parte donde están escritos. Si una parte anterior no lleva indicación y el catálogo
+// tiene una versión suya con la indicación de la última parte (GLUCOSA y GLUCOSA POSTPANDRIAL), no se sabe si la indicación también le aplica: esa parte
+// queda PENDIENTE (lineProblem) sin elegir versión; las demás siguen su curso.
+const GROUP_SPLIT = /\s*[,;]\s*|\s+(?:y|e)\s+/i;
+const GROUP_CONNECTORS = new Set(["de", "del", "la", "las", "el", "los", "en", "con", "por", "para", "a", "al"]);
+const INDICATIONS = new Set(["postprandial", "postcarga", "basal", "ayunas"]);
+
+// Palabras de un texto con las indicaciones escritas de una sola forma ("post pandrial", "postprandiales" → postprandial; "post carga" → postcarga).
+function groupTokens(text: string): string[] {
+  const joined = identityTokens(text).join(" ")
+    .replace(/\bpost ?(?:prandial|pandrial)(?:es)?\b/g, "postprandial")
+    .replace(/\bpost ?cargas?\b/g, "postcarga")
+    .replace(/\bayunos?\b/g, "ayunas")
+    .replace(/\bbasales\b/g, "basal");
+  return joined.split(" ").filter((token) => token !== "" && !GROUP_CONNECTORS.has(token)).map((token) => (token.length > 4 && token.endsWith("s") && !INDICATIONS.has(token) ? token.slice(0, -1) : token));
+}
+
+export function splitGroupedStudies(studies: FinalVisualStudy[], catalog: CatalogStudy[]): FinalVisualStudy[] {
+  const active = catalog.filter((study) => study.active).map((study) => ({ study, tokens: new Set([study.name, ...study.normalizedAliases].flatMap(groupTokens)) }));
+  const named = (tokens: string[]) => tokens.length > 0 && active.some((entry) => tokens.every((token) => entry.tokens.has(token)));
+  return studies.flatMap((study) => {
+    const parts = study.literalText.split(GROUP_SPLIT).map((part) => part.trim()).filter(Boolean);
+    if (parts.length < 2) return [study];
+    if (parts.some((part) => isQualifierOnly(part) || !groupTokens(part).some((token) => /[a-z]{3,}/.test(token) && !isQualifierOnly(token)))) return [study];
+    if (approvedPackage(study.literalText, catalog) || named(groupTokens(study.literalText))) return [study];
+    if (!parts.every((part) => named(groupTokens(part)))) return [study];
+    // Solo hace falta separar cuando la última parte lleva una indicación o un calificador (postprandial, basal, orina, 24 h, IgM...) que alguna parte
+    // anterior no lleva: ahí el compuesto podría perderla o extenderla. Sin eso («Glucosa e insulina»), el resolvedor del catálogo ya separa los componentes.
+    const trailing = [...new Set(groupTokens(parts[parts.length - 1]!).filter((token) => INDICATIONS.has(token) || isQualifierOnly(token)))];
+    if (trailing.length === 0 || parts.slice(0, -1).every((part) => trailing.every((token) => groupTokens(part).includes(token)))) return [study];
+    return parts.map((part, index) => {
+      const own = groupTokens(part);
+      const unclear = index < parts.length - 1 ? trailing.filter((token) => !own.includes(token) && named([...own, token])) : [];
+      const row: FinalVisualStudy = { ...study, literalText: part, normalizedName: part, lineText: study.lineText ?? study.literalText, splitFrom: study.literalText };
+      return unclear.length > 0
+        ? { ...row, lineProblem: `«${study.literalText}»: no está claro si «${unclear.join(", ")}» también aplica a «${part}» (el catálogo tiene las dos versiones); queda pendiente sin elegir versión` }
+        : row;
+    });
+  });
+}
+
 // Servicios que la línea pide (antibiograma/ATB) y que ni el texto del estudio ni el estudio elegido cubren.
 export function lineServiceGap(source: FinalVisualStudy, chosen: CatalogStudy[]): string[] {
   if (!source.lineText) return [];
