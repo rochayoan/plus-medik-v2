@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { SimpleReading } from "./ai.js";
 import { cachedAiCall, usageFromResponses } from "./cache.js";
 import type { SimpleDispute, SimpleStudy } from "./consensus.js";
+import { hintsBlock } from "./photo-quality.js";
 
 const decisionSchema = z.object({
   key: z.string(),
@@ -64,6 +65,8 @@ export async function judgeDisputesWithOpenAI(args: {
   disputes: SimpleDispute[];
   model?: string;
   apiKey?: string;
+  // Avisos generales de la foto (girada, en espejo, poca resolución) leídos de sus metadatos: photo-quality.ts. Sin avisos, el prompt es el de siempre.
+  hints?: readonly string[];
 }): Promise<SimpleJudgement> {
   const { imageBase64, mimeType, gemini, openai, disputes } = args;
   if (disputes.length === 0) return { resolvedStudies: [], unresolvedDisputes: [] };
@@ -74,7 +77,7 @@ export async function judgeDisputesWithOpenAI(args: {
 
   const client = new OpenAI({ apiKey });
   const { $schema: _ignored, ...schema } = z.toJSONSchema(decisionsSchema);
-  const promptText = `${judgeInstructions}\nLectura readerA (Gemini):\n${JSON.stringify(gemini)}\n\n` +
+  const promptText = `${judgeInstructions}${hintsBlock(args.hints ?? [])}\nLectura readerA (Gemini):\n${JSON.stringify(gemini)}\n\n` +
     `Lectura readerB (OpenAI):\n${JSON.stringify(openai)}\n\nDisputas a resolver:\n${JSON.stringify(disputes)}`;
   const params = {
     model,

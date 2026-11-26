@@ -3,6 +3,7 @@ import OpenAI from "openai";
 import { z } from "zod";
 import { cachedAiCall, recordAiUsage, usageFromChatCompletions, usageFromGemini, usageFromResponses } from "./cache.js";
 import type { JudgeDecision, VisionReading } from "./types.js";
+import { hintsBlock } from "./photo-quality.js";
 
 const observationSchema = z.object({
   text: z.string().min(1),
@@ -140,7 +141,9 @@ const LINE_TEXT_RULE = `- lineText: el texto COMPLETO de la línea o fila de la 
 
 // Instrucciones de los dos lectores (Gemini y GPT: el MISMO texto, la misma imagen y el mismo esquema). El contrato "legacy" conserva byte a byte el prompt
 // anterior a lineText para repetir sin gasto lo ya guardado en la caché; el vigente agrega reglas GENERALES de transcripción (nada específico de un estudio).
-export const simpleReaderInstructionsFor = (legacy: boolean): string => (legacy ? legacyReaderInstructions : currentReaderInstructions);
+// `hints`: avisos generales sobre la foto leídos de sus metadatos (photo-quality.ts). Sin avisos el prompt es exactamente el de siempre.
+export const simpleReaderInstructionsFor = (legacy: boolean, hints: readonly string[] = []): string =>
+  legacy ? legacyReaderInstructions : `${currentReaderInstructions}${hintsBlock(hints)}`;
 
 const legacyReaderInstructions = `
 Analiza la imagen completa de esta solicitud de laboratorio.
@@ -270,10 +273,11 @@ export async function readImageWithGeminiViaOpenRouter(
   mimeType: string,
   apiKey: string,
   legacy = false,
-  client: Pick<OpenAI, "chat"> = new OpenAI({ apiKey, baseURL: "https://openrouter.ai/api/v1" })
+  client: Pick<OpenAI, "chat"> = new OpenAI({ apiKey, baseURL: "https://openrouter.ai/api/v1" }),
+  hints: readonly string[] = []
 ): Promise<SimpleReading> {
   const readingSchema = legacy ? legacyReadingSchema : simpleReadingSchema;
-  const readerInstructions = simpleReaderInstructionsFor(legacy);
+  const readerInstructions = simpleReaderInstructionsFor(legacy, hints);
   const model = process.env.OPENROUTER_GEMINI_MODEL ?? "google/gemini-3.8-flash";
   const reasoningEffort = process.env.OPENROUTER_GEMINI_REASONING ?? "medium";
   if (!["low", "medium", "high"].includes(reasoningEffort)) {
@@ -361,13 +365,14 @@ export async function readImageWithGemini(
   mimeType: string,
   model = process.env.GEMINI_READER_MODEL ?? "gemini-4-argon",
   apiKey = process.env.GEMINI_API_KEY,
-  compat?: ReaderCompat
+  compat?: ReaderCompat,
+  hints: readonly string[] = []
 ): Promise<SimpleReading> {
   const legacy = compat === "legacy";
   const readingSchema = legacy ? legacyReadingSchema : simpleReadingSchema;
-  const readerInstructions = simpleReaderInstructionsFor(legacy);
+  const readerInstructions = simpleReaderInstructionsFor(legacy, hints);
   const openRouterKey = process.env.OPENROUTER_API_KEY;
-  if (openRouterKey) return readImageWithGeminiViaOpenRouter(imageBase64, mimeType, openRouterKey, legacy);
+  if (openRouterKey) return readImageWithGeminiViaOpenRouter(imageBase64, mimeType, openRouterKey, legacy, undefined, hints);
   if (!apiKey) throw new Error("GEMINI_API_KEY is required (define it in .env)");
   const ai = new GoogleGenAI({ apiKey });
   const request = {
@@ -408,11 +413,12 @@ export async function readImageWithOpenAI(
   mimeType: string,
   model = process.env.OPENAI_READER_MODEL ?? "gpt-6.1-sol",
   apiKey = process.env.OPENAI_API_KEY,
-  compat?: ReaderCompat
+  compat?: ReaderCompat,
+  hints: readonly string[] = []
 ): Promise<SimpleReading> {
   const legacy = compat === "legacy";
   const readingSchema = legacy ? legacyReadingSchema : simpleReadingSchema;
-  const readerInstructions = simpleReaderInstructionsFor(legacy);
+  const readerInstructions = simpleReaderInstructionsFor(legacy, hints);
   if (!apiKey) throw new Error("OPENAI_API_KEY is required (define it in .env)");
   const client = new OpenAI({ apiKey });
   const { $schema: _ignored, ...schema } = z.toJSONSchema(readingSchema);

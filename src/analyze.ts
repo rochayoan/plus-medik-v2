@@ -5,6 +5,7 @@ import { buildSimpleConsensus, isTruncationOf, normalizeStudyKey, normalizeVisib
 import { collapseExplicitPackages, droppedLineItemDetails, inheritAnalyteFromLine, heldPackageGroups, lineKeyOf, lineServiceGap, lineIsotopeReadersDisagree, reliableLineText, splitGroupedStudies, withoutSelectionX } from "./line-groups.js";
 import { activeCatalog, GENERIC_PROFILE_WORDS, identityTokens, isPackageComponent, qualifiersOf, shadowMatch, type Outcome, type ShadowBatch, type ShadowQuery, type Support } from "./catalog-shadow.js";
 import type { AiUsage } from "./cache.js";
+import { photoQualityOf, readingHints, type PhotoQuality } from "./photo-quality.js";
 import { readDocumentSignal, type DocumentSignal } from "./document-signal.js";
 import type { DocumentFunctionInfo } from "./document-function.js";
 import { judgeDisputesWithOpenAI, type ResolvedStudy, type SimpleJudgement } from "./judge.js";
@@ -181,6 +182,8 @@ export interface AnalysisResult {
   disputes: Array<{ key: string; reason: string }>;
   // Disputas de pura certeza que se acordaron sin juez (mismo texto, misma línea): auditoría.
   certaintySettled?: Array<{ key: string; note: string }>;
+  // Condiciones de la foto leídas de sus metadatos (orientación, espejo, resolución): auditoría. Solo generan avisos a lectores y juez.
+  photo?: PhotoQuality;
   judgeResolved: Array<{ key: string; verdict: "confirmed" | "rejected"; reason: string }>;
   unresolvedDisputes: Array<{ key: string; reason: string }>;
   matches: StudyMatch[];
@@ -907,9 +910,13 @@ export async function analyzeImage(
   const handwrittenShadow = primaryEnabled && handwrittenMode === "shadow";
   const handwrittenAllowed = handwrittenMode === "on";
   const partialEnabled = args.partialAuto ?? partialAutoEnabled();
+  // Condiciones de la foto leídas de sus metadatos (girada, en espejo, poca resolución): solo AVISOS para lectores y juez. La imagen que todos reciben es la
+  // original, sin cambios ni recortes. Sin avisos, las llamadas son exactamente las de siempre (mismo prompt, misma caché).
+  const photo = photoQualityOf(Buffer.from(imageBase64, "base64"));
+  const hints = readingHints(photo);
   const [gemini, openai, documentRead]: [SimpleReading, SimpleReading, { signal: DocumentSignal }] = await Promise.all([
-    deps.readGemini(imageBase64, mimeType),
-    deps.readOpenAI(imageBase64, mimeType),
+    hints.length > 0 ? deps.readGemini(imageBase64, mimeType, undefined, undefined, undefined, hints) : deps.readGemini(imageBase64, mimeType),
+    hints.length > 0 ? deps.readOpenAI(imageBase64, mimeType, undefined, undefined, undefined, hints) : deps.readOpenAI(imageBase64, mimeType),
     deps.readDocument({ imageBase64, mimeType })
   ]);
   const signal = documentRead.signal;
@@ -931,14 +938,14 @@ export async function analyzeImage(
   // Las disputas de pura certeza con el mismo texto en la misma línea se dan por acordadas antes de llamar al juez (settleCertaintyDisputes).
   const consensus = settleCertaintyDisputes(buildSimpleConsensus(gemini, openai));
   const judgement: SimpleJudgement = consensus.hasDisputes
-    ? await deps.judge({ imageBase64, mimeType, gemini, openai, disputes: consensus.disputes })
+    ? await deps.judge({ imageBase64, mimeType, gemini, openai, disputes: consensus.disputes, ...(hints.length > 0 ? { hints } : {}) })
     : { resolvedStudies: [], unresolvedDisputes: [] };
 
   // Ensamblado final. Con el AUTO parcial, si hay zonas que no se ven y estudios que dependen de comprobar que no los afectan, se verifica el
   // impacto (dos lecturas) y se vuelve a ensamblar; si la verificación falta o falla, esos estudios quedan pendientes (nunca se asume lo oculto).
   const finish = async (extra: { primary?: SemanticPrimaryInput; semantic?: SemanticBatchResult }): Promise<AnalysisResult> => {
     const common = { consensus, judgement, catalog, document, ...extra, semanticAuto: autoEnabled, handwrittenShadow, handwrittenAllowed, partialAuto: partialEnabled };
-    const first = assembleAnalysis(common);
+    const first = { ...assembleAnalysis(common), photo };
     const check = first.internal?.document.impactCheck;
     if (!partialEnabled || !check?.needed || check.candidates.length === 0) return first;
     let impact: StudyImpactResult;
@@ -949,7 +956,7 @@ export async function analyzeImage(
     } catch (error) {
       impact = { available: false, unaffected: new Set(), qualifierRisk: true, notes: [`verificación de impacto no disponible: ${error instanceof Error ? error.message : String(error)}`] };
     }
-    return assembleAnalysis({ ...common, impact });
+    return { ...assembleAnalysis({ ...common, impact }), photo };
   };
 
   if (primaryEnabled) {
