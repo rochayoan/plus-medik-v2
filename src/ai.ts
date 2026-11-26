@@ -138,7 +138,11 @@ const LINE_TEXT_RULE = `- lineText: el texto COMPLETO de la línea o fila de la 
   el rótulo completo de la fila marcada. No inventes ni completes texto que no se vea.
 `;
 
-export const simpleReaderInstructionsFor = (legacy: boolean): string => `
+// Instrucciones de los dos lectores (Gemini y GPT: el MISMO texto, la misma imagen y el mismo esquema). El contrato "legacy" conserva byte a byte el prompt
+// anterior a lineText para repetir sin gasto lo ya guardado en la caché; el vigente agrega reglas GENERALES de transcripción (nada específico de un estudio).
+export const simpleReaderInstructionsFor = (legacy: boolean): string => (legacy ? legacyReaderInstructions : currentReaderInstructions);
+
+const legacyReaderInstructions = `
 Analiza la imagen completa de esta solicitud de laboratorio.
 Devuelve SOLO los estudios que fueron realmente solicitados. Una solicitud puede
 estar expresada por texto explícito, X, check, círculo, subrayado, tachado, rayón
@@ -146,7 +150,50 @@ u otra marca. No listes todas las opciones impresas en el formato.
 Para cada estudio devuelve:
 - literalText: el texto tal como es realmente visible en la imagen, sin corregir ni completar.
 - normalizedName: el nombre limpio del mismo estudio, sin agregar información que no se vea.
-${legacy ? "" : LINE_TEXT_RULE}
+
+Reglas estrictas:
+- No completes pares ni grupos clínicos. No infieras IgG porque aparezca IgM, ni al revés;
+  cada variante cuenta solo si está marcada o escrita por sí misma.
+- No uses el diagnóstico, la indicación clínica ni el contexto médico para agregar estudios.
+- Solo lo visible cuenta: no agregues un estudio porque "normalmente se pide junto con" otro.
+- Si una variante, letra o número del estudio no está clara (por ejemplo T3 vs T4,
+  IgG vs IgM, B12 vs B1), no la adivines: ponla en uncertainStudies con lo que sí se ve.
+- Si no estás seguro de si un estudio fue solicitado, ponlo en uncertainStudies.
+Usa "notes" para cualquier observación relevante (imagen cortada, ilegible, etc.).
+`;
+
+// Reglas de transcripción vigentes. Son generales: describen CÓMO se escribe una receta (abreviaturas, listas, tablas, calificadores, letra a mano), nunca qué
+// estudio es cuál. Lo que no se ve con claridad va a uncertainStudies: ninguna regla autoriza completar, corregir ni adivinar.
+const TRANSCRIPTION_RULES = `
+Cómo transcribir:
+- Copia el texto como está escrito: abreviaturas, siglas, mayúsculas, números, signos (+, /, -, paréntesis) y erratas
+  incluidos. No desarrolles abreviaturas ni corrijas la ortografía en literalText. En normalizedName puedes escribir el
+  nombre completo solo si la abreviatura es inequívoca; si puede significar más de una cosa, déjala como está.
+- Conserva TODO lo que distingue un estudio de otro y está escrito junto a él: letras o números de tipo o subtipo,
+  antígeno o anticuerpo ("Ag", "Ac", "anti-"), clase de anticuerpo, total o libre, cualitativo o cuantitativo, método,
+  muestra, tiempo o momento de la toma y cualquier otra indicación. Nunca los quites ni los muevas a otro estudio.
+- Varios estudios en una misma línea unidos por "/", "+", comas, "y" o "e": devuelve cada estudio por separado, cada uno
+  con SU texto tal como está escrito y todos con la misma lineText. No repartas a los demás una indicación o calificador
+  escrito una sola vez (por ejemplo, al final de la lista): déjalo en el estudio donde está escrito, la lineText conserva
+  la línea completa y en notes explica a cuáles podría aplicar. Si la línea es el nombre de UN solo estudio (un perfil,
+  un cociente o un nombre que lleva "y" o "/"), devuélvela como un solo estudio.
+- Tablas, columnas y encabezados: si una celda o renglón solo dice una parte del estudio (una sigla, una clase de
+  anticuerpo, un método) y el resto está en el encabezado de la fila, de la columna o de la sección que le corresponde,
+  literalText es lo que dice la celda y lineText es el encabezado seguido de la celda, en el orden en que se leen
+  (por ejemplo "Encabezado: celda"). Si no se ve con claridad a qué encabezado pertenece, pon el estudio en uncertainStudies.
+- Letra a mano: transcribe solo las letras que se leen con seguridad. Si una palabra, letra o número no se lee, no lo
+  completes con el estudio más parecido: pon en uncertainStudies lo que sí se lee y marca lo ilegible con "?".
+`;
+
+const currentReaderInstructions = `
+Analiza la imagen completa de esta solicitud de laboratorio.
+Devuelve SOLO los estudios que fueron realmente solicitados. Una solicitud puede
+estar expresada por texto explícito, X, check, círculo, subrayado, tachado, rayón
+u otra marca. No listes todas las opciones impresas en el formato.
+Para cada estudio devuelve:
+- literalText: el texto tal como es realmente visible en la imagen, sin corregir ni completar.
+- normalizedName: el nombre limpio del mismo estudio, sin agregar información que no se vea.
+${LINE_TEXT_RULE}${TRANSCRIPTION_RULES}
 Reglas estrictas:
 - No completes pares ni grupos clínicos. No infieras IgG porque aparezca IgM, ni al revés;
   cada variante cuenta solo si está marcada o escrita por sí misma.
