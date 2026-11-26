@@ -602,10 +602,47 @@ export function effectiveFragments(fragments: string[], studies: CatalogStudy[])
   });
 }
 
+// ───────────────────────────── lista explícita de estudios distintos («FSH/LH») ─────────────────────────────
+// Un texto con barras, "+", comas o "y" puede ser una LISTA de estudios distintos («FSH/LH») o varios NOMBRES del mismo estudio
+// («Nitrógeno ureico/Urea/NUS», «Urea/BUN»). Solo es una lista si TODO esto se cumple; ante cualquier duda, no se toca la decisión del modelo:
+//  1. El texto completo NO es el nombre ni un alias aprobado de un estudio (un «A/B» del catálogo, p. ej. un cociente, manda).
+//  2. Cada trozo es EXACTAMENTE el nombre o un alias aprobado de UN solo estudio activo (nada se interpreta ni se completa).
+//  3. Hay al menos dos estudios y todos son distintos: dos trozos del mismo estudio son sinónimos.
+//  4. Ningún par de estudios comparte una palabra de su nombre base (UREA y BUN DE UREA comparten «urea»: pueden ser el mismo examen).
+//  5. Cada trozo es compatible con el contexto declarado del documento (muestra, recolección).
+export function explicitStudyList(text: string, fullCatalog: CatalogStudy[], context?: ShadowContext): Array<{ study: CatalogStudy; fragment: string }> | undefined {
+  if (approvedPackage(text, fullCatalog)) return undefined;
+  const fragments = text.split(LINE_SEGMENTS).map((part) => part.trim()).filter((part) => normalizeStudyKey(part) !== "");
+  if (fragments.length < 2) return undefined;
+  const listed: Array<{ study: CatalogStudy; fragment: string }> = [];
+  for (const fragment of fragments) {
+    const study = approvedPackage(fragment, fullCatalog);
+    if (!study || listed.some((other) => other.study.id === study.id)) return undefined;
+    // La misma verificación que un MATCH: sin contradicciones y sin variantes hermanas que el trozo no distinga («Sodio» con versiones en sangre y
+    // en orina sigue en duda). Solo un ALIAS aprobado fija la variante (el laboratorio ya la eligió).
+    const identity = checkIdentity(fragment, study, fullCatalog, context, { approvedAlias: approvedAliasOwner(fragment, fullCatalog)?.id === study.id });
+    if (!identity.ok || identity.plausibleSiblings.length > 0) return undefined;
+    listed.push({ study, fragment });
+  }
+  const words = listed.map((entry) => new Set(baseKey(entry.study).split(" ").filter(Boolean)));
+  for (let i = 0; i < words.length; i++) for (let j = i + 1; j < words.length; j++) if (intersects(words[i]!, words[j]!)) return undefined;
+  return listed;
+}
+
 // `lineText` (opcional): la línea de la receta. Solo actúa en un MATCH y solo si lineSegmentFor demuestra que precisa el texto; entonces el estudio se
 // verifica contra ese trozo de la línea («HAI Chagas») en vez del texto suelto («HAI»), con las MISMAS comprobaciones. Sin línea, nada cambia.
 export function verifyDecision(literalText: string, raw: RawDecision, fullCatalog: CatalogStudy[], context?: ShadowContext, lineText?: string): Outcome {
   if (raw.status === "NO_MATCH") return { kind: "NO_MATCH", reason: raw.reason || raw.notes.join("; ") || "sin coincidencia" };
+  // «FSH/LH»: si el texto es una lista explícita de estudios distintos (explicitStudyList) y el modelo solo dudó entre ellos o eligió uno de ellos
+  // (tomando la barra por «o»), son esos estudios, uno por trozo. Si el modelo propone algo que no está en la lista, su decisión sigue su curso.
+  const listed = explicitStudyList(literalText, fullCatalog, context);
+  if (listed && raw.studies.length > 0 && raw.studies.every((study) => listed.some((entry) => entry.study.id === study.id))) {
+    return {
+      kind: "COMPOSITE",
+      components: listed.map((entry) => ({ studyId: entry.study.id, fragment: entry.fragment, support: "EXACT" as const })),
+      reason: `lista explícita de estudios distintos, cada uno con su nombre o alias aprobado (${listed.map((entry) => entry.study.name).join(" + ")}); el modelo respondió ${raw.status}`
+    };
+  }
   if (raw.status === "AMBIGUOUS") return { kind: "AMBIGUOUS", studyIds: raw.studies.map((s) => s.id), reason: raw.reason };
 
   if (raw.status === "MATCH") {
