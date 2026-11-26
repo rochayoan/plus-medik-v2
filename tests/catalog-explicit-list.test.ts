@@ -51,6 +51,31 @@ describe("explicitStudyList: cuándo un texto con separadores es una lista de es
   it("sinónimos del mismo examen («Urea/BUN») no son una lista", () => {
     expect(explicitStudyList("Urea/BUN", catalog)).toBeUndefined();
   });
+  it("compartir palabras no bloquea: estudios distintos con nombre en común sí son una lista", () => {
+    const hdl = study("hdl", "COLESTEROL HDL", [], "QUIMICA SANGUINEA");
+    const ldl = study("ldl", "COLESTEROL LDL", [], "QUIMICA SANGUINEA");
+    const t3Total = study("t3t", "T3 TOTAL (ECLIA)", ["t3 total"]);
+    const t3Libre = study("t3l", "T3 LIBRE (ECLIA)", ["t3 libre"]);
+    const withAliases = [...catalog.filter((s) => s !== got && s !== gpt), study("got", "TRANSAMINASA GOT", ["tgo"], "QUIMICA SANGUINEA"), study("gpt", "TRANSAMINASA GPT", ["tgp"], "QUIMICA SANGUINEA"), hdl, ldl, t3Total, t3Libre];
+    expect(explicitStudyList("Colesterol HDL / Colesterol LDL", withAliases)?.map((entry) => entry.study.id)).toEqual(["hdl", "ldl"]);
+    expect(explicitStudyList("TGO/TGP", withAliases)?.map((entry) => entry.study.id)).toEqual(["got", "gpt"]);
+    expect(explicitStudyList("T3 total / T3 libre", withAliases)?.map((entry) => entry.study.id)).toEqual(["t3t", "t3l"]);
+  });
+  it("equivalencias del catálogo bloquean: un estudio que también responde al otro trozo («ANA/FAN»)", () => {
+    const anaElisa = study("ana-e", "ANA (ANTICUERPOS ANTINUCLEARES) Elisa", ["ana"], "AUTOINMUNIDAD");
+    const anaIfi = study("ana-i", "ANA / FAN HEP2 IFI", ["fan"], "AUTOINMUNIDAD");
+    expect(explicitStudyList("ANA/FAN", [...catalog, anaElisa, anaIfi])).toBeUndefined();
+  });
+  it("equivalencias del catálogo bloquean: dos estudios con un alias aprobado en común", () => {
+    const a = study("vit-a", "VITAMINA D3 FIA", ["vit d", "vitamina d fia"], "VITAMINAS");
+    const b = study("vit-b", "COLECALCIFEROL ECLIA", ["vit d", "colecalciferol"], "VITAMINAS");
+    expect(explicitStudyList("Vitamina D FIA / Colecalciferol", [...catalog, a, b])).toBeUndefined();
+  });
+  it("una versión con más palabras del mismo estudio no se separa («Glucosa / Glucosa postprandial»: lo decide el modelo)", () => {
+    const glu = study("glu", "GLUCOSA", [], "QUIMICA SANGUINEA");
+    const gluPp = study("glu-pp", "GLUCOSA POSTPANDRIAL", ["glucosa postprandial"], "QUIMICA SANGUINEA");
+    expect(explicitStudyList("Glucosa / Glucosa postprandial", [...catalog, glu, gluPp])).toBeUndefined();
+  });
   it("dos nombres del MISMO estudio («FSH/FSH (ECLIA)») no son una lista", () => {
     expect(explicitStudyList("FSH/FSH (ECLIA)", catalog)).toBeUndefined();
   });

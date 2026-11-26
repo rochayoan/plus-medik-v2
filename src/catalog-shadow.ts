@@ -608,7 +608,8 @@ export function effectiveFragments(fragments: string[], studies: CatalogStudy[])
 //  1. El texto completo NO es el nombre ni un alias aprobado de un estudio (un «A/B» del catálogo, p. ej. un cociente, manda).
 //  2. Cada trozo es EXACTAMENTE el nombre o un alias aprobado de UN solo estudio activo (nada se interpreta ni se completa).
 //  3. Hay al menos dos estudios y todos son distintos: dos trozos del mismo estudio son sinónimos.
-//  4. Ningún par de estudios comparte una palabra de su nombre base (UREA y BUN DE UREA comparten «urea»: pueden ser el mismo examen).
+//  4. Ningún par de estudios es EQUIVALENTE según el catálogo (maySameExam). Compartir palabras no basta para bloquear: «Colesterol HDL/Colesterol LDL»
+//     o «TGO/TGP» son estudios distintos; «Urea/BUN» (BUN DE UREA también responde a «urea») o «ANA/FAN» (ANA / FAN HEP2 IFI) no se separan.
 //  5. Cada trozo es compatible con el contexto declarado del documento (muestra, recolección).
 export function explicitStudyList(text: string, fullCatalog: CatalogStudy[], context?: ShadowContext): Array<{ study: CatalogStudy; fragment: string }> | undefined {
   if (approvedPackage(text, fullCatalog)) return undefined;
@@ -624,9 +625,33 @@ export function explicitStudyList(text: string, fullCatalog: CatalogStudy[], con
     if (!identity.ok || identity.plausibleSiblings.length > 0) return undefined;
     listed.push({ study, fragment });
   }
-  const words = listed.map((entry) => new Set(baseKey(entry.study).split(" ").filter(Boolean)));
-  for (let i = 0; i < words.length; i++) for (let j = i + 1; j < words.length; j++) if (intersects(words[i]!, words[j]!)) return undefined;
+  for (let i = 0; i < listed.length; i++) for (let j = i + 1; j < listed.length; j++) if (mayBeSameExam(listed[i]!, listed[j]!)) return undefined;
   return listed;
+}
+
+// Las palabras con las que el catálogo nombra un estudio: su nombre (sin la lista de componentes entre paréntesis) y cada alias aprobado, por separado.
+function catalogNamings(study: CatalogStudy): Array<Set<string>> {
+  return [withoutComponentLists(study.name), ...study.normalizedAliases].map((text) => new Set(contentTokens(text))).filter((words) => words.size > 0);
+}
+
+// ¿Pueden ser el MISMO examen dos estudios nombrados en una lista? Solo con lo que dice el catálogo (nombres y alias aprobados), sin listas fijas:
+//  a. Comparten un alias aprobado, o el alias de uno es el nombre del otro: el catálogo los da por equivalentes.
+//  b. Un estudio también responde al texto escrito para el OTRO: todas las palabras de ese trozo están en su nombre o en un alias («Urea» está en BUN DE UREA;
+//     «ANA» está en ANA / FAN HEP2 IFI). Así el texto no distingue cuál de los dos es cada trozo.
+//  c. Un estudio nombra todo lo que nombra el otro y algo más (UREA ⊂ BUN DE UREA): puede ser el mismo examen con otro nombre o una versión suya.
+// Palabras compartidas que no cumplen nada de eso («colesterol» en COLESTEROL HDL y COLESTEROL LDL) no los vuelven equivalentes.
+function mayBeSameExam(a: { study: CatalogStudy; fragment: string }, b: { study: CatalogStudy; fragment: string }): boolean {
+  const keysA = new Set([a.study.normalizedName, ...a.study.normalizedAliases]);
+  if ([b.study.normalizedName, ...b.study.normalizedAliases].some((key) => keysA.has(key))) return true;
+  const answers = (study: CatalogStudy, fragment: string) => {
+    const written = new Set(contentTokens(fragment));
+    return written.size > 0 && catalogNamings(study).some((words) => subset(written, words));
+  };
+  if (answers(b.study, a.fragment) || answers(a.study, b.fragment)) return true;
+  const own = (study: CatalogStudy) => new Set(contentTokens(withoutComponentLists(study.name)).filter((token) => !DIM_TOKENS.metodo.has(token)));
+  const wordsA = own(a.study);
+  const wordsB = own(b.study);
+  return subset(wordsA, wordsB) || subset(wordsB, wordsA);
 }
 
 // `lineText` (opcional): la línea de la receta. Solo actúa en un MATCH y solo si lineSegmentFor demuestra que precisa el texto; entonces el estudio se
