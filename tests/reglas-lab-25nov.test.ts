@@ -225,3 +225,30 @@ describe("herpes y hepatitis B (dueño, 25-nov)", () => {
     expect(decideFromReading("HERPES IgG", options, all)?.studies.map((s) => s.name)).toEqual(["HERPES tipo 1 y 2 IgG (Elisa)"]);
   });
 });
+
+describe("27-nov: ionograma sérico y hepatitis B a secas", () => {
+  const all = [
+    ...CATALOG,
+    study("IONOGRAMA 1 (sodio, potasio, cloro)", 180),
+    study("IONOGRAMA 2 (sodio, potasio, cloro, calcio ionico)", 220),
+    study("IONOGRAMA EN ORINA (Sodio, Cloro, Potasio)", 240),
+    study("HEPATITIS B ANTIGENO DE SUP. (PRUEBA RAPIDA)", 70),
+    study("HEPATITIS B ANTICUERPO DE SUP. PRUEBA RAPIDA", 60),
+    study("HEPATITIS B ANTIGENO E (ELISA)", 200),
+    study("HEPATITIS B ANTICUERPO E (ELISA)", 200)
+  ];
+  const tool3 = quoteStudiesTool({ loadCatalog: async () => all });
+  const run = async (text: string) => (await tool3.run({ studies: [text] }, { now: new Date(), patientText: text } as never)) as Result;
+  it("«ionograma sérico» es el de sangre: ionograma 1", async () => {
+    const refs = (await run("ionograma serico")).facts?.find((fact) => fact.text.startsWith("Estudios identificados"))?.refs ?? [];
+    expect(refs.map((ref) => all.find((item) => `study:${item.id}` === ref)!.name)).toEqual(["IONOGRAMA 1 (sodio, potasio, cloro)"]);
+  });
+  it("«hepatitis B» a secas: no se cotiza; se muestran los marcadores (con el antígeno de superficie) y se pregunta cuál", async () => {
+    const result = await run("hepatitis b");
+    expect(result.facts?.some((fact) => fact.text.startsWith("Estudios identificados"))).toBe(false);
+    const blocks = result.blocks!.join(" ");
+    expect(blocks).toContain("HEPATITIS B ANTIGENO DE SUP. (PRUEBA RAPIDA)");
+    expect(blocks).toContain("HEPATITIS B ANTICORE TOTAL");
+    expect(result.facts?.some((fact) => fact.text.includes("varios marcadores"))).toBe(true);
+  });
+});
