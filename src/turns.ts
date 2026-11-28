@@ -170,7 +170,7 @@ export interface TurnReport {
 
 const imageOf = (turn: IncomingTurn): IncomingImage => ({ messageId: turn.messageId, from: turn.from, mediaUrl: turn.mediaUrl, mediaId: turn.mediaId });
 // Un audio se reclama como un mensaje de texto: su respuesta se comporta como la de un texto (guarda de respuestas, tope diario, pausa humana).
-const refOf = (turn: IncomingTurn): TurnRef => ({ messageId: turn.messageId, mediaId: turn.mediaId, from: turn.from, kind: turn.kind === "AUDIO" ? "TEXT" : turn.kind, who: maskPhone(turn.from) });
+const refOf = (turn: IncomingTurn): TurnRef => ({ messageId: turn.messageId, mediaId: turn.mediaId, from: turn.from, kind: turn.kind === "AUDIO" ? "TEXT" : turn.kind, who: maskPhone(turn.from), ...(turn.timestamp !== undefined ? { sentAt: turn.timestamp } : {}) });
 
 const DEFAULT_CONTEXT_SECONDS = 86_400;
 

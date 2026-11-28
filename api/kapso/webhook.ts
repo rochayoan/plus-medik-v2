@@ -18,6 +18,7 @@ import { createAgentPilot, createPilotSwitch, createRecentProvider } from "../..
 import { resolveAgentMode } from "../../src/agent/pipeline.js";
 import { GREETING_WAIT_MS, isMenuMessage, lastAssistantMessage, menuChoiceDecision } from "../../src/greeting-menu.js";
 import { createPendingInboundCheck } from "../../src/kapso-pending.js";
+import { createHumanReplyCheck } from "../../src/kapso-human-reply.js";
 import { resultsStageOf } from "../../src/results-silence.js";
 import { homeVisitStageOf } from "../../src/home-visit.js";
 import { waitingForPerson } from "../../src/human-request.js";
@@ -390,6 +391,17 @@ const realDeps: QuoteDeps = {
   ...(messageHistory ? { history: messageHistory } : {}),
   requireAuditGuard: humanControlEnabled || turnsEnabled || on("REQUIRE_AUDIT_GUARD"),
   humanControl: humanControlEnabled ? { contactKeyFor, ...(pauseExpiry ? { pauseExpiry } : {}) } : undefined,
+  // Con el control humano encendido: antes de enviar se le pregunta a Kapso si la recepción ya escribió (su eco tarda 1-2 s en llegar); si sí, se pausa y no se envía (src/kapso-human-reply.ts).
+  ...(humanControlEnabled
+    ? {
+        humanReplyCheck: createHumanReplyCheck({
+          query: (input) => kapsoClient().messages.query(input) as Promise<{ data?: unknown[] }>,
+          phoneNumberId: () => phoneNumberId(),
+          attention: { registerHumanMessage: (...args) => attention().registerHumanMessage(...args) },
+          log: (event, data) => logLine(event, data)
+        })
+      }
+    : {}),
   scopedControl: scopedContactControl ? { contactKeyFor, covers: scopedContactControl.covers } : undefined,
   turns: turnsEnabled ? { contactKeyFor, ...(pauseExpiry ? { pauseExpiry } : {}), resultsStage, homeVisitStage, waitingForPerson: waitingForPersonCheck, correctionAcked: correctionAckedCheck, ...(photoContextWait ? { photoContextWait } : {}), replyGuard: replyGuardConfig, attention: attentionConfig, instantPhotoQuotes: instantPhotoQuotesEnabled, dailyCap: dailyReplyCap, ...(convState ? { convState } : {}), ...(agentPilot ? { agentPilot } : {}), ...(agentPilot ? { menuChoice, afterMenu, menuEvents } : {}), ...(agentPilot && greetingWait ? { greetingWait } : {}),
     crmHandoff: crmOutbox,

@@ -107,6 +107,8 @@ export interface TurnRef {
   kind: TurnKind;
   // Teléfono enmascarado para los registros.
   who: string;
+  // Hora del mensaje del paciente (segundos desde la época) si Kapso la informa: desde ahí se busca una respuesta humana que se cruzó (humanReplyCheck).
+  sentAt?: number;
 }
 
 // Lo que el trabajo de un turno decide: nada que enviar (el trabajo ya cerró la corrida si hacía falta) o una respuesta.
@@ -293,6 +295,11 @@ export async function beginTurn(ref: TurnRef, deps: QuoteDeps): Promise<{ claime
     // Comprobación final, lo más cerca posible de la llamada a Kapso: si el contacto se pausó tras la reserva, se libera la reserva y NO se envía. Un evento humano
     // que llegue después de esta comprobación (o durante la llamada) ya no puede cancelar el envío: queda registrado como carrera, no evitado.
     if (guarded) {
+      // Una persona que escribió mientras se preparaba esta respuesta y cuyo eco todavía no llegó: se le pregunta a Kapso y, si la hay, se registra la pausa AHORA, para que la comprobación de abajo la vea
+      // (caso real 21-nov: la Dra escribió 2 s antes de que saliera la respuesta del agente y salieron las dos).
+      if (deps.humanReplyCheck && contactKey && ref.sentAt !== undefined) {
+        await deps.humanReplyCheck({ from: ref.from, contactKey, afterSeconds: ref.sentAt }).catch(() => undefined);
+      }
       let confirmation: SendConfirmation | "unavailable";
       try {
         confirmation = await deps.audit!.confirmSend(auditRunId!, lease!);

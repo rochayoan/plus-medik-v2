@@ -157,6 +157,9 @@ export interface QuoteDeps {
   // contacto con la IA pausada no se procesa; la reserva y la comprobación final de envío vuelven a consultar la pausa; y el claim de la auditoría pasa a ser
   // obligatorio (como requireAuditGuard).
   humanControl?: { contactKeyFor(phone: string): string | undefined; pauseExpiry?(contactKey: string): Promise<unknown> };
+  // Justo antes de la comprobación final del envío: si una persona ya le escribió al paciente desde WhatsApp Business (Kapso lo tiene aunque su eco todavía no llegó), registra la pausa para que la
+  // comprobación final no envíe (src/kapso-human-reply.ts). `afterSeconds` = hora del mensaje del paciente. Nunca lanza; ante duda no registra nada. Ausente = como siempre.
+  humanReplyCheck?(input: { from: string; contactKey: string; afterSeconds: number }): Promise<unknown>;
   // Control acotado a una lista explícita de contactos (sin control humano global): SOLO para los contactos que `covers` reconoce se aplica la misma exigencia que arriba (clave de contacto,
   // claim obligatorio, pausa comprobada en la reserva y antes de enviar). Para cualquier otro contacto el flujo es EXACTAMENTE el de siempre. Ignorado si humanControl está definido.
   scopedControl?: { contactKeyFor(phone: string): string | undefined; covers(phone: string): boolean };
