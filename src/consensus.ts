@@ -58,6 +58,9 @@ export type SimpleStudy = SimpleReading["requestedStudies"][number];
 
 export type SimpleDisputeReason =
   | "partial_transcription"
+  // Los dos lectores ubican UN solo estudio en la misma línea (una línea sin lista), pero lo transcriben distinto: el juez elige cuál de las dos
+  // transcripciones es la que se ve; nunca escribe una propia (ver judge.ts).
+  | "same_row_different_text"
   | "requested_by_one_reader_only"
   | "requested_with_uncertainty_in_other"
   | "not_high_confidence_in_both"
@@ -78,6 +81,9 @@ export interface SimpleConsensus {
   agreedPairs?: Array<{ a: SimpleStudy; b: SimpleStudy }>;
   disputes: SimpleDispute[];
   hasDisputes: boolean;
+  // Disputas de pura certeza que se dieron por acordadas sin juez porque las dos lecturas son verificablemente la misma (ver settleCertaintyDisputes en
+  // analyze.ts). Solo auditoría: el estudio ya está en agreedStudies.
+  settled?: Array<{ key: string; note: string }>;
 }
 
 const confidenceScore = { high: 3, medium: 2, low: 1 } as const;
@@ -94,7 +100,12 @@ interface KeyedStudy {
   study: SimpleStudy;
   literalKey: string;
   nameKey: string;
+  // La línea que el lector dio para el estudio (normalizada), si la dio.
+  lineKey?: string;
 }
+
+// Una línea nombra UN solo elemento: sin "+", "/", ";", comas, "y" ni "e" que separen una lista.
+const singleItemLine = (lineKey: string, raw: string): boolean => lineKey !== "" && raw.split(/\s*[,;/+]\s*|\s+(?:y|e)\s+/i).filter((part) => normalizeVisibleKey(part) !== "").length === 1;
 
 const variantOnly = new Set(["iga", "igg", "igm", "ige"]);
 
@@ -127,7 +138,8 @@ function keyStudies(studies: SimpleStudy[]): KeyedStudy[] {
     const literalKey = normalizeVisibleKey(study.literalText) || normalizeVisibleKey(study.normalizedName);
     const previous = byLiteral.get(literalKey);
     if (!previous || confidenceScore[study.confidence] > confidenceScore[previous.study.confidence]) {
-      byLiteral.set(literalKey, { study, literalKey, nameKey: normalizeVisibleKey(study.normalizedName) });
+      const lineKey = study.lineText && singleItemLine(normalizeVisibleKey(study.lineText), study.lineText) ? normalizeVisibleKey(study.lineText) : undefined;
+      byLiteral.set(literalKey, { study, literalKey, nameKey: normalizeVisibleKey(study.normalizedName), ...(lineKey ? { lineKey } : {}) });
     }
   }
   return [...byLiteral.values()];
@@ -138,6 +150,8 @@ interface Pair {
   b?: KeyedStudy;
   // Los dos lectores ven la misma fila, pero uno transcribió solo el comienzo del texto: lo decide el juez, con el texto completo.
   partial?: boolean;
+  // Los dos lectores ubican UN solo estudio en la MISMA línea de un solo elemento y lo transcriben distinto: lo decide el juez entre las dos lecturas.
+  sameRow?: boolean;
 }
 
 // Empareja primero por literalText (ignorando el espaciado); lo que quede sin pareja se intenta por normalizedName y, por último,
@@ -171,6 +185,18 @@ function pairStudies(a: KeyedStudy[], b: KeyedStudy[]): Pair[] {
     pair.b = candidates[0];
     pair.partial = true;
     remainingB.delete(candidates[0]!);
+  }
+  // Misma fila, distinta transcripción: lo que sigue sin pareja se empareja por la línea solo si es inequívoco. La línea (de un solo elemento: nunca una
+  // lista, donde dos textos distintos pueden ser dos estudios) es la misma en las dos lecturas y es la ÚNICA lectura sin pareja de cada lector en esa línea.
+  const stillLonely = pairs.filter((pair) => pair.a && !pair.b && pair.a.lineKey);
+  for (const pair of stillLonely) {
+    const line = pair.a!.lineKey!;
+    const fromA = stillLonely.filter((other) => other.a!.lineKey === line);
+    const fromB = [...remainingB].filter((itemB) => itemB.lineKey === line);
+    if (fromA.length !== 1 || fromB.length !== 1) continue;
+    pair.b = fromB[0];
+    pair.sameRow = true;
+    remainingB.delete(fromB[0]!);
   }
   for (const itemB of remainingB) pairs.push({ b: itemB });
   return pairs;
@@ -224,6 +250,8 @@ export function buildSimpleConsensus(a: SimpleReading, b: SimpleReading): Simple
       const fuller = isTruncationOf(pair.a!.literalKey, pair.b!.literalKey) ? studyB : studyA;
       const fullerKey = fuller === studyB ? pair.b!.literalKey : pair.a!.literalKey;
       disputes.push({ key: fullerKey, reason: "partial_transcription", readerA, readerB, preferred: fuller });
+    } else if (studyA && studyB && pair.sameRow) {
+      disputes.push({ key: `${pair.a!.literalKey} | ${pair.b!.literalKey}`, reason: "same_row_different_text", readerA, readerB });
     } else if (studyA && studyB) {
       if (studyA.confidence === "high" && studyB.confidence === "high" && !hasUncertainty) {
         agreedStudies.push(studyA);

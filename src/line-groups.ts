@@ -1,4 +1,5 @@
-import { approvedPackage, headWords, identityTokens, isQualifierOnly, itemKey, packageItems, qualifiersOf, studyQualifiers, unresolvedPackageGroups } from "./catalog-shadow.js";
+import { isTypoOf } from "./typo.js";
+import { approvedPackage, contentTokens, headWords, identityTokens, isQualifierOnly, withoutComponentLists, itemKey, packageItems, qualifiersOf, studyQualifiers, unresolvedPackageGroups } from "./catalog-shadow.js";
 import { normalizeVisibleKey, sameVisibleText, type SimpleStudy } from "./consensus.js";
 import type { FinalVisualStudy } from "./analyze.js";
 import type { CatalogStudy } from "./types.js";
@@ -175,6 +176,89 @@ export function collapseExplicitPackages(studies: FinalVisualStudy[], catalog: C
     if (!replaced.has(study)) return [study];
     const out = replaced.get(study);
     return out ? [out] : [];
+  });
+}
+
+// ───────────────────────────── estudios agrupados en un mismo texto («Glucosa e insulina postprandial») ─────────────────────────────
+// Un lector puede devolver como UN estudio un texto que nombra VARIOS unidos por "y", "e" o comas. Se separa en un estudio por parte, con el texto
+// EXACTO de cada parte (nada se completa ni se agrega), solo si TODO esto se cumple; si no, el estudio queda como estaba:
+//  1. Hay al menos dos partes y cada una nombra algo por sí misma: tiene una palabra de 3 o más letras que no es una variante (IgG, total, orina...),
+//     ni un servicio (ATB). «Herpes 1 y 2», «IgG e IgM», «Urocultivo y ATB» o «Electrolitos (Na, K y Cl)» no se separan.
+//  2. El texto completo no es el nombre o alias aprobado de un estudio, ni hay un estudio activo que nombre todas sus palabras: «Proteínas totales y
+//     fraccionadas» o «Bilirrubina total y directa» son UN estudio.
+//  3. Cada parte nombra algún estudio activo del catálogo (todas sus palabras están en su nombre o en un alias aprobado).
+//  4. Alguna parte anterior podría heredar una palabra de la última (ver abajo); si no, el compuesto del catálogo ya separa los componentes y no se toca.
+// INDICACIONES SIN LISTA FIJA: una palabra de la última parte que una parte anterior no lleva es una indicación que podría compartirse si el CATÁLOGO tiene esa
+// parte con y sin la palabra (GLUCOSA y GLUCOSA POSTPANDRIAL; SODIO y SODIO EN ORINA; CORTISOL y CORTISOL MATUTINO). Se queda donde está escrita, y la parte
+// anterior queda PENDIENTE (lineProblem) sin elegir versión: no se sabe si le aplica. Las demás partes siguen su curso.
+// VOCABULARIO: palabras de los nombres (sin las listas de componentes entre paréntesis: IONOGRAMA (SODIO, POTASIO...) no «nombra» al sodio) y de los alias
+// aprobados, con conectores y plurales de catalog-shadow. Una palabra escrita junta o separada («post pandrial») se reconoce si así está en el catálogo, y una
+// errata (typo.ts) solo si corresponde a UNA sola palabra del catálogo. Así una indicación o una errata nueva del catálogo se reconoce sin tocar el código.
+const GROUP_SPLIT = /\s*[,;]\s*|\s+(?:y|e)\s+/i;
+
+interface CatalogVocabulary { words: Set<string>; studies: Array<Set<string>> }
+type Word = { token: string; written: string };
+
+// Las palabras de un texto del catálogo y, además, cada par de palabras seguidas escrito junto («post pandrial» → «postpandrial»).
+function withJoinedPairs(tokens: string[]): string[] {
+  return [...tokens, ...tokens.slice(1).map((token, index) => `${tokens[index]}${token}`)];
+}
+
+function catalogVocabulary(catalog: CatalogStudy[]): CatalogVocabulary {
+  const studies = catalog.filter((study) => study.active).map((study) => new Set([withoutComponentLists(study.name), ...study.normalizedAliases].flatMap((text) => withJoinedPairs(contentTokens(text)))));
+  return { words: new Set(studies.flatMap((tokens) => [...tokens])), studies };
+}
+
+// La palabra del catálogo que corresponde a `word`: ella misma, o la ÚNICA palabra del catálogo de la que es una errata.
+function catalogWord(word: string, vocabulary: CatalogVocabulary): string | undefined {
+  if (vocabulary.words.has(word)) return word;
+  const typos = [...vocabulary.words].filter((known) => isTypoOf(word, known));
+  return typos.length === 1 ? typos[0] : undefined;
+}
+
+// Las palabras de un texto leído en la forma del catálogo. Dos palabras seguidas se unen si juntas son una palabra del catálogo («post prandial» → «postpandrial»)
+// y alguna de las dos no lo es por sí sola: «potasio orina» son dos palabras del catálogo y siguen siendo dos.
+function wordsOf(text: string, vocabulary: CatalogVocabulary): Word[] {
+  const raw = contentTokens(text);
+  const out: Word[] = [];
+  for (let index = 0; index < raw.length; index++) {
+    const token = raw[index]!;
+    const next = raw[index + 1];
+    const separate = next !== undefined && vocabulary.words.has(token) && vocabulary.words.has(next);
+    const joined = next !== undefined && !separate ? catalogWord(`${token}${next}`, vocabulary) : undefined;
+    if (joined) {
+      out.push({ token: joined, written: `${token} ${next}` });
+      index++;
+      continue;
+    }
+    out.push({ token: catalogWord(token, vocabulary) ?? token, written: token });
+  }
+  return out;
+}
+
+export function splitGroupedStudies(studies: FinalVisualStudy[], catalog: CatalogStudy[]): FinalVisualStudy[] {
+  const vocabulary = catalogVocabulary(catalog);
+  // Un estudio nombra las palabras si cada una está en su nombre o alias, igual o con una errata (la misma palabra puede estar bien escrita en un estudio y mal en otro).
+  const has = (own: Set<string>, token: string) => own.has(token) || [...own].some((known) => isTypoOf(token, known));
+  const named = (tokens: string[]) => tokens.length > 0 && vocabulary.studies.some((own) => tokens.every((token) => has(own, token)));
+  const tokensOf = (text: string) => wordsOf(text, vocabulary).map((word) => word.token);
+  return studies.flatMap((study) => {
+    const parts = study.literalText.split(GROUP_SPLIT).map((part) => part.trim()).filter(Boolean);
+    if (parts.length < 2) return [study];
+    if (parts.some((part) => isQualifierOnly(part) || !contentTokens(part).some((token) => /[a-z]{3,}/.test(token) && !isQualifierOnly(token)))) return [study];
+    if (approvedPackage(study.literalText, catalog) || named(tokensOf(study.literalText))) return [study];
+    const partTokens = parts.map(tokensOf);
+    if (!partTokens.every(named)) return [study];
+    const last = wordsOf(parts[parts.length - 1]!, vocabulary);
+    const shared = partTokens.map((own, index) => (index < parts.length - 1 ? last.filter((word) => !own.includes(word.token) && named([...own, word.token])) : []));
+    if (shared.every((words) => words.length === 0)) return [study];
+    return parts.map((part, index) => {
+      const row: FinalVisualStudy = { ...study, literalText: part, normalizedName: part, lineText: study.lineText ?? study.literalText, splitFrom: study.literalText };
+      const unclear = shared[index]!.map((word) => word.written);
+      return unclear.length > 0
+        ? { ...row, lineProblem: `«${study.literalText}»: no está claro si «${unclear.join(", ")}» también aplica a «${part}» (el catálogo tiene las dos versiones); queda pendiente sin elegir versión` }
+        : row;
+    });
   });
 }
 

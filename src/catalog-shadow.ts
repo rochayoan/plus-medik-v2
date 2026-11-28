@@ -17,6 +17,9 @@ export type Support = "EXACT" | "LEXICAL" | "SEMANTIC";
 
 export interface ShadowQuery {
   literalText: string;
+  // Línea completa de la receta donde se leyó el estudio (solo si las dos lecturas coincidieron en ella). Es CONTEXTO: precisa una abreviatura o un
+  // nombre incompleto («HAI» en «HAI Chagas»), nunca agrega estudios. Sin ella, el prompt y la verificación son exactamente los de siempre.
+  lineText?: string;
 }
 
 // Contexto impreso del documento que ayuda a distinguir variantes del catálogo. `lines` son líneas textuales (título, instrucciones) que
@@ -38,6 +41,8 @@ export type Outcome =
 
 export interface FinalShadow {
   literalText: string;
+  // La línea que se envió como contexto (auditoría); ausente si no había o no aportaba nada.
+  lineText?: string;
   outcome: Outcome;
   // true si las dos pasadas independientes coincidieron.
   agreement: boolean;
@@ -133,10 +138,10 @@ const subset = (a: Set<string>, b: Set<string>) => [...a].every((value) => b.has
 const intersects = (a: Set<string>, b: Set<string>) => [...a].some((value) => b.has(value));
 
 // Contenido del nombre sin conectores y con plural simplificado; incluye calificadores.
-const contentTokens = (text: string): string[] => identityTokens(text).filter((token) => !CONNECTORS.has(token)).map(stem);
+export const contentTokens = (text: string): string[] => identityTokens(text).filter((token) => !CONNECTORS.has(token)).map(stem);
 
 // Las listas de componentes entre paréntesis ("(HIERRO, FERRITINA, ...)", "(sodio, potasio, cloro)") no son el analito del estudio.
-const withoutComponentLists = (name: string) => name.replace(/\([^()]*[,/][^()]*\)/g, " ");
+export const withoutComponentLists = (name: string) => name.replace(/\([^()]*[,/][^()]*\)/g, " ");
 
 // Un rival de familia debe ser un estudio simple: no un perfil, panel, combo, curva ni una lista larga de analitos.
 function isSingleAnalyte(study: CatalogStudy): boolean {
@@ -308,7 +313,58 @@ Reglas estrictas:
 export interface ShadowRequest {
   promptText: string;
   catalogLines: number;
-  items: Array<{ index: number; literalText: string }>;
+  items: ShadowItem[];
+}
+
+// Un texto a resolver tal como va en el prompt. `lineText` solo aparece cuando la línea dice algo más que el propio texto.
+export interface ShadowItem {
+  index: number;
+  literalText: string;
+  lineText?: string;
+}
+
+// La línea que vale la pena enviar: existe y no es el mismo texto del estudio (ignorando mayúsculas, tildes y puntuación).
+export function lineContextFor(literalText: string, lineText?: string): string | undefined {
+  const line = lineText?.trim();
+  if (!line) return undefined;
+  const key = normalizeStudyKey(line);
+  return key === "" || key === normalizeStudyKey(literalText) ? undefined : line;
+}
+
+// ───────────────────────────── evidencia de la línea (determinística) ─────────────────────────────
+// El modelo puede usar la línea para elegir un estudio, pero el verificador no le cree: comprueba por su cuenta que la línea precise el texto.
+// Trozos de una enumeración: comas, ";", "/", "+", "|", saltos de línea y las conjunciones "y"/"e".
+const LINE_SEGMENTS = /\s*[,;/+|\n]\s*|\s+(?:y|e)\s+/i;
+
+// Todas las palabras de `tokens` están en el nombre o en un alias aprobado del estudio.
+function studyCovers(study: CatalogStudy, tokens: ReadonlySet<string>): boolean {
+  const own = new Set([study.name, ...study.normalizedAliases].flatMap((text) => contentTokens(text)));
+  return [...tokens].every((token) => own.has(token));
+}
+
+// El trozo de la línea que precisa el texto leído para el estudio elegido, o undefined si la línea no lo precisa SIN ambigüedad. Exige todo:
+//  1. Exactamente UN trozo de la línea contiene todas las palabras del texto, y agrega alguna («HAI» → «HAI Chagas»).
+//  2. El estudio elegido cubre todas las palabras de ese trozo (la línea no dice nada que el estudio no diga).
+//  3. Ningún OTRO trozo de la línea podría completar el texto hacia otro estudio del catálogo: en «HAI: Chagas y Toxo», «HAI» + «Toxo» es HAI TOXO,
+//     así que la línea no decide entre los dos.
+export function lineSegmentFor(literalText: string, lineText: string | undefined, chosen: CatalogStudy, catalog: CatalogStudy[]): string | undefined {
+  const line = lineContextFor(literalText, lineText);
+  if (!line) return undefined;
+  const literal = new Set(contentTokens(literalText));
+  if (literal.size === 0) return undefined;
+  const segments = line.split(LINE_SEGMENTS).map((part) => part.trim()).filter((part) => contentTokens(part).length > 0);
+  const holding = segments.filter((part) => [...literal].every((token) => contentTokens(part).includes(token)));
+  if (holding.length !== 1) return undefined;
+  const segment = holding[0]!;
+  const segmentTokens = new Set(contentTokens(segment));
+  if (segmentTokens.size <= literal.size) return undefined;
+  if (!studyCovers(chosen, segmentTokens)) return undefined;
+  for (const other of segments) {
+    if (other === segment) continue;
+    const completed = new Set([...literal, ...contentTokens(other)]);
+    if (catalog.some((study) => study.active && study.id !== chosen.id && studyCovers(study, completed))) return undefined;
+  }
+  return segment;
 }
 
 export interface ShadowDeps {
@@ -546,13 +602,85 @@ export function effectiveFragments(fragments: string[], studies: CatalogStudy[])
   });
 }
 
-export function verifyDecision(text: string, raw: RawDecision, fullCatalog: CatalogStudy[], context?: ShadowContext): Outcome {
+// ───────────────────────────── lista explícita de estudios distintos («FSH/LH») ─────────────────────────────
+// Un texto con barras, "+", comas o "y" puede ser una LISTA de estudios distintos («FSH/LH») o varios NOMBRES del mismo estudio
+// («Nitrógeno ureico/Urea/NUS», «Urea/BUN»). Solo es una lista si TODO esto se cumple; ante cualquier duda, no se toca la decisión del modelo:
+//  1. El texto completo NO es el nombre ni un alias aprobado de un estudio (un «A/B» del catálogo, p. ej. un cociente, manda).
+//  2. Cada trozo es EXACTAMENTE el nombre o un alias aprobado de UN solo estudio activo (nada se interpreta ni se completa).
+//  3. Hay al menos dos estudios y todos son distintos: dos trozos del mismo estudio son sinónimos.
+//  4. Ningún par de estudios es EQUIVALENTE según el catálogo (maySameExam). Compartir palabras no basta para bloquear: «Colesterol HDL/Colesterol LDL»
+//     o «TGO/TGP» son estudios distintos; «Urea/BUN» (BUN DE UREA también responde a «urea») o «ANA/FAN» (ANA / FAN HEP2 IFI) no se separan.
+//  5. Cada trozo es compatible con el contexto declarado del documento (muestra, recolección).
+export function explicitStudyList(text: string, fullCatalog: CatalogStudy[], context?: ShadowContext): Array<{ study: CatalogStudy; fragment: string }> | undefined {
+  if (approvedPackage(text, fullCatalog)) return undefined;
+  const fragments = text.split(LINE_SEGMENTS).map((part) => part.trim()).filter((part) => normalizeStudyKey(part) !== "");
+  if (fragments.length < 2) return undefined;
+  const listed: Array<{ study: CatalogStudy; fragment: string }> = [];
+  for (const fragment of fragments) {
+    const study = approvedPackage(fragment, fullCatalog);
+    if (!study || listed.some((other) => other.study.id === study.id)) return undefined;
+    // La misma verificación que un MATCH: sin contradicciones y sin variantes hermanas que el trozo no distinga («Sodio» con versiones en sangre y
+    // en orina sigue en duda). Solo un ALIAS aprobado fija la variante (el laboratorio ya la eligió).
+    const identity = checkIdentity(fragment, study, fullCatalog, context, { approvedAlias: approvedAliasOwner(fragment, fullCatalog)?.id === study.id });
+    if (!identity.ok || identity.plausibleSiblings.length > 0) return undefined;
+    listed.push({ study, fragment });
+  }
+  for (let i = 0; i < listed.length; i++) for (let j = i + 1; j < listed.length; j++) if (mayBeSameExam(listed[i]!, listed[j]!)) return undefined;
+  // 6. Ningún paquete del catálogo cubre esos estudios: la lista podría ser ese paquete escrito por partes, y el precio (paquete o suma) lo decide el
+  //    laboratorio (unresolvedPackageGroups). Entonces no se decide aquí: la decisión del modelo sigue su curso y las protecciones de siempre la retienen.
+  if (unresolvedPackageGroups(listed.map((entry) => entry.study), fullCatalog).length > 0) return undefined;
+  return listed;
+}
+
+// Las palabras con las que el catálogo nombra un estudio: su nombre (sin la lista de componentes entre paréntesis) y cada alias aprobado, por separado.
+function catalogNamings(study: CatalogStudy): Array<Set<string>> {
+  return [withoutComponentLists(study.name), ...study.normalizedAliases].map((text) => new Set(contentTokens(text))).filter((words) => words.size > 0);
+}
+
+// ¿Pueden ser el MISMO examen dos estudios nombrados en una lista? Solo con lo que dice el catálogo (nombres y alias aprobados), sin listas fijas:
+//  a. Comparten un alias aprobado, o el alias de uno es el nombre del otro: el catálogo los da por equivalentes.
+//  b. Un estudio también responde al texto escrito para el OTRO: todas las palabras de ese trozo están en su nombre o en un alias («Urea» está en BUN DE UREA;
+//     «ANA» está en ANA / FAN HEP2 IFI). Así el texto no distingue cuál de los dos es cada trozo.
+//  c. Un estudio nombra todo lo que nombra el otro y algo más (UREA ⊂ BUN DE UREA): puede ser el mismo examen con otro nombre o una versión suya.
+// Palabras compartidas que no cumplen nada de eso («colesterol» en COLESTEROL HDL y COLESTEROL LDL) no los vuelven equivalentes.
+function mayBeSameExam(a: { study: CatalogStudy; fragment: string }, b: { study: CatalogStudy; fragment: string }): boolean {
+  const keysA = new Set([a.study.normalizedName, ...a.study.normalizedAliases]);
+  if ([b.study.normalizedName, ...b.study.normalizedAliases].some((key) => keysA.has(key))) return true;
+  const answers = (study: CatalogStudy, fragment: string) => {
+    const written = new Set(contentTokens(fragment));
+    return written.size > 0 && catalogNamings(study).some((words) => subset(written, words));
+  };
+  if (answers(b.study, a.fragment) || answers(a.study, b.fragment)) return true;
+  const own = (study: CatalogStudy) => new Set(contentTokens(withoutComponentLists(study.name)).filter((token) => !DIM_TOKENS.metodo.has(token)));
+  const wordsA = own(a.study);
+  const wordsB = own(b.study);
+  return subset(wordsA, wordsB) || subset(wordsB, wordsA);
+}
+
+// `lineText` (opcional): la línea de la receta. Solo actúa en un MATCH y solo si lineSegmentFor demuestra que precisa el texto; entonces el estudio se
+// verifica contra ese trozo de la línea («HAI Chagas») en vez del texto suelto («HAI»), con las MISMAS comprobaciones. Sin línea, nada cambia.
+export function verifyDecision(literalText: string, raw: RawDecision, fullCatalog: CatalogStudy[], context?: ShadowContext, lineText?: string): Outcome {
   if (raw.status === "NO_MATCH") return { kind: "NO_MATCH", reason: raw.reason || raw.notes.join("; ") || "sin coincidencia" };
+  // «FSH/LH»: si el texto es una lista explícita de estudios distintos (explicitStudyList) y el modelo solo dudó entre ellos o eligió uno de ellos
+  // (tomando la barra por «o»), son esos estudios, uno por trozo. Si el modelo propone algo que no está en la lista, su decisión sigue su curso.
+  const listed = explicitStudyList(literalText, fullCatalog, context);
+  if (listed && raw.studies.length > 0 && raw.studies.every((study) => listed.some((entry) => entry.study.id === study.id))) {
+    return {
+      kind: "COMPOSITE",
+      components: listed.map((entry) => ({ studyId: entry.study.id, fragment: entry.fragment, support: "EXACT" as const })),
+      reason: `lista explícita de estudios distintos, cada uno con su nombre o alias aprobado (${listed.map((entry) => entry.study.name).join(" + ")}); el modelo respondió ${raw.status}`
+    };
+  }
   if (raw.status === "AMBIGUOUS") return { kind: "AMBIGUOUS", studyIds: raw.studies.map((s) => s.id), reason: raw.reason };
 
   if (raw.status === "MATCH") {
     const chosen = raw.studies[0]!;
     if (!chosen.active) return { kind: "REJECTED", studyIds: [chosen.id], reason: "el estudio elegido no está activo" };
+    const segment = lineSegmentFor(literalText, lineText, chosen, fullCatalog);
+    const text = segment ?? literalText;
+    const lineNotes = segment ? [`la línea «${lineText!.trim()}» precisa «${literalText}» como «${segment}»`] : [];
+    // Con la línea como evidencia, una alternativa del modelo que no cubre lo que dice ese trozo no es plausible (la línea la descarta).
+    const alternatives = segment ? raw.alternatives.filter((alt) => studyCovers(alt, new Set(contentTokens(segment)))) : raw.alternatives;
     // El texto es EXACTAMENTE el nombre o alias aprobado de otro estudio (p. ej. un paquete): el catálogo ya dijo qué es; el modelo no puede elegir otro.
     const exactOwner = approvedPackage(text, fullCatalog);
     if (exactOwner && exactOwner.id !== chosen.id) {
@@ -572,7 +700,7 @@ export function verifyDecision(text: string, raw: RawDecision, fullCatalog: Cata
     const rivals = new Map<string, CatalogStudy>();
     for (const sibling of identity.plausibleSiblings) rivals.set(sibling.id, sibling);
     // Con un alias aprobado el laboratorio ya eligió la variante: las alternativas que propone el modelo no la degradan.
-    for (const alt of byAlias ? [] : raw.alternatives) {
+    for (const alt of byAlias ? [] : alternatives) {
       // una alternativa que contradice lo que el texto afirma no cuenta como plausible
       if (alt.active && checkIdentity(text, alt, fullCatalog, context).ok) rivals.set(alt.id, alt);
     }
@@ -583,10 +711,12 @@ export function verifyDecision(text: string, raw: RawDecision, fullCatalog: Cata
         reason: `existen variantes igualmente plausibles que el texto no distingue (${[...rivals.values()].map((s) => s.code ?? s.name).join(", ")}); el modelo eligió "${chosen.name}"`
       };
     }
-    return { kind: "MATCH", studyId: chosen.id, support: supportOf(text, chosen), notes: byAlias ? [...raw.notes, "alias aprobado del catálogo: la variante la fija el laboratorio"] : raw.notes };
+    return { kind: "MATCH", studyId: chosen.id, support: supportOf(text, chosen), notes: [...raw.notes, ...lineNotes, ...(byAlias ? ["alias aprobado del catálogo: la variante la fija el laboratorio"] : [])] };
   }
 
-  // COMPOSITE. Primero, un alias aprobado de un paquete del catálogo manda: se acepta el paquete único si la composición coincide.
+  // COMPOSITE: siempre sobre el texto leído (los fragmentos deben estar en él); la línea no agrega componentes.
+  const text = literalText;
+  // Primero, un alias aprobado de un paquete del catálogo manda: se acepta el paquete único si la composición coincide.
   const pkg = approvedPackage(text, fullCatalog);
   if (pkg) {
     const composition = verifyPackageComposition(pkg, raw.studies);
@@ -685,12 +815,26 @@ Reglas del contexto:
 `;
 }
 
-export function buildPrompt(order: CatalogStudy[], refOf: Map<string, string>, items: Array<{ index: number; literalText: string }>, context?: ShadowContext): string {
+// Bloque de la línea (solo si algún texto trae lineText): sin líneas, el prompt es byte a byte el de siempre y la caché sigue sirviendo.
+export function lineBlock(items: ShadowItem[]): string {
+  if (!items.some((item) => item.lineText)) return "";
+  return `
+LÍNEA DE LA RECETA (lineText): algunos textos traen la línea completa de la receta donde se leyeron. La línea puede nombrar otros estudios.
+Reglas de la línea:
+- Resuelve SIEMPRE el estudio de "literalText". La línea solo sirve para precisar cuál es cuando literalText es una abreviatura o un nombre
+  incompleto y la línea lo completa sin duda (p. ej. literalText "HAI" en la línea "HAI Chagas").
+- Nunca resuelvas, agregues ni compongas los otros estudios que nombre la línea: cada uno llega como su propio texto.
+- Si la línea no deja claro a qué estudio pertenece el texto, o lo completa de varias formas posibles, responde AMBIGUOUS como siempre.
+- Lo que la línea diga nunca contradice lo que literalText afirma (variante, muestra, método): si se contradicen, responde AMBIGUOUS.
+`;
+}
+
+export function buildPrompt(order: CatalogStudy[], refOf: Map<string, string>, items: ShadowItem[], context?: ShadowContext): string {
   const lines = order.map((study) => {
     const aliases = study.normalizedAliases.length > 0 ? `|~${study.normalizedAliases.join(";")}` : "";
     return `${refOf.get(study.id)}|${clip(study.name)}|${study.category ?? ""}${aliases}`;
   });
-  return `${instructions}${contextBlock(context)}\nCATÁLOGO (${order.length} estudios activos):\n${lines.join("\n")}\n\nTEXTOS A RESOLVER:\n${JSON.stringify(items)}`;
+  return `${instructions}${contextBlock(context)}${lineBlock(items)}\nCATÁLOGO (${order.length} estudios activos):\n${lines.join("\n")}\n\nTEXTOS A RESOLVER:\n${JSON.stringify(items)}`;
 }
 
 // variant "A": orden del catálogo; variant "B": catálogo y textos en orden inverso con otras refs.
@@ -700,7 +844,10 @@ export async function runShadowPass(args: { queries: ShadowQuery[]; catalog: Cat
   const order = args.variant === "A" ? active : [...active].reverse();
   const refOf = new Map(order.map((study, i) => [study.id, `s${i + 1}`]));
   const refMap = new Map(order.map((study) => [refOf.get(study.id)!, study]));
-  const itemOrder = args.queries.map((q, index) => ({ index, literalText: q.literalText }));
+  const itemOrder: ShadowItem[] = args.queries.map((q, index) => {
+    const lineText = lineContextFor(q.literalText, q.lineText);
+    return lineText ? { index, literalText: q.literalText, lineText } : { index, literalText: q.literalText };
+  });
   const items = args.variant === "A" ? itemOrder : [...itemOrder].reverse();
   const promptText = buildPrompt(order, refOf, items, args.context);
 
@@ -742,11 +889,12 @@ export async function shadowMatch(args: { queries: ShadowQuery[]; catalog: Catal
     runShadowPass({ ...args, variant: "B", deps: args.deps })
   ]);
   const results: FinalShadow[] = args.queries.map((query, i) => {
-    const outA = verifyDecision(query.literalText, a.decisions[i]!, fullCatalog, args.context);
-    const outB = verifyDecision(query.literalText, b.decisions[i]!, fullCatalog, args.context);
+    const lineText = lineContextFor(query.literalText, query.lineText);
+    const outA = verifyDecision(query.literalText, a.decisions[i]!, fullCatalog, args.context, lineText);
+    const outB = verifyDecision(query.literalText, b.decisions[i]!, fullCatalog, args.context, lineText);
     const { outcome, agreement } = combine(outA, outB);
     const first = a.decisions[i]!;
-    return { literalText: query.literalText, outcome, agreement, passes: [outA, outB], modelNotes: { reading: first.reading, confidence: first.confidence, reason: first.reason, rawStatuses: [first.status, b.decisions[i]!.status], contextUsed: [...new Set([...(first.contextUsed ?? []), ...(b.decisions[i]!.contextUsed ?? [])])] } };
+    return { literalText: query.literalText, ...(lineText ? { lineText } : {}), outcome, agreement, passes: [outA, outB], modelNotes: { reading: first.reading, confidence: first.confidence, reason: first.reason, rawStatuses: [first.status, b.decisions[i]!.status], contextUsed: [...new Set([...(first.contextUsed ?? []), ...(b.decisions[i]!.contextUsed ?? [])])] } };
   });
   return {
     results,

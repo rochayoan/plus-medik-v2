@@ -2,9 +2,10 @@ import { readImageWithGemini, readImageWithOpenAI, type SimpleReading } from "./
 import { ExactAliasCatalogResolver, uniqueMatchedStudies } from "./catalog.js";
 import { askGroupFor, decideFromReading, mentionsOtherSample, typoSuggestions } from "./study-choice.js";
 import { buildSimpleConsensus, isTruncationOf, normalizeStudyKey, normalizeVisibleKey, sameVisibleText, type SimpleConsensus, type SimpleStudy } from "./consensus.js";
-import { collapseExplicitPackages, droppedLineItemDetails, inheritAnalyteFromLine, heldPackageGroups, lineServiceGap, lineIsotopeReadersDisagree, reliableLineText, withoutSelectionX } from "./line-groups.js";
-import { activeCatalog, GENERIC_PROFILE_WORDS, identityTokens, isPackageComponent, qualifiersOf, shadowMatch, type Outcome, type ShadowBatch, type Support } from "./catalog-shadow.js";
+import { collapseExplicitPackages, droppedLineItemDetails, inheritAnalyteFromLine, heldPackageGroups, lineKeyOf, lineServiceGap, lineIsotopeReadersDisagree, reliableLineText, splitGroupedStudies, withoutSelectionX } from "./line-groups.js";
+import { activeCatalog, GENERIC_PROFILE_WORDS, identityTokens, isPackageComponent, qualifiersOf, shadowMatch, type Outcome, type ShadowBatch, type ShadowQuery, type Support } from "./catalog-shadow.js";
 import type { AiUsage } from "./cache.js";
+import { photoConditionHints, photoQualityOf, readingHints, type PhotoCondition, type PhotoQuality } from "./photo-quality.js";
 import { readDocumentSignal, type DocumentSignal } from "./document-signal.js";
 import type { DocumentFunctionInfo } from "./document-function.js";
 import { judgeDisputesWithOpenAI, type ResolvedStudy, type SimpleJudgement } from "./judge.js";
@@ -35,6 +36,8 @@ export interface FinalVisualStudy extends SimpleStudy {
   collapsedFrom?: string[];
   // Si el texto era solo una variante ("IgG") y heredó el analito de otra fila de su misma línea: el texto original.
   inheritedFrom?: string;
+  // Si el lector devolvió varios estudios en un solo texto («Glucosa e insulina postprandial») y se separaron (line-groups.ts): el texto original.
+  splitFrom?: string;
   // Las lecturas ORIGINALES de los dos lectores (texto literal de cada uno) de cada fila que aporta este estudio: una pareja si es una fila, varias si
   // varias filas se reunieron en un paquete. Sobrevive a la reconstrucción (herencia de analito, paquete) para comprobar siempre lo que cada modelo leyó.
   readerPairs?: Array<{ a: string; b: string }>;
@@ -169,6 +172,8 @@ export interface DocumentGate {
   function?: DocumentFunctionInfo;
   // Contexto impreso que se entregó al resolvedor semántico (solo lo que ambas lecturas coincidieron en ver).
   context?: { lines: string[]; muestra?: string; tiempo?: string; conflicts: string[] };
+  // Cómo se ve la foto según la señal del documento (orientación, legibilidad, desenfoque, luz). Ausente: sin evaluar.
+  photo?: PhotoCondition;
 }
 
 export interface AnalysisResult {
@@ -177,6 +182,10 @@ export interface AnalysisResult {
   document?: DocumentGate;
   finalVisualStudies: FinalVisualStudy[];
   disputes: Array<{ key: string; reason: string }>;
+  // Disputas de pura certeza que se acordaron sin juez (mismo texto, misma línea): auditoría.
+  certaintySettled?: Array<{ key: string; note: string }>;
+  // Condiciones de la foto leídas de sus metadatos (orientación, espejo, resolución): auditoría. Solo generan avisos a lectores y juez.
+  photo?: PhotoQuality;
   judgeResolved: Array<{ key: string; verdict: "confirmed" | "rejected"; reason: string }>;
   unresolvedDisputes: Array<{ key: string; reason: string }>;
   matches: StudyMatch[];
@@ -466,20 +475,72 @@ export function judgeResolvedConfidence(resolved: ResolvedStudy, consensus: Simp
   const a = dispute.readerA.requested;
   const b = dispute.readerB.requested;
   if (!a || !b) return {};
-  const rank = { low: 1, medium: 2, high: 3 } as const;
-  const weakest = rank[a.confidence] <= rank[b.confidence] ? a.confidence : b.confidence;
-  const unrelated = dispute.readerA.uncertain.length === 0 && dispute.readerB.uncertain.length === 0 && sameVariants(a.literalText, b.literalText);
-  // Una duda de certeza sobre un estudio cuyo texto lleva una variante clínicamente decisiva (isotipo IgG/IgM, libre/total, cuali/cuantitativo,
-  // población) puede ser justamente esa variante: el juez no la resuelve por certeza, queda la lectura más débil. Tampoco si los dos textos
-  // no son la MISMA transcripción visible.
-  const decisive = Object.entries(qualifiersOf(identityTokens(`${a.literalText} ${b.literalText}`))).some(([dim, values]) => (["isotipo", "libreTotal", "cuantificacion", "poblacion"] as string[]).includes(dim) && values.size > 0);
-  if (unrelated && !decisive && sameVisibleText(a.literalText, b.literalText) && weakest !== "low" && (a.confidence === "high" || b.confidence === "high")) {
+  if (certaintyOnlyDoubt(dispute)) {
     return { confidence: "high", confidenceNote: `certeza ${a.confidence}/${b.confidence} de los lectores resuelta por el juez (confirmado viendo la imagen)` };
   }
-  return { confidence: weakest };
+  const rank = { low: 1, medium: 2, high: 3 } as const;
+  return { confidence: rank[a.confidence] <= rank[b.confidence] ? a.confidence : b.confidence };
+}
+
+// ¿La disputa es SOLO de certeza autodeclarada? Los dos lectores transcribieron el mismo texto visible, sin incertidumbres relacionadas, con las mismas
+// variantes, ninguno con certeza baja y al menos uno con certeza alta. Una duda sobre un texto con una variante clínicamente decisiva (isotipo IgG/IgM,
+// libre/total, cuali/cuantitativo, población) puede ser justamente esa variante: nunca es «solo de certeza».
+function certaintyOnlyDoubt(dispute: SimpleConsensus["disputes"][number]): boolean {
+  const a = dispute.readerA.requested;
+  const b = dispute.readerB.requested;
+  if (dispute.reason !== "not_high_confidence_in_both" || !a || !b) return false;
+  const unrelated = dispute.readerA.uncertain.length === 0 && dispute.readerB.uncertain.length === 0 && sameVariants(a.literalText, b.literalText);
+  const decisive = Object.entries(qualifiersOf(identityTokens(`${a.literalText} ${b.literalText}`))).some(([dim, values]) => (["isotipo", "libreTotal", "cuantificacion", "poblacion"] as string[]).includes(dim) && values.size > 0);
+  return unrelated && !decisive && sameVisibleText(a.literalText, b.literalText) && a.confidence !== "low" && b.confidence !== "low" && (a.confidence === "high" || b.confidence === "high");
+}
+
+// Disputas de pura certeza (certaintyOnlyDoubt) que se dan por acordadas SIN juez cuando, además, las dos lecturas ubican el estudio en la MISMA línea
+// (lineText fiable: ambas la dan y coincide). Es la misma condición con la que el juez ya las resolvía, más la línea como segunda comprobación independiente;
+// ahorra la llamada y la duda. Cualquier otra disputa sigue al juez. El estudio entra con el texto del lector A y certeza alta, y queda registrado en `settled`.
+// Las dos lecturas originales (con su certeza) quedan en agreedPairs: los controles que exigen certeza alta en AMBOS lectores (manuscrito en sombra) siguen viéndolas.
+export function settleCertaintyDisputes(consensus: SimpleConsensus): SimpleConsensus {
+  const settled: Array<{ key: string; note: string }> = [];
+  const agreedStudies = [...consensus.agreedStudies];
+  const agreedPairs = [...(consensus.agreedPairs ?? [])];
+  const disputes = consensus.disputes.filter((dispute) => {
+    const a = dispute.readerA.requested;
+    const b = dispute.readerB.requested;
+    if (!a || !b || !certaintyOnlyDoubt(dispute) || !reliableLineText(a, b)) return true;
+    const study = { ...a, confidence: "high" as const };
+    agreedStudies.push(study);
+    agreedPairs.push({ a: study, b });
+    settled.push({ key: dispute.key, note: `certeza ${a.confidence}/${b.confidence}: los dos lectores leyeron el mismo texto en la misma línea («${a.lineText}»); acordado sin juez` });
+    return false;
+  });
+  if (settled.length === 0) return consensus;
+  return { ...consensus, agreedStudies, agreedPairs, disputes, hasDisputes: disputes.length > 0, settled: [...(consensus.settled ?? []), ...settled] };
 }
 
 export function finalVisualStudiesOf(consensus: SimpleConsensus, judgement: SimpleJudgement, catalog?: CatalogStudy[]): FinalVisualStudy[] {
+  const all = visualCandidatesOf(consensus, judgement);
+  // Una selección visual, un estudio: el mismo texto (ignorando espaciado y puntuación) no se cuenta dos veces.
+  const kept: FinalVisualStudy[] = [];
+  for (const study of catalog ? splitGroupedStudies(inheritAnalyteFromLine(all), catalog) : all) if (!kept.some((other) => sameVisibleText(other.literalText, study.literalText))) kept.push(study);
+  // Con el catálogo, las líneas que son un paquete aprobado se reconstruyen (o quedan pendientes si no se puede sin ambigüedad).
+  return catalog ? collapseExplicitPackages(kept, catalog) : kept;
+}
+
+// Las consultas al resolvedor semántico: un texto por estudio final (como siempre) y, como CONTEXTO, su línea de la receta solo si es inequívoca.
+// Un mismo texto puede leerse en varias líneas («HAI» en «HAI Chagas» y en «HAI Toxo») y la lista final conserva uno solo: la línea se envía
+// únicamente si TODAS las apariciones de ese texto (antes de quitar duplicados) traen línea fiable y es la MISMA. Si no, va sin línea, como antes.
+export function semanticQueriesOf(finals: FinalVisualStudy[], candidates: FinalVisualStudy[]): ShadowQuery[] {
+  const queries: ShadowQuery[] = [];
+  for (const literalText of new Set(finals.map((visual) => visual.literalText))) {
+    const appearances = [...finals, ...candidates].filter((visual) => sameVisibleText(visual.literalText, literalText));
+    const lines = new Set(appearances.map((visual) => (visual.lineText ? lineKeyOf(visual.lineText) : "")));
+    const line = lines.size === 1 && !lines.has("") ? appearances[0]!.lineText : undefined;
+    queries.push(line ? { literalText, lineText: line } : { literalText });
+  }
+  return queries;
+}
+
+// Los estudios visuales antes de reconstruir y quitar duplicados: acordados (con sus dos lecturas) y confirmados por el juez.
+export function visualCandidatesOf(consensus: SimpleConsensus, judgement: SimpleJudgement): FinalVisualStudy[] {
   const pairOf = (study: SimpleStudy) => consensus.agreedPairs?.find((candidate) => candidate.a === study);
   const withLine = <T extends SimpleStudy>(study: T, a?: SimpleStudy, b?: SimpleStudy): T & { lineText?: string; lineVariantMismatch?: boolean } => {
     const lineText = reliableLineText(a, b);
@@ -491,7 +552,7 @@ export function finalVisualStudiesOf(consensus: SimpleConsensus, judgement: Simp
       ...(lineVariantMismatch ? { lineVariantMismatch: true } : {})
     } as T & { lineText?: string; lineVariantMismatch?: boolean };
   };
-  const all = [
+  return [
     ...consensus.agreedStudies.map((study) => {
       const pair = pairOf(study);
       return { ...withLine(study, pair?.a, pair?.b), ...(pair ? { readerPairs: [{ a: pair.a.literalText, b: pair.b.literalText }] } : {}), source: "agreed" as const };
@@ -504,11 +565,6 @@ export function finalVisualStudiesOf(consensus: SimpleConsensus, judgement: Simp
         return { ...withLine(resolved.study, dispute?.readerA.requested, dispute?.readerB.requested), ...seenBy, ...judgeResolvedConfidence(resolved, consensus), source: "judge_confirmed" as const };
       })
   ];
-  // Una selección visual, un estudio: el mismo texto (ignorando espaciado y puntuación) no se cuenta dos veces.
-  const kept: FinalVisualStudy[] = [];
-  for (const study of catalog ? inheritAnalyteFromLine(all) : all) if (!kept.some((other) => sameVisibleText(other.literalText, study.literalText))) kept.push(study);
-  // Con el catálogo, las líneas que son un paquete aprobado se reconstruyen (o quedan pendientes si no se puede sin ambigüedad).
-  return catalog ? collapseExplicitPackages(kept, catalog) : kept;
 }
 
 // Estudios finales cuyo texto es un comienzo truncado de OTRO estudio final ("NITROGENO UREICO" frente a "NITROGENO UREICO/UREA/NUS").
@@ -781,6 +837,7 @@ export function assembleAnalysis(args: {
     reasons,
     finalVisualStudies,
     disputes: consensus.disputes.map((dispute) => ({ key: dispute.key, reason: dispute.reason })),
+    ...(consensus.settled?.length ? { certaintySettled: consensus.settled } : {}),
     judgeResolved: judgement.resolvedStudies.map((resolved) => ({
       key: resolved.key,
       verdict: resolved.verdict,
@@ -855,9 +912,13 @@ export async function analyzeImage(
   const handwrittenShadow = primaryEnabled && handwrittenMode === "shadow";
   const handwrittenAllowed = handwrittenMode === "on";
   const partialEnabled = args.partialAuto ?? partialAutoEnabled();
+  // Condiciones de la foto leídas de sus metadatos (girada, en espejo, poca resolución): solo AVISOS para lectores y juez. La imagen que todos reciben es la
+  // original, sin cambios ni recortes. Sin avisos, las llamadas son exactamente las de siempre (mismo prompt, misma caché).
+  const photo = photoQualityOf(Buffer.from(imageBase64, "base64"));
+  const hints = readingHints(photo);
   const [gemini, openai, documentRead]: [SimpleReading, SimpleReading, { signal: DocumentSignal }] = await Promise.all([
-    deps.readGemini(imageBase64, mimeType),
-    deps.readOpenAI(imageBase64, mimeType),
+    hints.length > 0 ? deps.readGemini(imageBase64, mimeType, undefined, undefined, undefined, hints) : deps.readGemini(imageBase64, mimeType),
+    hints.length > 0 ? deps.readOpenAI(imageBase64, mimeType, undefined, undefined, undefined, hints) : deps.readOpenAI(imageBase64, mimeType),
     deps.readDocument({ imageBase64, mimeType })
   ]);
   const signal = documentRead.signal;
@@ -873,19 +934,25 @@ export async function analyzeImage(
     edgeNotes: signal.integrity.edgeNotes,
     hiddenVerified: signal.integrity.hiddenVerified,
     hiddenNotes: signal.integrity.hiddenNotes,
-    context: signal.context && { lines: signal.context.lines, muestra: signal.context.muestra, tiempo: signal.context.tiempo, conflicts: signal.context.conflicts }
+    context: signal.context && { lines: signal.context.lines, muestra: signal.context.muestra, tiempo: signal.context.tiempo, conflicts: signal.context.conflicts },
+    ...(signal.photo ? { photo: signal.photo } : {})
   };
 
-  const consensus = buildSimpleConsensus(gemini, openai);
+  // Las disputas de pura certeza con el mismo texto en la misma línea se dan por acordadas antes de llamar al juez (settleCertaintyDisputes), pero SOLO si la
+  // señal del documento vio la foto clara (derecha, legible, nítida, buena luz). Con una foto difícil o sin evaluar, esas dudas las sigue mirando el juez.
+  const built = buildSimpleConsensus(gemini, openai);
+  const consensus = signal.photo?.clear ? settleCertaintyDisputes(built) : built;
+  // El juez recibe los avisos de los metadatos y los de lo que la señal VIO en la foto (sin repetir).
+  const judgeHints = [...new Set([...hints, ...photoConditionHints(signal.photo)])];
   const judgement: SimpleJudgement = consensus.hasDisputes
-    ? await deps.judge({ imageBase64, mimeType, gemini, openai, disputes: consensus.disputes })
+    ? await deps.judge({ imageBase64, mimeType, gemini, openai, disputes: consensus.disputes, ...(judgeHints.length > 0 ? { hints: judgeHints } : {}) })
     : { resolvedStudies: [], unresolvedDisputes: [] };
 
   // Ensamblado final. Con el AUTO parcial, si hay zonas que no se ven y estudios que dependen de comprobar que no los afectan, se verifica el
   // impacto (dos lecturas) y se vuelve a ensamblar; si la verificación falta o falla, esos estudios quedan pendientes (nunca se asume lo oculto).
   const finish = async (extra: { primary?: SemanticPrimaryInput; semantic?: SemanticBatchResult }): Promise<AnalysisResult> => {
     const common = { consensus, judgement, catalog, document, ...extra, semanticAuto: autoEnabled, handwrittenShadow, handwrittenAllowed, partialAuto: partialEnabled };
-    const first = assembleAnalysis(common);
+    const first = { ...assembleAnalysis(common), photo };
     const check = first.internal?.document.impactCheck;
     if (!partialEnabled || !check?.needed || check.candidates.length === 0) return first;
     let impact: StudyImpactResult;
@@ -896,17 +963,18 @@ export async function analyzeImage(
     } catch (error) {
       impact = { available: false, unaffected: new Set(), qualifierRisk: true, notes: [`verificación de impacto no disponible: ${error instanceof Error ? error.message : String(error)}`] };
     }
-    return assembleAnalysis({ ...common, impact });
+    return { ...assembleAnalysis({ ...common, impact }), photo };
   };
 
   if (primaryEnabled) {
     // Capa semántica principal: TODOS los estudios visuales finales pasan por GPT (catálogo activo completo, dos pasadas, verificador).
     // Cualquier fallo no autoriza AUTO: el resultado queda con semantic_unavailable y HUMAN_REVIEW.
-    const literalTexts = [...new Set(finalVisualStudiesOf(consensus, judgement, catalog).map((visual) => visual.literalText))];
+    // Cada texto lleva su línea de la receta como contexto solo si es inequívoca (semanticQueriesOf); el resultado se sigue buscando por el texto.
+    const queries = semanticQueriesOf(finalVisualStudiesOf(consensus, judgement, catalog), visualCandidatesOf(consensus, judgement));
     let primary: SemanticPrimaryInput;
     try {
       if (activeCatalog(catalog).length === 0) throw new Error("el catálogo activo está vacío");
-      const batch = await deps.shadowMatch({ queries: literalTexts.map((literalText) => ({ literalText })), catalog, context: signal.context });
+      const batch = await deps.shadowMatch({ queries, catalog, context: signal.context });
       primary = { batch };
     } catch (error) {
       primary = { error: error instanceof Error ? error.message : String(error) };

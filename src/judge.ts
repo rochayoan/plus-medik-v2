@@ -3,11 +3,15 @@ import { z } from "zod";
 import type { SimpleReading } from "./ai.js";
 import { cachedAiCall, usageFromResponses } from "./cache.js";
 import type { SimpleDispute, SimpleStudy } from "./consensus.js";
+import { hintsBlock } from "./photo-quality.js";
 
 const decisionSchema = z.object({
   key: z.string(),
   verdict: z.enum(["confirmed", "rejected", "unresolved"]),
-  reason: z.string()
+  reason: z.string(),
+  // Solo en disputas same_row_different_text: cuál de las DOS transcripciones es exactamente la que se ve. "none" en las demás disputas.
+  // Las decisiones guardadas antes de existir el campo no lo traen: se leen como "none".
+  reader: z.enum(["readerA", "readerB", "none"]).default("none")
 });
 
 // Schema que se le pide al modelo; la respuesta se valida decisión por decisión (ver applyJudgeDecisions).
@@ -47,6 +51,10 @@ Reglas estrictas:
   - rejected: se ve claramente que ese estudio NO fue solicitado (por ejemplo, el texto visible es otro).
   - unresolved: si no es claro visualmente, o la imagen no permite demostrarlo.
 - En "reason" explica brevemente qué se ve en la imagen.
+- "reader": en las disputas con reason "same_row_different_text" los dos lectores leyeron la MISMA línea pero la transcribieron
+  distinto. Si el estudio fue solicitado, responde confirmed y en "reader" indica cuál transcripción coincide EXACTAMENTE con lo
+  que se ve ("readerA" o "readerB"). Si ninguna coincide exactamente, o no se puede distinguir, responde unresolved. No escribas
+  una transcripción propia. En todas las demás disputas, "reader" es "none".
 `;
 
 export async function judgeDisputesWithOpenAI(args: {
@@ -57,6 +65,8 @@ export async function judgeDisputesWithOpenAI(args: {
   disputes: SimpleDispute[];
   model?: string;
   apiKey?: string;
+  // Avisos generales de la foto (girada, en espejo, poca resolución) leídos de sus metadatos: photo-quality.ts. Sin avisos, el prompt es el de siempre.
+  hints?: readonly string[];
 }): Promise<SimpleJudgement> {
   const { imageBase64, mimeType, gemini, openai, disputes } = args;
   if (disputes.length === 0) return { resolvedStudies: [], unresolvedDisputes: [] };
@@ -67,7 +77,7 @@ export async function judgeDisputesWithOpenAI(args: {
 
   const client = new OpenAI({ apiKey });
   const { $schema: _ignored, ...schema } = z.toJSONSchema(decisionsSchema);
-  const promptText = `${judgeInstructions}\nLectura readerA (Gemini):\n${JSON.stringify(gemini)}\n\n` +
+  const promptText = `${judgeInstructions}${hintsBlock(args.hints ?? [])}\nLectura readerA (Gemini):\n${JSON.stringify(gemini)}\n\n` +
     `Lectura readerB (OpenAI):\n${JSON.stringify(openai)}\n\nDisputas a resolver:\n${JSON.stringify(disputes)}`;
   const params = {
     model,
@@ -125,10 +135,18 @@ export function applyJudgeDecisions(disputes: SimpleDispute[], rawDecisions: unk
     const decision = forDispute
       .map((candidate) => decisionSchema.safeParse(candidate))
       .find((parsed) => parsed.success)?.data;
-    // En una transcripción parcial, el estudio que se confirma es la lectura más completa (nunca la truncada).
-    const study = dispute.preferred ?? dispute.readerA.requested ?? dispute.readerB.requested;
+    // En una transcripción parcial, el estudio que se confirma es la lectura más completa (nunca la truncada). En la misma fila con distinta
+    // transcripción, la que el juez dice que se ve (una de las dos: nunca otra).
+    const sameRow = dispute.reason === "same_row_different_text";
+    const chosen = decision?.reader === "readerA" ? dispute.readerA.requested : decision?.reader === "readerB" ? dispute.readerB.requested : undefined;
+    const study = sameRow ? chosen : dispute.preferred ?? dispute.readerA.requested ?? dispute.readerB.requested;
 
-    if (!decision) {
+    if (decision && sameRow && decision.verdict === "confirmed" && !chosen) {
+      unresolvedDisputes.push({ dispute, reason: `El juez confirmó la fila sin indicar cuál de las dos transcripciones se ve. ${decision.reason}` });
+    } else if (decision && sameRow && decision.verdict === "rejected") {
+      // Ninguna de las dos lecturas de la fila fue solicitada: se rechaza la de A como representante (no se cobra nada).
+      resolvedStudies.push({ key: dispute.key, verdict: "rejected", study: dispute.readerA.requested!, reason: decision.reason });
+    } else if (!decision) {
       unresolvedDisputes.push({
         dispute,
         reason: forDispute.length > 0
