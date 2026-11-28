@@ -252,3 +252,16 @@ describe("27-nov: ionograma sérico y hepatitis B a secas", () => {
     expect(result.facts?.some((fact) => fact.text.includes("varios marcadores"))).toBe(true);
   });
 });
+
+describe("27-nov: PCR cualitativa (ya no se hace)", () => {
+  const all = [...CATALOG, study("PROTEINA C REACTIVA (PCR SEMI CUANTITATIVO)", 60), study("PROTEINA C REACTIVA (PCR CUANTITATIVO) (FIA Fluorescencia)", 110), study("LATEX FACTOR REUMATOIDE (CUALITATIVO)", 60), study("ANTIESTREPTOLISINA (ASTO) CUALITATIVA", 45)];
+  const tool4 = quoteStudiesTool({ loadCatalog: async () => all });
+  it("muestra las dos PCR que hay y pregunta cuál; nada ajeno (factor reumatoide, ASTO)", async () => {
+    const result = (await tool4.run({ studies: ["pcr cualitativa"] }, { now: new Date(), patientText: "pcr cualitativa" } as never)) as Result;
+    const blocks = result.blocks!.join(" ");
+    expect(blocks).toContain("PCR SEMI CUANTITATIVO");
+    expect(blocks).toContain("PCR CUANTITATIVO");
+    expect(blocks).not.toMatch(/REUMATOIDE|ASTO/);
+    expect(result.facts?.some((fact) => fact.text.includes("semicuantitativa y la cuantitativa"))).toBe(true);
+  });
+});
